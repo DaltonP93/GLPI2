@@ -1,0 +1,33 @@
+# =====================================================================
+# glpi.conf.example — Reverse proxy / servidor Nginx para GLPI 11 (prod).
+# GLPI 11 se sirve desde public/ con front controller (index.php).
+# Ajustar server_name, TLS y rutas según el despliegue real.
+# =====================================================================
+server {
+    listen 80;
+    server_name glpi.example.local;
+
+    # En producción: redirigir a HTTPS y terminar TLS aquí o en el balanceador.
+    root /var/www/glpi/public;
+    index index.php;
+
+    # Tamaño máximo de subida (alinear con php.ini).
+    client_max_body_size 20M;
+
+    location / {
+        try_files $uri /index.php$is_args$args;
+    }
+
+    location ~ ^/index\.php$ {
+        include fastcgi_params;
+        fastcgi_pass glpi:9000;   # PHP-FPM (ajustar host:puerto)
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param HTTPS $https if_not_empty;
+    }
+
+    # No exponer PHP fuera del front controller.
+    location ~ \.php$ { return 404; }
+
+    # Denegar acceso a directorios sensibles.
+    location ~ ^/(config|files|install|inc|src|vendor)/ { deny all; }
+}

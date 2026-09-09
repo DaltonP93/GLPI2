@@ -1,0 +1,34 @@
+openapi: 3.1.0
+info:
+  title: AI Assistant API
+  version: 0.1.0
+  description: >-
+    Asistente IA (RAG) sobre fuentes autorizadas, con control de acceso (ACL), que cita la fuente interna y escala a una persona cuando no hay evidencia suficiente.
+    Contrato preliminar (Fase 0). Se completará al diseñar el servicio.
+servers:
+  - url: /api/v1
+    description: API propia del servicio
+paths:
+  /health:
+    get:
+      summary: Estado de salud del servicio
+      operationId: getHealth
+      responses:
+        "200":
+          description: Servicio operativo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string, example: ai-assistant }
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      description: OAuth2 con tokens de mínimo privilegio.
+      flows:
+        clientCredentials:
+          tokenUrl: /api/v1/oauth/token
+          scopes: {}
