@@ -21,7 +21,9 @@ fail=0
 
 echo ">> [1] Idioma por defecto = Español (página de login)"
 html="$(curl -fsSL "$BASE_URL/" 2>/dev/null || true)"
-if printf '%s' "$html" | grep -Eiq 'lang="es'; then
+# here-string (sin pipe): evita el falso negativo por 'broken pipe' que provoca
+# grep -q al cerrar el pipe antes de que termine de escribir el productor.
+if grep -Eiq 'lang="es' <<<"$html"; then
   echo "   OK: la interfaz anónima se sirve en español."
 else
   echo "   FALLO: no se detectó 'lang=\"es\"' en la página (idioma por defecto != ES)."
