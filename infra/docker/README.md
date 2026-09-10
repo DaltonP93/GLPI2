@@ -26,7 +26,7 @@ docker compose up -d --build
 ## 4. Instalar GLPI por CLI (español, sin asistente web)
 La consola oficial de GLPI evita el instalador web y es reproducible:
 ```bash
-docker compose exec glpi php bin/console db:install \
+docker compose exec -u www-data glpi php bin/console db:install \
   --db-host=db --db-name="$MARIADB_DATABASE" \
   --db-user="$MARIADB_USER" --db-password="$MARIADB_PASSWORD" \
   --default-language=es_ES --no-interaction
@@ -38,8 +38,8 @@ idioma **Español** y moneda **PYG** (ver `docs/operations/installation.md`).
 
 ## 5. Instalar/activar nuestros plugins (montados, no copiados)
 ```bash
-docker compose exec glpi php bin/console plugin:install --username=glpi companyqr
-docker compose exec glpi php bin/console plugin:activate companyqr
+docker compose exec -u www-data glpi php bin/console plugin:install --username=glpi companyqr
+docker compose exec -u www-data glpi php bin/console plugin:activate companyqr
 ```
 
 ## 6. Zona horaria de MySQL (timezones por usuario)

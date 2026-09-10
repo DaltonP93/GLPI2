@@ -31,7 +31,7 @@ ENV_FILE="$DOCKER_DIR/.env"
 : "${MARIADB_ROOT_PASSWORD:?Definir MARIADB_ROOT_PASSWORD (infra/docker/.env)}"
 
 echo ">> [1/4] Instalando GLPI (idioma por defecto es_ES)..."
-$COMPOSE exec -T glpi php bin/console database:install \
+$COMPOSE exec -T -u www-data glpi php bin/console database:install \
   --db-host=db --db-name="$MARIADB_DATABASE" \
   --db-user="$MARIADB_USER" --db-password="$MARIADB_PASSWORD" \
   --default-language=es_ES --no-interaction
@@ -47,7 +47,7 @@ $COMPOSE exec -T db sh -c \
    \"GRANT SELECT ON mysql.time_zone_name TO '${MARIADB_USER}'@'%'; FLUSH PRIVILEGES;\""
 
 echo ">> [4/4] Habilitando soporte de timezones (database:enable_timezones)..."
-$COMPOSE exec -T glpi php bin/console database:enable_timezones --no-interaction
+$COMPOSE exec -T -u www-data glpi php bin/console database:enable_timezones --no-interaction
 
 echo "OK: GLPI instalado con idioma es_ES y timezones habilitadas de forma reproducible."
 echo "    Zona horaria de instancia (America/Asuncion), formato PYG y SMTP: pasos"

@@ -39,7 +39,7 @@ GLPI_VERSION="$TARGET" $COMPOSE build glpi cron
 GLPI_VERSION="$TARGET" $COMPOSE up -d glpi cron
 
 echo "== [4/6] Migraciones del core =="
-if ! $COMPOSE exec -T glpi php bin/console database:update --no-interaction; then
+if ! $COMPOSE exec -T -u www-data glpi php bin/console database:update --no-interaction; then
   echo "ERROR en migración de core (database:update)."
   echo "Rollback: infra/backup/restore.sh <backup>"; exit 1
 fi
@@ -49,13 +49,13 @@ fail=0
 for p in $REQUIRED_PLUGINS; do
   echo "-- Plugin requerido: $p"
   # Instalar/migrar. Un fallo aquí NO se ignora.
-  if ! $COMPOSE exec -T glpi php bin/console plugin:install --username=glpi "$p"; then
+  if ! $COMPOSE exec -T -u www-data glpi php bin/console plugin:install --username=glpi "$p"; then
     echo "ERROR: fallo instalación/migración del plugin requerido '$p'."
     fail=1
     continue
   fi
   # Activar. Un fallo aquí ES un error, NO un simple aviso.
-  if ! $COMPOSE exec -T glpi php bin/console plugin:activate "$p"; then
+  if ! $COMPOSE exec -T -u www-data glpi php bin/console plugin:activate "$p"; then
     echo "ERROR: fallo activación del plugin requerido '$p' en GLPI $TARGET"
     echo "       (revisar rango de versiones soportadas del plugin)."
     fail=1

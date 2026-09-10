@@ -38,7 +38,7 @@ else
 fi
 
 echo ">> [3] Soporte de timezones habilitado en la base de datos"
-if $COMPOSE exec -T glpi php bin/console database:enable_timezones --no-interaction >/dev/null 2>&1; then
+if $COMPOSE exec -T -u www-data glpi php bin/console database:enable_timezones --no-interaction >/dev/null 2>&1; then
   echo "   OK: database:enable_timezones satisfecho (idempotente)."
 else
   echo "   FALLO: database:enable_timezones no está satisfecho (faltan requisitos)."

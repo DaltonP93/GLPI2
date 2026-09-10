@@ -17,10 +17,10 @@ case "$code" in
 esac
 
 echo ">> [2] Consola de GLPI operativa..."
-$COMPOSE exec -T glpi php bin/console --version >/dev/null && echo "   OK"
+$COMPOSE exec -T -u www-data glpi php bin/console --version >/dev/null && echo "   OK"
 
 echo ">> [3] Listado de plugins (deben aparecer los nuestros)..."
-$COMPOSE exec -T glpi php bin/console plugin:list || {
+$COMPOSE exec -T -u www-data glpi php bin/console plugin:list || {
   echo "   AVISO: no se pudo listar plugins (¿instalación incompleta?)"; }
 
 echo "OK: smoke tests superados."

@@ -15,7 +15,7 @@ La imagen `infra/docker/Dockerfile.glpi` **descarga** el release oficial estable
 
 ## 4. Instalar GLPI (consola, reproducible)
 ```bash
-docker compose exec glpi php bin/console db:install \
+docker compose exec -u www-data glpi php bin/console db:install \
   --db-host=db --db-name=<DB> --db-user=<USER> --db-password=<PASS> \
   --default-language=es_ES --no-interaction
 docker compose exec glpi rm -f /var/www/glpi/install/install.php
@@ -31,8 +31,8 @@ Idioma **Español**, zona horaria `America/Asuncion`, moneda **PYG**, fecha
 
 ## 7. Plugins propios
 ```bash
-docker compose exec glpi php bin/console plugin:install  --username=glpi <plugin>
-docker compose exec glpi php bin/console plugin:activate <plugin>
+docker compose exec -u www-data glpi php bin/console plugin:install  --username=glpi <plugin>
+docker compose exec -u www-data glpi php bin/console plugin:activate <plugin>
 ```
 
 ## 8. Verificación

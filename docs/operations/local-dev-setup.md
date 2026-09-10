@@ -19,8 +19,8 @@ bash infra/docker/glpi-config/install-and-localize.sh
 
 # 4) Instalar/activar el plugin de validación
 cd infra/docker
-docker compose exec glpi php bin/console plugin:install --username=glpi companyqr
-docker compose exec glpi php bin/console plugin:activate companyqr
+docker compose exec -u www-data glpi php bin/console plugin:install --username=glpi companyqr
+docker compose exec -u www-data glpi php bin/console plugin:activate companyqr
 ```
 
 - GLPI: http://localhost:8080  ·  MailHog: http://localhost:8025

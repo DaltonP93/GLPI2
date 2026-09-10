@@ -131,8 +131,8 @@ jobs:
           plugins="companyportal companypurchasing companyworkflow companyqr companydashboard companysignature companyintegrations"
           for p in $plugins; do
             echo "== $p =="
-            docker compose exec -T glpi php bin/console plugin:install --username=glpi "$p"
-            docker compose exec -T glpi php bin/console plugin:activate "$p"
+            docker compose exec -T -u www-data glpi php bin/console plugin:install --username=glpi "$p"
+            docker compose exec -T -u www-data glpi php bin/console plugin:activate "$p"
           done
 
       - name: Smoke tests
