@@ -1,0 +1,96 @@
+# =====================================================================
+# docker-compose.yml — Entorno DEV/STAGING de la Plataforma GLPI Modular
+# ---------------------------------------------------------------------
+# - GLPI oficial estable (build desde Dockerfile.glpi; NO fork).
+# - Base de datos MariaDB SEPARADA con volumen persistente.
+# - Persistencia de archivos, config y marketplace por volúmenes.
+# - Nuestros plugins montados desde ../../plugins (no copiados al core).
+# - Español, America/Asuncion, correo (MailHog), cron y logs.
+# - Secretos por .env (ignorado por Git). Copiar de .env.example.
+# =====================================================================
+name: glpi-platform
+
+x-glpi-build: &glpi-build
+  build:
+    context: .
+    dockerfile: Dockerfile.glpi
+    args:
+      GLPI_VERSION: ${GLPI_VERSION:-11.0.8}
+  image: glpi-platform/glpi:${GLPI_VERSION:-11.0.8}
+
+x-glpi-volumes: &glpi-volumes
+  - ../../plugins:/var/www/glpi/plugins:rw
+  - glpi_config:/var/www/glpi/config
+  - glpi_files:/var/www/glpi/files
+  - glpi_marketplace:/var/www/glpi/marketplace
+
+services:
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${MARIADB_DATABASE:-glpi}
+      MARIADB_USER: ${MARIADB_USER:-glpi}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:?Definir MARIADB_PASSWORD en .env}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Definir MARIADB_ROOT_PASSWORD en .env}
+      TZ: ${TZ:-America/Asuncion}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --innodb-buffer-pool-size=256M
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  glpi:
+    <<: *glpi-build
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-America/Asuncion}
+      PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-256M}
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@glpi.local}
+    volumes: *glpi-volumes
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+
+  # Cron de GLPI en un contenedor aparte, compartiendo la instalación.
+  # Usa el ENTRYPOINT de la imagen (prepara directorios y genera /etc/msmtprc)
+  # y luego ejecuta el bucle de cron; así el cron también envía correo a MailHog.
+  cron:
+    <<: *glpi-build
+    restart: unless-stopped
+    depends_on:
+      - glpi
+    environment:
+      TZ: ${TZ:-America/Asuncion}
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@glpi.local}
+    volumes: *glpi-volumes
+    command:
+      - "sh"
+      - "-c"
+      - 'while true; do php /var/www/glpi/front/cron.php >/proc/1/fd/1 2>&1 || true; sleep ${GLPI_CRON_INTERVAL:-60}; done'
+
+  # Captura de correo saliente para DEV (no usar en producción).
+  # Imagen fijada (evitar :latest) — ver docs/operations/docker-image-pinning.md.
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    restart: unless-stopped
+    ports:
+      - "${MAILHOG_UI_PORT:-8025}:8025"
+
+volumes:
+  db_data:
+  glpi_config:
+  glpi_files:
+  glpi_marketplace:

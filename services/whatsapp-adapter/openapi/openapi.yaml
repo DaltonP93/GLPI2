@@ -1,0 +1,34 @@
+openapi: 3.1.0
+info:
+  title: WhatsApp Adapter API
+  version: 0.1.0
+  description: >-
+    Adaptador del canal WhatsApp: convierte conversaciones en usuarios/tickets vía API con proveedor intercambiable. WhatsApp es un canal, no una fuente de verdad.
+    Contrato preliminar (Fase 0). Se completará al diseñar el servicio.
+servers:
+  - url: /api/v1
+    description: API propia del servicio
+paths:
+  /health:
+    get:
+      summary: Estado de salud del servicio
+      operationId: getHealth
+      responses:
+        "200":
+          description: Servicio operativo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string, example: whatsapp-adapter }
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      description: OAuth2 con tokens de mínimo privilegio.
+      flows:
+        clientCredentials:
+          tokenUrl: /api/v1/oauth/token
+          scopes: {}

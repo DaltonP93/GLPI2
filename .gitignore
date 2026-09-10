@@ -1,0 +1,45 @@
+# ---- Secretos y entorno (NUNCA versionar) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+!infra/nginx/*.example
+secrets/
+*.secret
+
+# ---- Runtime / datos de GLPI (upstream, no versionar) ----
+# GLPI se descarga como dependencia oficial; no vive en este repo.
+glpi/
+!glpi/.gitkeep
+files/
+marketplace/
+/config/
+*.sql
+*.sql.gz
+backups/
+_backups/
+
+# ---- Dependencias ----
+vendor/
+node_modules/
+composer.lock
+package-lock.json
+
+# ---- Logs / temporales ----
+*.log
+logs/
+tmp/
+.cache/
+
+# ---- Docker volúmenes locales ----
+infra/docker/data/
+infra/docker/volumes/
+
+# ---- IDE / SO ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

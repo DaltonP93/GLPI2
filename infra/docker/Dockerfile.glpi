@@ -1,0 +1,62 @@
+# =====================================================================
+# Dockerfile.glpi — Empaqueta GLPI OFICIAL como dependencia upstream.
+# ---------------------------------------------------------------------
+# IMPORTANTE (Regla 0):
+#   - GLPI se DESCARGA desde el release oficial estable. No es un fork ni
+#     se copia su código a este repositorio.
+#   - Nuestros plugins se MONTAN como volumen (docker-compose), no se
+#     hornean dentro del árbol del core.
+#   - No se modifica ningún archivo de src/, front/, ajax/, templates/,
+#     vendor/ ni migraciones del core.
+# =====================================================================
+ARG PHP_VERSION=8.3
+FROM php:${PHP_VERSION}-apache
+
+ARG GLPI_VERSION=11.0.8
+ENV GLPI_VERSION=${GLPI_VERSION}
+
+# --- Dependencias del sistema para las extensiones PHP requeridas por GLPI ---
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        libicu-dev libzip-dev libpng-dev libjpeg62-turbo-dev libfreetype6-dev \
+        libxml2-dev libbz2-dev libldap2-dev \
+        curl ca-certificates msmtp; \
+    docker-php-ext-configure gd --with-freetype --with-jpeg; \
+    docker-php-ext-configure ldap --with-libdir=lib/$(uname -m)-linux-gnu; \
+    docker-php-ext-install -j"$(nproc)" \
+        bcmath mysqli gd intl zip bz2 exif opcache ldap; \
+    a2enmod rewrite headers; \
+    rm -rf /var/lib/apt/lists/*
+
+# --- Descargar el release OFICIAL estable (tarball con dependencias incluidas) ---
+# El .tgz oficial extrae el directorio "glpi/".
+# Hardening (recomendado en STAGING/PROD): pasar --build-arg GLPI_SHA256=<hash>
+# para verificar la integridad del artefacto descargado. Ver
+# docs/operations/docker-image-pinning.md.
+ARG GLPI_SHA256=""
+RUN set -eux; \
+    cd /var/www; \
+    curl -fSL "https://github.com/glpi-project/glpi/releases/download/${GLPI_VERSION}/glpi-${GLPI_VERSION}.tgz" -o /tmp/glpi.tgz; \
+    if [ -n "${GLPI_SHA256}" ]; then \
+        echo "${GLPI_SHA256}  /tmp/glpi.tgz" | sha256sum -c -; \
+    else \
+        echo "AVISO: GLPI_SHA256 no provisto; se omite verificación de integridad del tarball (obligatoria en STAGING/PROD)."; \
+    fi; \
+    tar -xzf /tmp/glpi.tgz -C /var/www; \
+    rm -f /tmp/glpi.tgz; \
+    chown -R www-data:www-data /var/www/glpi
+
+# --- GLPI 11 sirve desde public/ ---
+COPY apache-glpi.conf /etc/apache2/sites-available/000-default.conf
+COPY php/glpi.ini /usr/local/etc/php/conf.d/zz-glpi.ini
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+WORKDIR /var/www/glpi
+EXPOSE 80
+
+# El entrypoint sólo asegura permisos/directorios escribibles (files/_*).
+# NO toca el código del core.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["apache2-foreground"]
