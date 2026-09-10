@@ -25,7 +25,7 @@ RUN set -eux; \
     docker-php-ext-configure gd --with-freetype --with-jpeg; \
     docker-php-ext-configure ldap --with-libdir=lib/$(uname -m)-linux-gnu; \
     docker-php-ext-install -j"$(nproc)" \
-        mysqli gd intl zip bz2 exif opcache ldap; \
+        bcmath mysqli gd intl zip bz2 exif opcache ldap; \
     a2enmod rewrite headers; \
     rm -rf /var/lib/apt/lists/*
 
