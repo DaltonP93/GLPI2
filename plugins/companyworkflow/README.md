@@ -4,7 +4,7 @@ Plugin propio de la **Plataforma GLPI Modular**.
 
 - **Estrategia (matriz):** Build/Extend
 - **Propósito:** Motor configurable de estados y transiciones (delegacion, escalamiento) reutilizable por otros modulos.
-- **GLPI soportado:** 11.0 – 12.0 (probado en 11.0.8)
+- **GLPI soportado:** `>=11.0` y `<12.0` (el `max=12.0` es límite superior **excluyente**; probado en 11.0.8; GLPI 12 no soportado hasta suite de regresión — ver `../../docs/architecture/glpi-version-compatibility.md`)
 - **Estado:** Fase 0 — esqueleto (sin lógica de negocio)
 
 ## Regla 0

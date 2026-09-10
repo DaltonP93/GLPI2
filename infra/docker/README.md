@@ -38,8 +38,8 @@ idioma **Español** y moneda **PYG** (ver `docs/operations/installation.md`).
 
 ## 5. Instalar/activar nuestros plugins (montados, no copiados)
 ```bash
-docker compose exec glpi php bin/console glpi:plugin:install --username=glpi companyqr
-docker compose exec glpi php bin/console glpi:plugin:activate companyqr
+docker compose exec glpi php bin/console plugin:install --username=glpi companyqr
+docker compose exec glpi php bin/console plugin:activate companyqr
 ```
 
 ## 6. Zona horaria de MySQL (timezones por usuario)

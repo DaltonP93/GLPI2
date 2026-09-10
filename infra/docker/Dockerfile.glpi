@@ -21,7 +21,7 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
         libicu-dev libzip-dev libpng-dev libjpeg62-turbo-dev libfreetype6-dev \
         libxml2-dev libbz2-dev libldap2-dev \
-        curl ca-certificates; \
+        curl ca-certificates msmtp; \
     docker-php-ext-configure gd --with-freetype --with-jpeg; \
     docker-php-ext-configure ldap --with-libdir=lib/$(uname -m)-linux-gnu; \
     docker-php-ext-install -j"$(nproc)" \
@@ -31,9 +31,18 @@ RUN set -eux; \
 
 # --- Descargar el release OFICIAL estable (tarball con dependencias incluidas) ---
 # El .tgz oficial extrae el directorio "glpi/".
+# Hardening (recomendado en STAGING/PROD): pasar --build-arg GLPI_SHA256=<hash>
+# para verificar la integridad del artefacto descargado. Ver
+# docs/operations/docker-image-pinning.md.
+ARG GLPI_SHA256=""
 RUN set -eux; \
     cd /var/www; \
     curl -fSL "https://github.com/glpi-project/glpi/releases/download/${GLPI_VERSION}/glpi-${GLPI_VERSION}.tgz" -o /tmp/glpi.tgz; \
+    if [ -n "${GLPI_SHA256}" ]; then \
+        echo "${GLPI_SHA256}  /tmp/glpi.tgz" | sha256sum -c -; \
+    else \
+        echo "AVISO: GLPI_SHA256 no provisto; se omite verificación de integridad del tarball (obligatoria en STAGING/PROD)."; \
+    fi; \
     tar -xzf /tmp/glpi.tgz -C /var/www; \
     rm -f /tmp/glpi.tgz; \
     chown -R www-data:www-data /var/www/glpi

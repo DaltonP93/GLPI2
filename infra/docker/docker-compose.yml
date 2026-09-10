@@ -55,11 +55,16 @@ services:
     environment:
       TZ: ${TZ:-America/Asuncion}
       PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-256M}
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@glpi.local}
     volumes: *glpi-volumes
     ports:
       - "${HTTP_PORT:-8080}:80"
 
   # Cron de GLPI en un contenedor aparte, compartiendo la instalación.
+  # Usa el ENTRYPOINT de la imagen (prepara directorios y genera /etc/msmtprc)
+  # y luego ejecuta el bucle de cron; así el cron también envía correo a MailHog.
   cron:
     <<: *glpi-build
     restart: unless-stopped
@@ -67,14 +72,19 @@ services:
       - glpi
     environment:
       TZ: ${TZ:-America/Asuncion}
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@glpi.local}
     volumes: *glpi-volumes
-    entrypoint: ["/bin/sh", "-c"]
     command:
+      - "sh"
+      - "-c"
       - 'while true; do php /var/www/glpi/front/cron.php >/proc/1/fd/1 2>&1 || true; sleep ${GLPI_CRON_INTERVAL:-60}; done'
 
   # Captura de correo saliente para DEV (no usar en producción).
+  # Imagen fijada (evitar :latest) — ver docs/operations/docker-image-pinning.md.
   mailhog:
-    image: mailhog/mailhog:latest
+    image: mailhog/mailhog:v1.0.1
     restart: unless-stopped
     ports:
       - "${MAILHOG_UI_PORT:-8025}:8025"

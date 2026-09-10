@@ -12,29 +12,32 @@ cp .env.example .env          # definir MARIADB_PASSWORD y MARIADB_ROOT_PASSWORD
 # 2) Levantar el stack (descarga GLPI 11.0.8 oficial y monta plugins)
 docker compose up -d --build
 
-# 3) Instalar GLPI por consola (español)
-docker compose exec glpi php bin/console db:install \
-  --db-host=db --db-name="$MARIADB_DATABASE" \
-  --db-user="$MARIADB_USER" --db-password="$MARIADB_PASSWORD" \
-  --default-language=es_ES --no-interaction
-docker compose exec glpi rm -f /var/www/glpi/install/install.php
+# 3) Instalar GLPI + localización de forma REPRODUCIBLE (idioma es_ES,
+#    tablas de husos y database:enable_timezones). Comandos oficiales GLPI 11.
+cd ../..                      # volver a la raíz del repo
+bash infra/docker/glpi-config/install-and-localize.sh
 
 # 4) Instalar/activar el plugin de validación
-docker compose exec glpi php bin/console glpi:plugin:install --username=glpi companyqr
-docker compose exec glpi php bin/console glpi:plugin:activate companyqr
+cd infra/docker
+docker compose exec glpi php bin/console plugin:install --username=glpi companyqr
+docker compose exec glpi php bin/console plugin:activate companyqr
 ```
 
 - GLPI: http://localhost:8080  ·  MailHog: http://localhost:8025
 
-## Configuración post-instalación
-En **Configuración → General**: idioma **Español**, zona horaria
-`America/Asuncion`, moneda **PYG**. Cargar tablas de husos en MariaDB (ver
-`../../infra/docker/README.md`, paso 6).
+## Configuración post-instalación (pasos administrativos)
+Parte de la localización y el correo se configuran en la interfaz de admin
+(GLPI 11 no ofrece comando de consola para ello):
+- **Localización:** zona horaria de instancia `America/Asuncion` y formato numérico
+  PYG → ver `localization.md` (qué es global vs preferencia por usuario).
+- **Correo (DEV):** habilitar seguimientos por correo hacia MailHog → ver `email-dev.md`.
 
-## Verificación
+## Verificación (fail-closed)
 ```bash
-tests/smoke/run-smoke.sh            # smoke tests
-tests/upgrade/verify-core-untouched.sh   # el core no está versionado
+bash tests/smoke/run-smoke.sh                  # smoke tests
+bash tests/upgrade/verify-core-untouched.sh    # el core no está versionado
+bash tests/localization/verify-localization.sh # idioma es, tz, timezones
+bash tests/mail/verify-mail.sh                 # transporte GLPI -> MailHog
 ```
 
 ## Notas para quien está aprendiendo

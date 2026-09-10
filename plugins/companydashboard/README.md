@@ -4,7 +4,7 @@ Plugin propio de la **Plataforma GLPI Modular**.
 
 - **Estrategia (matriz):** Configure + Build
 - **Propósito:** KPIs y widgets ejecutivos que complementan los dashboards nativos de GLPI 11.
-- **GLPI soportado:** 11.0 – 12.0 (probado en 11.0.8)
+- **GLPI soportado:** `>=11.0` y `<12.0` (el `max=12.0` es límite superior **excluyente**; probado en 11.0.8; GLPI 12 no soportado hasta suite de regresión — ver `../../docs/architecture/glpi-version-compatibility.md`)
 - **Estado:** Fase 0 — esqueleto (sin lógica de negocio)
 
 ## Regla 0

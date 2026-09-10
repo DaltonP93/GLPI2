@@ -68,7 +68,9 @@ render > "$DIR/setup.php" <<'TPL'
 
 define('PLUGIN_${KEYUPPER}_VERSION', '0.1.0');
 
-// Rango de versiones de GLPI soportadas (obligatorio por CLAUDE.md).
+// Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
+// max='12.0' => GLPI 11.x soportado; 12.x NO hasta pasar la suite de regresion.
+// Ver docs/architecture/glpi-version-compatibility.md
 define('PLUGIN_${KEYUPPER}_GLPI_MIN_VERSION', '11.0');
 define('PLUGIN_${KEYUPPER}_GLPI_MAX_VERSION', '12.0');
 
@@ -177,7 +179,7 @@ Plugin propio de la **Plataforma GLPI Modular**.
 
 - **Estrategia (matriz):** ${STRATEGY}
 - **Propósito:** ${DESC}
-- **GLPI soportado:** 11.0 – 12.0 (probado en 11.0.8)
+- **GLPI soportado:** `>=11.0` y `<12.0` (el `max=12.0` es límite superior **excluyente**; probado en 11.0.8; GLPI 12 no soportado hasta suite de regresión — ver `../../docs/architecture/glpi-version-compatibility.md`)
 - **Estado:** Fase 0 — esqueleto (sin lógica de negocio)
 
 ## Regla 0

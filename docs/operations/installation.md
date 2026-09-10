@@ -31,8 +31,8 @@ Idioma **Español**, zona horaria `America/Asuncion`, moneda **PYG**, fecha
 
 ## 7. Plugins propios
 ```bash
-docker compose exec glpi php bin/console glpi:plugin:install  --username=glpi <plugin>
-docker compose exec glpi php bin/console glpi:plugin:activate <plugin>
+docker compose exec glpi php bin/console plugin:install  --username=glpi <plugin>
+docker compose exec glpi php bin/console plugin:activate <plugin>
 ```
 
 ## 8. Verificación

@@ -16,7 +16,9 @@
 
 define('PLUGIN_COMPANYQR_VERSION', '0.1.0');
 
-// Rango de versiones de GLPI soportadas (obligatorio por CLAUDE.md).
+// Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
+// max='12.0' => GLPI 11.x soportado; 12.x NO hasta pasar la suite de regresion.
+// Ver docs/architecture/glpi-version-compatibility.md
 define('PLUGIN_COMPANYQR_GLPI_MIN_VERSION', '11.0');
 define('PLUGIN_COMPANYQR_GLPI_MAX_VERSION', '12.0');
 

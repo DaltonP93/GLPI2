@@ -1,0 +1,155 @@
+name: CI
+
+# CI para Pull Requests (y ramas de trabajo). NO realiza ningún despliegue.
+on:
+  pull_request:
+  push:
+    branches:
+      - "claude/**"
+      - "main"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ------------------------------------------------------------------
+  # Checks estáticos (rápidos, sin levantar el stack)
+  # ------------------------------------------------------------------
+  static-checks:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+
+      - name: PHP lint (plugins)
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r f; do
+            found=1
+            php -l "$f"
+          done < <(git ls-files 'plugins/**/*.php')
+          [ "$found" -eq 1 ] || { echo "No se encontraron PHP de plugins"; exit 1; }
+
+      - name: Shell syntax (bash -n)
+        run: |
+          set -euo pipefail
+          while IFS= read -r f; do
+            echo "checking $f"
+            bash -n "$f"
+          done < <(git ls-files '*.sh')
+
+      - name: YAML validation
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml
+          python3 - <<'PY'
+          import glob, sys, yaml
+          files = []
+          for pat in ("**/*.yml", "**/*.yaml",
+                      ".github/workflows/*.yml", ".github/workflows/*.yaml"):
+              files += glob.glob(pat, recursive=True)
+          bad = 0
+          for f in sorted(set(files)):
+              try:
+                  with open(f) as fh:
+                      list(yaml.safe_load_all(fh))
+                  print("OK", f)
+              except Exception as e:
+                  print("FALLO", f, e); bad += 1
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Docker Compose config validation
+        run: |
+          set -euo pipefail
+          cp infra/docker/.env.example infra/docker/.env
+          sed -i 's/^MARIADB_PASSWORD=.*/MARIADB_PASSWORD=ci_pw_user/' infra/docker/.env
+          sed -i 's/^MARIADB_ROOT_PASSWORD=.*/MARIADB_ROOT_PASSWORD=ci_pw_root/' infra/docker/.env
+          docker compose -f infra/docker/docker-compose.yml config >/dev/null
+          rm -f infra/docker/.env
+          echo "compose config OK"
+
+      - name: Regla 0 — core no versionado
+        run: bash tests/upgrade/verify-core-untouched.sh
+
+      - name: Chequeo básico de secretos
+        run: bash tests/security/secret-scan.sh
+
+  # ------------------------------------------------------------------
+  # Integración: levanta el stack, instala GLPI (ES) y corre pruebas
+  # ------------------------------------------------------------------
+  integration:
+    name: Integration (stack + smoke)
+    runs-on: ubuntu-latest
+    needs: static-checks
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preparar .env (valores efímeros de CI, no secretos)
+        working-directory: infra/docker
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          sed -i 's/^MARIADB_PASSWORD=.*/MARIADB_PASSWORD=glpi_ci_pw/' .env
+          sed -i 's/^MARIADB_ROOT_PASSWORD=.*/MARIADB_ROOT_PASSWORD=root_ci_pw/' .env
+
+      - name: Build + up
+        working-directory: infra/docker
+        run: |
+          set -euo pipefail
+          docker compose up -d --build
+
+      - name: Esperar a que GLPI (Apache/PHP) esté listo
+        working-directory: infra/docker
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if docker compose exec -T glpi php -v >/dev/null 2>&1; then
+              echo "GLPI container listo"; exit 0
+            fi
+            sleep 5
+          done
+          echo "Timeout esperando al contenedor glpi"; docker compose ps; exit 1
+
+      - name: Instalar GLPI + localización (reproducible)
+        run: bash infra/docker/glpi-config/install-and-localize.sh
+
+      - name: Instalar y activar plugins requeridos (FAIL-CLOSED)
+        working-directory: infra/docker
+        run: |
+          set -euo pipefail
+          plugins="companyportal companypurchasing companyworkflow companyqr companydashboard companysignature companyintegrations"
+          for p in $plugins; do
+            echo "== $p =="
+            docker compose exec -T glpi php bin/console plugin:install --username=glpi "$p"
+            docker compose exec -T glpi php bin/console plugin:activate "$p"
+          done
+
+      - name: Smoke tests
+        run: bash tests/smoke/run-smoke.sh
+
+      - name: Verificar localización (fail-closed)
+        run: bash tests/localization/verify-localization.sh
+
+      - name: Verificar correo -> MailHog (fail-closed)
+        run: bash tests/mail/verify-mail.sh
+
+      - name: Logs del stack (si algo falló)
+        if: failure()
+        working-directory: infra/docker
+        run: docker compose logs --no-color | tail -n 300
+
+      - name: Bajar el stack
+        if: always()
+        working-directory: infra/docker
+        run: docker compose down -v
