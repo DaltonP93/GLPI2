@@ -43,11 +43,22 @@ Principio rector: **el QR identifica; GLPI autoriza.** Ver `../adr/ADR-0011-comp
 
 ## Reporte de problema → ticket vinculado al activo
 - Crea un `Ticket` y lo **vincula al activo** con `Item_Ticket` (vía `TicketCreator`).
+- **Invariante fail-closed:** *un ticket por QR sin activo vinculado = operación fallida*.
+  Si `Item_Ticket::add()` falla, el ticket recién creado se **revierte** (compensación) y
+  la operación devuelve error; nunca se reporta "éxito" con un ticket huérfano.
 - Categoría, urgencia y entidad **por configuración** (sin hardcode); canal/origen = `QR`.
-- **Autenticado:** solicitante = usuario en sesión.
-- **Anónimo (si habilitado):** creación `callAsSystem` + **rate limiting + anti-bot Altcha
-  (ambos, no uno u otro)**; datos de contacto opcionales.
-- Motor del formulario: **Forms nativo si el spike gate lo confirma**; si no, formulario
+- **Autenticado:** solicitante = usuario en sesión (URL de acción **absoluta**, generada por
+  el controlador; CSRF nativo).
+- **Anónimo:** **experimental y OFF por defecto** (`anonymous_enabled=0`). El servidor exige
+  **Altcha (verificación de instancia `AltchaManager::getInstance()->verifySolution()` +
+  `removeChallenge()` anti-replay)** y **rate limiting por actor** (bucket
+  `HMAC(ip|token)` sólo en cache, sin persistir IP). El **widget** Altcha en la ficha pública
+  queda **diferido a un follow-up** (requiere el pipeline de assets de GLPI); hasta entonces
+  el reporte se hace por el **flujo autenticado** y el modo anónimo se documenta como **no
+  soportado en v1**.
+- **Comportamiento sin backend de cache:** el rate limit hace *fail-open* (documentado); el
+  anti-bot primario (Altcha) sigue siendo obligatorio.
+- Motor del formulario: **Forms nativo si el gate runtime lo confirma**; si no, formulario
   mínimo propio (ver `../architecture/companyqr-forms-spike.md`).
 
 ## Ciclo de vida del token / código

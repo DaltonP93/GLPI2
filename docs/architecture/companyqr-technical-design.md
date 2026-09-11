@@ -166,13 +166,19 @@ acciones de gestión; CSRF en acciones autenticadas; Altcha + rate limit en anó
   - Anónimo OFF (default): `/public/{token}` → 404/redirect (sin fuga).
   - Anónimo ON: `/public/{token}` → sólo subset mínimo (assert sin campos prohibidos).
   - Reporte → ticket creado y **vinculado al activo** (`Item_Ticket`), categoría/urgencia
-    por config.
-  - Anónimo: rate limit **y** Altcha (ambos).
+    por config; **fail-closed** (si el vínculo falla, se revierte el ticket).
+  - **🔒 ACL en mutaciones:** usuario de la entidad A con `code_id` de un activo de la
+    entidad B → `rotate`/`revoke` **denegados** (`canMutateCode`), token sin cambios.
+  - **Altcha** (integración): payload vacío/ilegible → rechazado; verificación de instancia
+    + `removeChallenge` anti-replay. Modo anónimo experimental/OFF (widget diferido).
+  - **E2E HTTP real** (`tests/e2e/companyqr-http.sh`): login → `GET /scan/{token}` →
+    **la acción del form es absoluta y correcta** → `POST .../report` → ticket vinculado.
   - Ciclo de vida: rotar invalida token viejo y valida el nuevo; revocar → "no disponible";
     purga → revocado + historial retenido.
   - i18n ES/EN (catálogos cargan).
-  - **Etiqueta real:** el plugin genera un **PDF 70,75×24 mm** con QR+código+tipo; CI lo
-    **sube como artefacto** (evidencia). Sin campos prohibidos.
+  - **Etiqueta real:** el plugin genera un **PDF 70,75×24 mm** con QR+código+tipo y una
+    **previsualización PNG** (GD); CI **sube ambos como artefacto** (evidencia visual). Sin
+    campos prohibidos.
 - **ACL:** la matriz de la sección "Matriz de ACL" se verifica caso por caso; las dos
   pruebas marcadas 🔒 son **obligatorias** y fail-closed.
 - **CI:** los unitarios corren en el job estático (`php plugins/companyqr/tests/unit/run.php`);

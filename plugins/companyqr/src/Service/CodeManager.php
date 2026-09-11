@@ -44,19 +44,30 @@ final class CodeManager
 
     public function createForItem(CommonDBTM $item): Code
     {
-        $code = new Code();
-        $id = (int) $code->add([
-            'itemtype'          => $item->getType(),
-            'items_id'          => $item->getID(),
-            'entities_id'       => (int) ($item->fields['entities_id'] ?? 0),
-            'is_recursive'      => (int) ($item->fields['is_recursive'] ?? 0),
-            'token'             => $this->uniqueToken(),
-            'public_code'       => $this->resolvePublicCode($item),
-            'status'            => Code::STATUS_ACTIVE,
-            'users_id_creation' => (int) (Session::getLoginUserID() ?: 0),
-        ]);
-        $code->getFromDB($id);
-        return $code;
+        // El índice UNIQUE (token, public_code) es la garantía final ante concurrencia;
+        // aquí manejamos la colisión reintentando con valores frescos y NUNCA devolvemos
+        // un Code inválido si add() falla.
+        $lastError = 'add() devolvió 0';
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $code = new Code();
+            $id = (int) $code->add([
+                'itemtype'          => $item->getType(),
+                'items_id'          => $item->getID(),
+                'entities_id'       => (int) ($item->fields['entities_id'] ?? 0),
+                'is_recursive'      => (int) ($item->fields['is_recursive'] ?? 0),
+                'token'             => $this->uniqueToken(),
+                'public_code'       => $this->resolvePublicCode($item),
+                'status'            => Code::STATUS_ACTIVE,
+                'users_id_creation' => (int) (Session::getLoginUserID() ?: 0),
+            ]);
+            if ($id > 0 && $code->getFromDB($id)) {
+                return $code;
+            }
+            // Colisión (p. ej. dos procesos con la misma secuencia) -> reintentar.
+        }
+        throw new \RuntimeException(
+            'companyqr: no se pudo crear el código tras varios reintentos (' . $lastError . ')'
+        );
     }
 
     /** Rotación: nuevo token; el anterior deja de resolver de inmediato. */

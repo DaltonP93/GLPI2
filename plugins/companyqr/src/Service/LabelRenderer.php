@@ -86,6 +86,60 @@ final class LabelRenderer
         return $pdf->Output('label.pdf', 'S');
     }
 
+    /**
+     * Previsualización PNG de la etiqueta (GD), para revisión visual.
+     * Reutiliza QrRenderer (tc-lib-barcode) para el QR.
+     *
+     * @param array{public_code:string, type:string, qr_data:string, header?:string, org?:?string, bg?:string} $label
+     * @return string PNG binario
+     */
+    public function png(array $label): string
+    {
+        [$w, $h] = PluginConfig::labelSizeMm();
+        $scale = 12;                     // px por mm
+        $W = (int) round($w * $scale);
+        $H = (int) round($h * $scale);
+        $margin = (int) round(1.5 * $scale);
+
+        $img = imagecreatetruecolor($W, $H);
+        $bg = self::hexToRgb((string) ($label['bg'] ?? PluginConfig::get('label_bg', '#f7e300')));
+        imagefilledrectangle($img, 0, 0, $W, $H, imagecolorallocate($img, $bg[0], $bg[1], $bg[2]));
+
+        $ink    = imagecolorallocate($img, 20, 20, 20);
+        $header = imagecolorallocate($img, 91, 81, 0);
+        $sub    = imagecolorallocate($img, 45, 45, 45);
+
+        // QR (cuadrado a la izquierda).
+        $qrSide = $H - 2 * $margin;
+        $qrPng = (new QrRenderer())->png((string) $label['qr_data'], 4);
+        $qr = @imagecreatefromstring($qrPng);
+        if ($qr !== false) {
+            imagecopyresampled($img, $qr, $margin, $margin, 0, 0, $qrSide, $qrSide, imagesx($qr), imagesy($qr));
+            imagedestroy($qr);
+        }
+
+        // Texto a la derecha del QR.
+        $tx = $margin + $qrSide + (int) round(2 * $scale);
+        imagestring($img, 3, $tx, $margin, (string) ($label['header'] ?? 'TI - ACTIVOS'), $header);
+        // Código: font 5 duplicado a 2x para destacarlo.
+        $code = (string) $label['public_code'];
+        $tmpW = imagefontwidth(5) * max(1, strlen($code));
+        $tmpH = imagefontheight(5);
+        $tmp = imagecreatetruecolor($tmpW, $tmpH);
+        imagefilledrectangle($tmp, 0, 0, $tmpW, $tmpH, imagecolorallocate($tmp, $bg[0], $bg[1], $bg[2]));
+        imagestring($tmp, 5, 0, 0, $code, imagecolorallocate($tmp, 20, 20, 20));
+        imagecopyresampled($img, $tmp, $tx, $margin + 18, 0, 0, $tmpW * 2, $tmpH * 2, $tmpW, $tmpH);
+        imagedestroy($tmp);
+        // Tipo.
+        imagestring($img, 4, $tx, $margin + 18 + $tmpH * 2 + 4, mb_strtoupper((string) $label['type']), $sub);
+
+        ob_start();
+        imagepng($img);
+        $data = (string) ob_get_clean();
+        imagedestroy($img);
+        return $data;
+    }
+
     /** Convierte "#rrggbb" en [r,g,b]. */
     public static function hexToRgb(string $hex): array
     {

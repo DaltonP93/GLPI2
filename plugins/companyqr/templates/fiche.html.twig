@@ -37,18 +37,24 @@
         {% if view.status is defined %}<div class="row"><span class="k">{{ __('Status') }}</span><span class="v">{{ view.status }}</span></div>{% endif %}
         {% if view.location is defined %}<div class="row"><span class="k">{{ __('Location') }}</span><span class="v">{{ view.location }}</span></div>{% endif %}
         {% if view.entity is defined %}<div class="row"><span class="k">{{ __('Entity') }}</span><span class="v">{{ view.entity }}</span></div>{% endif %}
-      {% endif %}
 
-      <form method="post"
-            action="{{ (anonymous ? 'public' : 'scan') }}/{{ token|url_encode }}/report">
-        <label>{{ __('Describe the problem', 'companyqr') }}
-          <textarea name="content" rows="3" required></textarea>
-        </label>
-        {% if not anonymous and csrf is defined and csrf %}
-          <input type="hidden" name="_glpi_csrf_token" value="{{ csrf }}">
-        {% endif %}
-        <button class="btn" type="submit">{{ __('Report a problem', 'companyqr') }}</button>
-      </form>
+        {# Acción ABSOLUTA provista por el controlador (no se construye URL relativa en Twig). #}
+        <form method="post" action="{{ report_action }}">
+          <label>{{ __('Describe the problem', 'companyqr') }}
+            <textarea name="content" rows="3" required></textarea>
+          </label>
+          {% if csrf is defined and csrf %}
+            <input type="hidden" name="_glpi_csrf_token" value="{{ csrf }}">
+          {% endif %}
+          <button class="btn" type="submit">{{ __('Report a problem', 'companyqr') }}</button>
+        </form>
+      {% else %}
+        {# Modo anónimo: subset mínimo. El reporte anónimo (widget Altcha) queda diferido
+           a un follow-up; el reporte se hace por el flujo autenticado. #}
+        <div class="muted" style="color:#6b7280;font-size:12px;margin-top:10px">
+          {{ __('To report a problem, please sign in.', 'companyqr') }}
+        </div>
+      {% endif %}
     {% elseif result == 'login_required' %}
       <div class="msg">{{ __('Authentication required.', 'companyqr') }}</div>
     {% elseif result == 'revoked' %}

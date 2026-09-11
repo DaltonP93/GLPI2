@@ -36,9 +36,13 @@ use GlpiPlugin\Companyqr\Controller\ScanController;
 use GlpiPlugin\Companyqr\Model\Code;
 use GlpiPlugin\Companyqr\Model\Scan;
 use GlpiPlugin\Companyqr\Service\AccessPolicyService;
+use GlpiPlugin\Companyqr\Service\AltchaVerifier;
 use GlpiPlugin\Companyqr\Service\AssetResolver;
 use GlpiPlugin\Companyqr\Service\CodeManager;
 use GlpiPlugin\Companyqr\Service\LabelRenderer;
+use GlpiPlugin\Companyqr\Service\TicketCreator;
+use Item_Ticket;
+use Ticket;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
@@ -49,6 +53,7 @@ final class SelftestCommand extends Command
 {
     private int $failures = 0;
     private OutputInterface $out;
+    private int $createdTicketId = 0;
 
     protected function configure(): void
     {
@@ -108,7 +113,37 @@ final class SelftestCommand extends Command
             $view !== [] && empty(array_diff(array_keys($view), AssetResolver::SAFE_FIELDS)));
         $this->check('NO-LEAK 🔒 sin IP/MAC/hostname/responsable/VLAN', $this->noForbidden($view));
 
+        // --- [ACL-MUTATE] 🔒 rotate/revoke exigen ACL del ACTIVO (no basta el bit generate) ---
+        $policyMut = new AccessPolicyService();
+        $this->applySession(101, [$entityA], ['computer' => READ]);
+        $this->check('ACL 🔒 usuario entidad A NO puede rotar/revocar código de un activo de entidad B',
+            $policyMut->canMutateCode($code) === false);
+        $this->applySession(102, [$entityB], ['computer' => READ]);
+        $this->check('ACL usuario entidad B SÍ puede mutar (activo visible por ACL)',
+            $policyMut->canMutateCode($code) === true);
+
+        // --- [TICKET] 🔒 reporte crea ticket VINCULADO al activo (Item_Ticket); fail-closed ---
+        $this->applySession(2, [0, $entityA, $entityB], [
+            'computer' => ALLSTANDARDRIGHT, 'ticket' => ALLSTANDARDRIGHT, 'entity' => ALLSTANDARDRIGHT,
+        ]);
+        $this->createdTicketId = (new TicketCreator())->createForAsset($computer, [
+            'title'              => 'QR selftest ' . $suffix,
+            'content'            => 'reporte de prueba (selftest)',
+            'requester_users_id' => 2,
+        ]);
+        $this->check('TICKET creado (id > 0)', $this->createdTicketId > 0);
+        $linked = false;
+        if ($this->createdTicketId > 0) {
+            $linked = (new Item_Ticket())->getFromDBByCrit([
+                'tickets_id' => $this->createdTicketId,
+                'itemtype'   => 'Computer',
+                'items_id'   => $computerId,
+            ]);
+        }
+        $this->check('TICKET 🔒 vinculado al activo por Item_Ticket', (bool) $linked);
+
         // --- [ANON-OFF] modo anónimo apagado → login_required (sin fuga). ---
+        $this->applySession(102, [$entityB], ['computer' => READ]);
         $rAnon = $policy->resolveAnonymous($token);
         $this->check('ANON-OFF modo anónimo apagado → login_required',
             $rAnon['result'] === Scan::RESULT_LOGIN_REQUIRED);
@@ -127,9 +162,17 @@ final class SelftestCommand extends Command
         $this->check('LIFECYCLE revocar → "no disponible"',
             $policy->resolveAuthenticated($newToken)['result'] === Scan::RESULT_REVOKED);
 
-        // --- [LABEL] etiqueta PDF real (evidencia) ---
+        // --- [LABEL] etiqueta real: PDF + PNG (evidencia visual) ---
         $outPath = (string) $input->getOption('out');
         $this->generateLabel($computer, $code, $outPath);
+
+        // --- [ALTCHA] casos negativos deterministas del punto de integración ---
+        $av = new AltchaVerifier();
+        $this->check('ALTCHA payload vacío → rechazado', $av->isValid('') === false);
+        $this->check('ALTCHA payload ilegible → rechazado', $av->isValid('!!not-base64!!') === false);
+        $this->out->writeln('[ALTCHA] AltchaManager nativo disponible: '
+            . ($av->available() ? 'sí (verificación de instancia + removeChallenge anti-replay)' : 'no')
+            . '. Modo anónimo: experimental/OFF por defecto (widget diferido a follow-up).');
 
         // --- [FORMS-GATE] probe no fatal ---
         $this->formsGateProbe();
@@ -186,12 +229,13 @@ final class SelftestCommand extends Command
 
     private function generateLabel(Computer $computer, Code $code, string $outPath): void
     {
+        $spec = [
+            'public_code' => (string) $code->fields['public_code'],
+            'type'        => $computer->getTypeName(1),
+            'qr_data'     => 'https://example.test/plugins/companyqr/scan/' . $code->fields['token'],
+        ];
         try {
-            $pdf = (new LabelRenderer())->pdf([
-                'public_code' => (string) $code->fields['public_code'],
-                'type'        => $computer->getTypeName(1),
-                'qr_data'     => 'https://example.test/plugins/companyqr/scan/' . $code->fields['token'],
-            ]);
+            $pdf = (new LabelRenderer())->pdf($spec);
             $isPdf = str_starts_with($pdf, '%PDF');
             if ($isPdf) {
                 @file_put_contents($outPath, $pdf);
@@ -199,7 +243,23 @@ final class SelftestCommand extends Command
             $this->check('LABEL PDF 70,75×24 generado (' . strlen($pdf) . ' bytes → ' . $outPath . ')',
                 $isPdf && is_file($outPath));
         } catch (\Throwable $e) {
-            $this->check('LABEL generación: ' . $e->getMessage(), false);
+            $this->check('LABEL PDF generación: ' . $e->getMessage(), false);
+        }
+        // Previsualización PNG (revisión visual).
+        try {
+            $png = (new LabelRenderer())->png($spec);
+            $pngPath = preg_replace('/\.pdf$/i', '.png', $outPath);
+            if ($pngPath === $outPath) {
+                $pngPath .= '.png';
+            }
+            $isPng = strlen($png) > 8 && substr($png, 1, 3) === 'PNG';
+            if ($isPng) {
+                @file_put_contents($pngPath, $png);
+            }
+            $this->check('LABEL PNG (preview visual) generado (' . strlen($png) . ' bytes → ' . $pngPath . ')',
+                $isPng && is_file((string) $pngPath));
+        } catch (\Throwable $e) {
+            $this->check('LABEL PNG generación: ' . $e->getMessage(), false);
         }
     }
 
@@ -231,6 +291,9 @@ final class SelftestCommand extends Command
     private function cleanup(Code $code, Computer $computer, int $entityA, int $entityB): void
     {
         try {
+            if ($this->createdTicketId > 0) {
+                (new Ticket())->delete(['id' => $this->createdTicketId], true); // purga Item_Ticket en cascada
+            }
             $code->delete(['id' => $code->getID()], true);
             $computer->delete(['id' => $computer->getID()], true);
             (new Entity())->delete(['id' => $entityA], true);

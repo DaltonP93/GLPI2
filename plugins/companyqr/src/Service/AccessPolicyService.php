@@ -30,6 +30,23 @@ final class AccessPolicyService
     }
 
     /**
+     * ¿El usuario en sesión puede MUTAR (rotar/revocar) este código?
+     * La autorización depende de la ACL NATIVA del activo referenciado, NO del objeto Code:
+     * un técnico de la entidad A no puede rotar/revocar el código de un activo de la entidad B
+     * aunque tenga el bit `generate` y conozca el code_id.
+     */
+    public function canMutateCode(Code $code): bool
+    {
+        $item = $this->resolver->loadAsset($code);
+        if ($item === null) {
+            // Activo inexistente/purgado: la mutación por ACL no aplica (el hook de purga
+            // ya auto-revoca). Se deniega la mutación manual por vía admin.
+            return false;
+        }
+        return $this->resolver->canView($item);
+    }
+
+    /**
      * Flujo AUTENTICADO (ruta estándar /scan/{token}).
      * El firewall ya garantizó la sesión; aquí se aplica la ACL del activo.
      *

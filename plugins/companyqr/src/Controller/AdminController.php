@@ -18,6 +18,7 @@ use Glpi\Controller\AbstractController;
 use Glpi\Http\Firewall;
 use Glpi\Security\Attribute\SecurityStrategy;
 use GlpiPlugin\Companyqr\Model\Code;
+use GlpiPlugin\Companyqr\Service\AccessPolicyService;
 use GlpiPlugin\Companyqr\Service\CodeManager;
 use Session;
 use Symfony\Component\HttpFoundation\RedirectResponse;
@@ -59,12 +60,18 @@ final class AdminController extends AbstractController
             case 'revoke':
                 $codeId = (int) $request->request->get('code_id', 0);
                 $code = new Code();
-                if ($codeId > 0 && $code->getFromDB($codeId)) {
-                    if ($action === 'rotate') {
-                        $manager->rotate($code);
-                    } else {
-                        $manager->revoke($code, (string) $request->request->get('reason', ''));
-                    }
+                if ($codeId <= 0 || !$code->getFromDB($codeId)) {
+                    break;
+                }
+                // *** ACL NATIVA sobre el ACTIVO referenciado (no basta el bit generate). ***
+                // Un técnico de la entidad A no puede rotar/revocar un código de la entidad B.
+                if (!(new AccessPolicyService())->canMutateCode($code)) {
+                    throw new AccessDeniedHttpException();
+                }
+                if ($action === 'rotate') {
+                    $manager->rotate($code);
+                } else {
+                    $manager->revoke($code, (string) $request->request->get('reason', ''));
                 }
                 break;
         }

@@ -4,6 +4,22 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
 ## [Unreleased]
+### Security / Hardening (revisión de PR #3)
+- **URL del formulario de reporte ahora absoluta** (generada por el controlador), no
+  relativa en Twig — evita resolverse como `/scan/scan/{token}/report`.
+- **Altcha corregido**: `AltchaManager::getInstance()->verifySolution()` (método de
+  instancia) + `removeChallenge()` anti-replay, aislado en `AltchaVerifier`. Modo anónimo
+  marcado **experimental/OFF**; widget diferido (no soportado en v1).
+- **ACL en `rotate`/`revoke`**: exigen la ACL nativa del **activo** (`canMutateCode`), no
+  sólo el bit `generate` (bloquea mutación entre entidades por `code_id`).
+- **Ticket + `Item_Ticket` atómico/fail-closed**: si falla el vínculo, se revierte el ticket.
+- **Rate limit por actor**: bucket `HMAC(ip|token)` sólo en cache (no persiste IP);
+  fail-open documentado sin cache.
+- **`public_code` concurrente**: `createForItem` reintenta ante colisión UNIQUE y nunca
+  devuelve un `Code` inválido.
+- **E2E HTTP real** en CI (`tests/e2e/companyqr-http.sh`) + **previsualización PNG** de la
+  etiqueta como artefacto.
+
 ### Added
 - **Fase 1 — implementación funcional.** Principio rector: *el QR identifica; GLPI autoriza*.
 - Modelo de datos propio (migración reversible): `glpi_plugin_companyqr_codes`

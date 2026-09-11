@@ -74,10 +74,15 @@ final class ReportController extends AbstractController
         }
 
         // Anti-abuso: rate limit + Altcha (ambos son obligatorios en anónimo).
+        // Bucket POR ACTOR (no global por activo): HMAC(ip|token) SOLO en cache (no persiste IP).
+        // Un atacante no puede así agotar el cupo de un activo para el resto de usuarios.
         $limiter = new RateLimiter();
         $max = (int) PluginConfig::get('anon_rate_max', '5');
         $ttl = (int) PluginConfig::get('anon_rate_window_seconds', '900');
-        if (!$limiter->allow('report:' . $token, $max, $ttl)) {
+        $actor = hash('sha256', ($request->getClientIp() ?? '') . '|' . $token . '|companyqr');
+        // Fail-open documentado: si no hay backend de cache, el rate limit no bloquea;
+        // el anti-bot primario (Altcha) sigue siendo obligatorio (ver RateLimiter).
+        if (!$limiter->allow('report:' . $actor, $max, $ttl)) {
             return new Response('', 429);
         }
         if (!$this->altchaValid((string) $request->request->get('altcha', ''))) {
@@ -116,19 +121,7 @@ final class ReportController extends AbstractController
 
     private function altchaValid(string $payload): bool
     {
-        if ($payload === '') {
-            return false;
-        }
-        // Verificación con el AltchaManager nativo si está disponible.
-        if (class_exists(\Glpi\Altcha\AltchaManager::class)
-            && method_exists(\Glpi\Altcha\AltchaManager::class, 'verifySolution')) {
-            try {
-                return (bool) \Glpi\Altcha\AltchaManager::verifySolution($payload);
-            } catch (\Throwable) {
-                return false;
-            }
-        }
-        return false;
+        return (new \GlpiPlugin\Companyqr\Service\AltchaVerifier())->isValid($payload);
     }
 
     private function scanUrl(string $token): string

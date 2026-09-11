@@ -48,13 +48,18 @@ final class ScanController extends AbstractController
             ? \Session::getNewCSRFToken()
             : '';
 
+        global $CFG_GLPI;
+        $reportAction = ($CFG_GLPI['root_doc'] ?? '')
+            . '/plugins/companyqr/scan/' . rawurlencode($token) . '/report';
+
         return $this->render('@companyqr/fiche.html.twig', [
-            'anonymous' => false,
-            'result'    => $outcome['result'],
-            'view'      => $outcome['view'] ?? [],
-            'token'     => $token,
-            'csrf'      => $csrf,
-            'lang'      => substr((string) ($_SESSION['glpilanguage'] ?? 'es_ES'), 0, 2),
+            'anonymous'     => false,
+            'result'        => $outcome['result'],
+            'view'          => $outcome['view'] ?? [],
+            'token'         => $token,
+            'csrf'          => $csrf,
+            'report_action' => $reportAction,
+            'lang'          => substr((string) ($_SESSION['glpilanguage'] ?? 'es_ES'), 0, 2),
         ], new Response('', $status));
     }
 

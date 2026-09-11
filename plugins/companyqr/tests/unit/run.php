@@ -17,7 +17,9 @@ require $service . 'TokenGenerator.php';
 require $service . 'AssetResolver.php';
 require $service . 'CodeManager.php';
 require $service . 'LabelRenderer.php';
+require $service . 'AltchaVerifier.php';
 
+use GlpiPlugin\Companyqr\Service\AltchaVerifier;
 use GlpiPlugin\Companyqr\Service\AssetResolver;
 use GlpiPlugin\Companyqr\Service\CodeManager;
 use GlpiPlugin\Companyqr\Service\LabelRenderer;
@@ -82,6 +84,12 @@ ok('ningún SAFE_FIELD contiene una subcadena prohibida', (function (): bool {
 echo "== LabelRenderer::hexToRgb ==\n";
 ok('#f7e300 → [247,227,0]', LabelRenderer::hexToRgb('#f7e300') === [247, 227, 0]);
 ok('valor inválido → amarillo por defecto', LabelRenderer::hexToRgb('zzz') === [247, 227, 0]);
+
+echo "== AltchaVerifier (casos negativos deterministas) ==\n";
+$av = new AltchaVerifier();
+ok('payload vacío → rechazado', $av->isValid('') === false);
+ok('payload en blanco → rechazado', $av->isValid('   ') === false);
+ok('payload ilegible sin AltchaManager → rechazado', $av->isValid('!!not-base64!!') === false);
 
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"

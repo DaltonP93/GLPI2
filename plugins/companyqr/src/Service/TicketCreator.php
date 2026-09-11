@@ -47,13 +47,20 @@ final class TicketCreator
             return 0;
         }
 
-        // Vínculo ticket <-> activo (evidencia de trazabilidad).
+        // Vínculo ticket <-> activo (INVARIANTE: un ticket por QR SIN activo = operación fallida).
         $link = new Item_Ticket();
-        $link->add([
+        $linkId = (int) $link->add([
             'tickets_id' => $ticketId,
             'itemtype'   => $asset->getType(),
             'items_id'   => $asset->getID(),
         ]);
+
+        if ($linkId <= 0) {
+            // Compensación fail-closed: si no se pudo vincular, se deshace el ticket
+            // (purga) para no dejar un ticket huérfano reportado como "éxito".
+            $ticket->delete(['id' => $ticketId], true);
+            return 0;
+        }
 
         return $ticketId;
     }

@@ -124,6 +124,25 @@ con estos principios obligatorios:
 - (−) Requiere sincronizar el estado del código con el ciclo de vida del activo (hooks).
 - (−) La decisión final Forms vs. formulario propio queda sujeta a un test runtime inicial.
 
+## Hardening (revisión de PR #3, antes del merge)
+Ajustes de seguridad/funcionales aplicados en la misma rama tras la revisión (todo dentro
+del plugin, Regla 0 intacta):
+1. **URL del formulario absoluta** (generada por el controlador), no relativa en Twig
+   (evita `/scan/scan/...`). Cubierto por E2E HTTP.
+2. **Altcha correcto**: `AltchaManager::getInstance()->verifySolution()` (instancia) +
+   `removeChallenge()` anti-replay. Aislado en `AltchaVerifier` (testeable). Modo anónimo
+   **experimental/OFF**; widget diferido → documentado **no soportado en v1**.
+3. **ACL en mutaciones**: `rotate`/`revoke` exigen la **ACL nativa del activo**
+   (`AccessPolicyService::canMutateCode()`), no sólo el bit `generate`. Un técnico de la
+   entidad A no puede mutar un código de la entidad B conociendo `code_id` → 403.
+4. **Ticket atómico/fail-closed**: si falla `Item_Ticket::add()` se revierte el ticket.
+5. **Rate limit por actor**: bucket `HMAC(ip|token)` sólo en cache (no persiste IP);
+   *fail-open* documentado si no hay cache (Altcha sigue obligatorio).
+6. **`public_code` concurrente**: `createForItem` reintenta ante colisión UNIQUE y nunca
+   devuelve un `Code` inválido.
+7. **E2E HTTP real** en CI (`tests/e2e/companyqr-http.sh`): login → `/scan/{token}` →
+   verifica URL del form → POST report → ticket vinculado (`Item_Ticket`).
+
 ## Cumplimiento de la Regla 0
 Sólo plugin + hooks/controladores/API soportados. **Sin modificar el core.** Verificado
 por `tests/upgrade/verify-core-untouched.sh` y CI.
