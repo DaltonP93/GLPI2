@@ -29,5 +29,6 @@ las cosas son como son.
 | [0008](ADR-0008-ai-architecture.md) | Arquitectura del asistente de IA (RAG) | Aceptado |
 | [0009](ADR-0009-whatsapp-omnichannel.md) | WhatsApp y omnicanalidad | Aceptado |
 | [0010](ADR-0010-observability-audit-metrics.md) | Observabilidad, auditoría y métricas | Aceptado |
+| [0011](ADR-0011-companyqr.md) | `companyqr` — QR por activo, ficha segura y reporte (Fase 1) | Aceptado (diseño) |
 
 > Plantilla para nuevos ADR: [`adr-template.md`](adr-template.md).
