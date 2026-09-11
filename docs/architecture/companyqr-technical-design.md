@@ -175,9 +175,11 @@ acciones de gestión; CSRF en acciones autenticadas; Altcha + rate limit en anó
     **sube como artefacto** (evidencia). Sin campos prohibidos.
 - **ACL:** la matriz de la sección "Matriz de ACL" se verifica caso por caso; las dos
   pruebas marcadas 🔒 son **obligatorias** y fail-closed.
-- **CI:** el job `integration` instala/activa `companyqr` (ya lo hace) y corre la suite del
-  plugin (`tests/security/companyqr-acl.sh` orquesta los scripts PHP dentro del
-  contenedor); fail-closed; sin romper lo existente.
+- **CI:** los unitarios corren en el job estático (`php plugins/companyqr/tests/unit/run.php`);
+  la integración corre dentro del contenedor con el comando de consola del plugin
+  `php bin/console plugins:companyqr:selftest` (arnés `plugins/companyqr/src/Command/SelftestCommand.php`),
+  que es **fail-closed** (exit≠0 si falla cualquier chequeo obligatorio) y sube el PDF de
+  etiqueta como artefacto. El probe de Forms es **no fatal** (registra la evidencia runtime).
 
 ## Rama / PR
 Rama `claude/companyqr` desde `main` (`444009a`). Al implementar: PR de Fase 1 **sin
