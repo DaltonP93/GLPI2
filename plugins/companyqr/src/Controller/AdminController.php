@@ -36,10 +36,8 @@ final class AdminController extends AbstractController
         if (!Session::haveRight('plugin_companyqr', Code::RIGHT_GENERATE)) {
             throw new AccessDeniedHttpException();
         }
-        if (method_exists(Session::class, 'checkCSRF')) {
-            Session::checkCSRF($request->request->all());
-        }
-
+        // CSRF: lo valida el kernel de GLPI 11 (CheckCsrfListener) para POST; no se
+        // revalida aquí para no consumir el token dos veces.
         $manager = new CodeManager();
         $back = (string) $request->request->get('_back', $this->home());
 

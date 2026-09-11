@@ -38,11 +38,9 @@ final class ReportController extends AbstractController
     #[Route('/scan/{token}/report', name: 'companyqr_report', methods: ['POST'])]
     public function authenticated(string $token, Request $request): Response
     {
-        // CSRF nativo (si el método existe en esta versión de GLPI).
-        if (method_exists(Session::class, 'checkCSRF')) {
-            Session::checkCSRF($request->request->all());
-        }
-
+        // CSRF: lo valida AUTOMÁTICAMENTE el kernel de GLPI 11 (CheckCsrfListener) para
+        // los POST; NO se revalida aquí (hacerlo consumía el token dos veces -> 403).
+        // La ficha incluye el campo _glpi_csrf_token que el listener verifica.
         $policy = new AccessPolicyService();
         $outcome = $policy->resolveAuthenticated($token);
         if ($outcome['result'] !== Scan::RESULT_RESOLVED) {
