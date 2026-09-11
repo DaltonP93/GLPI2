@@ -39,6 +39,9 @@ jobs:
           done < <(git ls-files 'plugins/**/*.php')
           [ "$found" -eq 1 ] || { echo "No se encontraron PHP de plugins"; exit 1; }
 
+      - name: Tests unitarios companyqr (lógica pura, sin GLPI)
+        run: php plugins/companyqr/tests/unit/run.php
+
       - name: Shell syntax (bash -n)
         run: |
           set -euo pipefail
@@ -134,8 +137,37 @@ jobs:
             docker compose exec -T -u www-data glpi php bin/console plugin:activate "$p"
           done
 
+      - name: Autotest de integración companyqr (ACL multi-entidad, no-fuga, ciclo, etiqueta) — FAIL-CLOSED
+        working-directory: infra/docker
+        run: |
+          set -euo pipefail
+          docker compose exec -T -u www-data glpi \
+            php bin/console plugins:companyqr:selftest --out=/tmp/companyqr-label.pdf
+
+      - name: Extraer etiqueta real PDF + PNG (evidencia)
+        if: always()
+        working-directory: infra/docker
+        run: |
+          docker compose cp glpi:/tmp/companyqr-label.pdf ./companyqr-label.pdf || \
+            echo "AVISO: no se pudo extraer el PDF (¿falló el autotest antes de generarlo?)"
+          docker compose cp glpi:/tmp/companyqr-label.png ./companyqr-label.png || \
+            echo "AVISO: no se pudo extraer el PNG"
+
+      - name: Subir etiqueta (PDF + PNG) como artefacto
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: companyqr-label
+          path: |
+            infra/docker/companyqr-label.pdf
+            infra/docker/companyqr-label.png
+          if-no-files-found: warn
+
       - name: Smoke tests
         run: bash tests/smoke/run-smoke.sh
+
+      - name: E2E HTTP real (login → scan → report → ticket) — FAIL-CLOSED
+        run: bash tests/e2e/companyqr-http.sh
 
       - name: Verificar localización (fail-closed)
         run: bash tests/localization/verify-localization.sh

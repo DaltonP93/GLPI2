@@ -1,0 +1,69 @@
+{#
+ # Ficha al escanear el QR (autenticada o anónima mínima).
+ # Principio: el QR identifica; GLPI autoriza. Los datos ya vienen filtrados por
+ # AccessPolicyService (whitelist); esta plantilla NO decide permisos.
+ #
+ # Variables: anonymous(bool), result(string), view(map), token(string), csrf(string), lang(string)
+ # @license GPL-3.0-or-later
+ #}
+<!doctype html>
+<html lang="{{ lang|default('es') }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>companyqr</title>
+  <style>
+    body{font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;
+         background:#f6f7f9;color:#1f2430;padding:24px}
+    .card{max-width:520px;margin:24px auto;background:#fff;border:1px solid #e5e7eb;
+          border-radius:12px;padding:20px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+    .code{font-size:22px;font-weight:800} .type{color:#6b7280;font-weight:600;margin-bottom:8px}
+    .row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px dashed #e5e7eb}
+    .k{color:#6b7280} .v{font-weight:600}
+    .msg{padding:10px 12px;border-radius:8px;background:#fef3c7;color:#92400e;font-size:13px}
+    .btn{display:inline-block;margin-top:14px;background:#0a58ca;color:#fff;border:0;
+         border-radius:8px;padding:10px 14px;font-weight:700;cursor:pointer;font-size:13px}
+    label{display:block;margin-top:10px;font-size:13px;color:#374151}
+    input,textarea{width:100%;padding:8px;border:1px solid #d1d5db;border-radius:8px;font:inherit}
+  </style>
+</head>
+<body>
+  <div class="card">
+    {% if result == 'resolved' %}
+      <div class="code">{{ view.public_code|default('') }}</div>
+      <div class="type">{{ view.type|default('') }}</div>
+      {% if not anonymous %}
+        {% if view.name is defined %}<div class="row"><span class="k">{{ __('Name') }}</span><span class="v">{{ view.name }}</span></div>{% endif %}
+        {% if view.status is defined %}<div class="row"><span class="k">{{ __('Status') }}</span><span class="v">{{ view.status }}</span></div>{% endif %}
+        {% if view.location is defined %}<div class="row"><span class="k">{{ __('Location') }}</span><span class="v">{{ view.location }}</span></div>{% endif %}
+        {% if view.entity is defined %}<div class="row"><span class="k">{{ __('Entity') }}</span><span class="v">{{ view.entity }}</span></div>{% endif %}
+
+        {# Acción ABSOLUTA provista por el controlador (no se construye URL relativa en Twig). #}
+        <form method="post" action="{{ report_action }}">
+          <label>{{ __('Describe the problem', 'companyqr') }}
+            <textarea name="content" rows="3" required></textarea>
+          </label>
+          {% if csrf is defined and csrf %}
+            <input type="hidden" name="_glpi_csrf_token" value="{{ csrf }}">
+          {% endif %}
+          <button class="btn" type="submit">{{ __('Report a problem', 'companyqr') }}</button>
+        </form>
+      {% else %}
+        {# Modo anónimo: subset mínimo. El reporte anónimo (widget Altcha) queda diferido
+           a un follow-up; el reporte se hace por el flujo autenticado. #}
+        <div class="muted" style="color:#6b7280;font-size:12px;margin-top:10px">
+          {{ __('To report a problem, please sign in.', 'companyqr') }}
+        </div>
+      {% endif %}
+    {% elseif result == 'login_required' %}
+      <div class="msg">{{ __('Authentication required.', 'companyqr') }}</div>
+    {% elseif result == 'revoked' %}
+      <div class="msg">{{ __('This code is no longer available.', 'companyqr') }}</div>
+    {% elseif result == 'denied' %}
+      <div class="msg">{{ __('You do not have permission to view this asset.', 'companyqr') }}</div>
+    {% else %}
+      <div class="msg">{{ __('Code not found.', 'companyqr') }}</div>
+    {% endif %}
+  </div>
+</body>
+</html>

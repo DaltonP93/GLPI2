@@ -1,0 +1,52 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: companyqr 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"Language: es_ES\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "QR code"
+msgid_plural "QR codes"
+msgstr[0] "Código QR"
+msgstr[1] "Códigos QR"
+
+msgid "Scan event"
+msgid_plural "Scan events"
+msgstr[0] "Evento de escaneo"
+msgstr[1] "Eventos de escaneo"
+
+msgid "Generate / rotate / revoke codes"
+msgstr "Generar / rotar / revocar códigos"
+
+msgid "Print labels"
+msgstr "Imprimir etiquetas"
+
+msgid "Configure plugin"
+msgstr "Configurar el plugin"
+
+msgid "Describe the problem"
+msgstr "Describí el problema"
+
+msgid "Report a problem"
+msgstr "Reportar un problema"
+
+msgid "Authentication required."
+msgstr "Se requiere autenticación."
+
+msgid "This code is no longer available."
+msgstr "Este código ya no está disponible."
+
+msgid "You do not have permission to view this asset."
+msgstr "No tenés permiso para ver este activo."
+
+msgid "Code not found."
+msgstr "Código no encontrado."
+
+msgid "Problem reported via QR (%s)"
+msgstr "Problema reportado por QR (%s)"
+
+msgid "Print QR label"
+msgstr "Imprimir etiqueta QR"

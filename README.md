@@ -12,7 +12,7 @@ pruebas** para una plataforma empresarial construida **sobre GLPI**.
 
 ```
 docs/            Arquitectura, ADRs, especificación funcional, API, workflows, seguridad, operaciones
-plugins/         Plugins propios de GLPI (esqueletos en Fase 0)
+plugins/         Plugins propios de GLPI (companyqr implementado; el resto, esqueletos)
 services/        Servicios desacoplados (IA, WhatsApp, Integration Hub)
 infra/           Docker/Compose, nginx, backup, monitoreo, scripts
 tests/           e2e, smoke y suite de actualización (upgrade)
@@ -42,4 +42,10 @@ Los plugins de GLPI se distribuyen bajo **GPL-3.0-or-later** (compatible con GLP
 Ver el encabezado de licencia declarado en cada `plugins/*/setup.php`.
 
 ---
-Estado del proyecto: **Fase 0 — Fundaciones** (sin lógica de negocio todavía).
+Estado del proyecto: **Fase 1 — `companyqr` implementado y validado**
+(QR por activo, ficha segura por ACL, reporte→ticket, etiqueta 70,75×24 mm; sin tocar
+el core). **Siguiente fase:** compras / workflows / firma.
+
+- Fase 0 — Fundaciones: ✅
+- Fase 1 — QR / Activos (`companyqr`): ✅
+- Fase 2 — Compras + Workflow + Firma: siguiente.

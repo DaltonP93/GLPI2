@@ -1,5 +1,16 @@
 # Línea base de seguridad
 
+## Identidad vs. autorización (regla transversal)
+> **Un identificador identifica; GLPI autoriza.**
+
+Regla formal para **toda la plataforma** (introducida con `companyqr`, ver
+`../adr/ADR-0011-companyqr.md`): cualquier token, código, QR o enlace es a lo sumo un
+**identificador no enumerable**, **nunca** un secreto ni un mecanismo de
+autenticación/autorización. Poseer el identificador (p. ej. una foto de una etiqueta QR)
+**no** concede acceso. El acceso a datos protegidos depende **siempre** de
+**sesión + ACL nativa de GLPI** (perfil + entidad + `canViewItem`). Todo módulo futuro
+(Compras, Firma, Portal, IA, integraciones) que use tokens/enlaces debe cumplir esta regla.
+
 ## Control de acceso
 - **RBAC** por perfil, entidad, departamento y rol de proceso.
 - **Principio de mínimo privilegio** en usuarios, tokens e integraciones.
