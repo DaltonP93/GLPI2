@@ -6,7 +6,8 @@
 <title>companyqr — mock de ficha y etiqueta</title>
 <style>
   :root{ --bg:#f6f7f9; --card:#fff; --ink:#1f2430; --muted:#6b7280; --line:#e5e7eb;
-         --brand:#0b6; --accent:#0a58ca; --warn:#b45309; }
+         --brand:#0b6; --accent:#0a58ca; --warn:#b45309;
+         --label-bg:#f7e300; --label-ink:#141414; }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);
        font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:24px}
@@ -32,30 +33,36 @@
   .btn.ghost{background:#fff;color:var(--accent);border:1px solid var(--accent)}
   .muted{color:var(--muted);font-size:12px;margin-top:10px}
   .forbidden{color:var(--warn);font-size:12px;margin-top:8px}
-  /* Etiqueta a escala real aproximada: 70.75mm x 24mm */
+  /* Etiqueta a escala real aproximada: 70.75mm x 24mm, fondo AMARILLO */
   .labwrap{max-width:900px;margin:20px auto 0}
-  .label{width:70.75mm;height:24mm;border:1px solid #999;border-radius:1.5mm;background:#fff;
-         display:flex;align-items:center;gap:2.5mm;padding:2mm;overflow:hidden}
-  .label .qr{width:20mm;height:20mm;flex:0 0 auto}
+  .label{width:70.75mm;height:24mm;border:1px solid #b59f00;border-radius:1.5mm;
+         background:var(--label-bg);color:var(--label-ink);
+         display:flex;align-items:center;gap:2.5mm;padding:2mm;overflow:hidden;position:relative}
+  .label .qr{width:19mm;height:19mm;flex:0 0 auto}
+  .label .qr rect{fill:var(--label-ink)}
   .label .txt{display:flex;flex-direction:column;justify-content:center;min-width:0}
-  .label .lc{font-size:4.2mm;font-weight:800;line-height:1.1}
-  .label .lt{font-size:3mm;color:#333;line-height:1.1;margin-top:1mm}
-  .label .lo{font-size:2.4mm;color:#666;margin-top:.8mm}
+  .label .lh{font-size:2.4mm;font-weight:800;letter-spacing:.08em;color:#5b5100}
+  .label .lc{font-size:4.4mm;font-weight:800;line-height:1.1;margin-top:.6mm}
+  .label .lt{font-size:3mm;font-weight:700;color:#333;line-height:1.1;margin-top:.9mm;letter-spacing:.04em}
+  .label .lo{font-size:2.3mm;color:#6b6300;margin-top:.7mm}
   .ruler{font-size:11px;color:var(--muted);margin-top:6px}
 </style>
 </head>
 <body>
   <div class="note">
     <h1>companyqr — mock funcional (no es UI final)</h1>
-    Principio: <b>el QR identifica; GLPI autoriza</b>. El QR contiene un token opaco →
-    <code>/plugins/companyqr/s/&lt;token&gt;</code>. La ficha real se filtra por ACL de GLPI.
-    Los QR de abajo son placeholders.
+    Principio: <b>el QR identifica; GLPI autoriza</b>. El QR contiene un token opaco y apunta
+    por defecto a la ruta <b>autenticada</b>
+    <code>/plugins/companyqr/scan/&lt;token&gt;</code> (el firewall de GLPI exige login y
+    preserva el retorno). El modo anónimo, si se habilita, vive en una ruta separada
+    <code>/plugins/companyqr/public/&lt;token&gt;</code> (OFF por defecto). La ficha real se
+    filtra por ACL nativa de GLPI. Los QR de abajo son placeholders.
   </div>
 
   <div class="grid">
     <!-- FICHA AUTENTICADA (comportamiento por defecto) -->
     <div class="card">
-      <span class="tag">Ficha autenticada · por defecto</span>
+      <span class="tag">Ficha autenticada · por defecto · /scan/{token}</span>
       <div class="head">
         <svg class="qr" viewBox="0 0 7 7" shape-rendering="crispEdges" aria-label="QR">
           <rect x="0" y="0" width="3" height="3"/><rect x="1" y="1" width="1" height="1" fill="#fff"/>
@@ -65,7 +72,7 @@
           <rect x="5" y="5" width="1" height="1"/><rect x="4" y="6" width="1" height="1"/><rect x="6" y="6" width="1" height="1"/>
         </svg>
         <div>
-          <div class="code">PC-001245</div>
+          <div class="code">NB-001245</div>
           <div class="type">Notebook</div>
         </div>
       </div>
@@ -78,12 +85,13 @@
       <a class="btn" href="#">Reportar un problema</a>
       <a class="btn ghost" href="#">Abrir en GLPI</a>
       <div class="muted">Campos mostrados = whitelist segura, según ACL del usuario.
-        El enlace "Abrir en GLPI" sólo aparece si tiene permiso.</div>
+        El enlace "Abrir en GLPI" sólo aparece si tiene permiso. Nomenclatura:
+        <b>NB-</b> notebook, <b>PC-</b> computadora de escritorio.</div>
     </div>
 
-    <!-- FICHA ANÓNIMA (opcional, OFF por defecto) -->
+    <!-- FICHA ANÓNIMA (opcional, OFF por defecto, ruta separada) -->
     <div class="card">
-      <span class="tag anon">Ficha anónima · opcional (OFF por defecto)</span>
+      <span class="tag anon">Ficha anónima · opcional (OFF) · /public/{token}</span>
       <div class="head">
         <svg class="qr" viewBox="0 0 7 7" shape-rendering="crispEdges" aria-label="QR">
           <rect x="0" y="0" width="3" height="3"/><rect x="1" y="1" width="1" height="1" fill="#fff"/>
@@ -92,36 +100,40 @@
           <rect x="4" y="4" width="1" height="1"/><rect x="6" y="4" width="1" height="1"/><rect x="5" y="5" width="1" height="1"/>
         </svg>
         <div>
-          <div class="code">PC-001245</div>
+          <div class="code">NB-001245</div>
           <div class="type">Notebook</div>
         </div>
       </div>
       <a class="btn" href="#">Reportar un problema</a>
       <div class="forbidden">Subset mínimo: sólo código + tipo + reportar. Sin IP, MAC,
-        hostname, VLAN, responsable ni ubicación detallada. Reporte con rate limit + Altcha.</div>
+        hostname, VLAN, responsable ni ubicación detallada. Reporte con rate limit + Altcha.
+        Sólo visible si <code>anonymous_enabled=1</code>.</div>
     </div>
   </div>
 
   <!-- ETIQUETA FÍSICA -->
   <div class="labwrap">
     <div class="card">
-      <span class="tag">Etiqueta física · 70,75 × 24 mm horizontal (default)</span>
+      <span class="tag">Etiqueta física · 70,75 × 24 mm horizontal · amarilla (default)</span>
       <div class="label">
         <svg class="qr" viewBox="0 0 7 7" shape-rendering="crispEdges" aria-label="QR">
-          <rect x="0" y="0" width="3" height="3"/><rect x="1" y="1" width="1" height="1" fill="#fff"/>
-          <rect x="4" y="0" width="3" height="3"/><rect x="5" y="1" width="1" height="1" fill="#fff"/>
-          <rect x="0" y="4" width="3" height="3"/><rect x="1" y="5" width="1" height="1" fill="#fff"/>
+          <rect x="0" y="0" width="3" height="3"/><rect x="1" y="1" width="1" height="1" fill="#f7e300"/>
+          <rect x="4" y="0" width="3" height="3"/><rect x="5" y="1" width="1" height="1" fill="#f7e300"/>
+          <rect x="0" y="4" width="3" height="3"/><rect x="1" y="5" width="1" height="1" fill="#f7e300"/>
           <rect x="4" y="4" width="1" height="1"/><rect x="6" y="4" width="1" height="1"/>
           <rect x="5" y="5" width="1" height="1"/><rect x="4" y="6" width="1" height="1"/><rect x="6" y="6" width="1" height="1"/>
         </svg>
         <div class="txt">
-          <div class="lc">PC-001245</div>
-          <div class="lt">Notebook</div>
-          <div class="lo">Casa Central</div>
+          <div class="lh">TI • ACTIVOS</div>
+          <div class="lc">NB-001245</div>
+          <div class="lt">NOTEBOOK</div>
+          <div class="lo">(organización — opcional, apagada por defecto)</div>
         </div>
       </div>
-      <div class="ruler">Contenido: QR + código de inventario + tipo (+ organización opcional).
-        Prohibido: IP, MAC, hostname, VLAN, datos técnicos. Tamaño y campos configurables.</div>
+      <div class="ruler">Contenido: <b>TI • ACTIVOS</b> + QR + código de inventario
+        (<code>NB-…</code>/<code>PC-…</code>) + tipo. Ubicación/organización opcional.
+        Prohibido: IP, MAC, hostname, VLAN, datos técnicos. Tamaño, color y campos
+        configurables.</div>
     </div>
   </div>
 </body>

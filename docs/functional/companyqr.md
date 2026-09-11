@@ -4,25 +4,34 @@ Principio rector: **el QR identifica; GLPI autoriza.** Ver `../adr/ADR-0011-comp
 
 ## Política autenticado / anónimo
 
-| Situación | Comportamiento |
-|---|---|
-| **Por defecto (autenticado)** | `QR → resolver token → si no hay sesión, login GLPI (con retorno) → ficha del activo **filtrada por ACL nativa** del usuario`. |
-| **Modo anónimo (opcional, OFF por defecto)** | Si un admin lo habilita: sin sesión se muestra **sólo** un subset mínimo configurable (**por defecto: código público + tipo + botón "Reportar problema"**). |
-| **Nunca en modo anónimo** | IP, MAC, hostname, VLAN, responsable/usuario, ubicación detallada, serie ni datos técnicos. |
+| Situación | Ruta | Comportamiento |
+|---|---|---|
+| **Estándar (la que codifica el QR)** | `GET /plugins/companyqr/scan/{token}` — **`AUTHENTICATED`** | El **firewall de GLPI** exige login y **preserva la URL de retorno**. Con sesión → ficha del activo **filtrada por ACL nativa** del usuario. **No** es una ruta pública. |
+| **Modo anónimo (ruta separada, OFF por defecto)** | `GET /plugins/companyqr/public/{token}` — `NO_CHECK` | Sólo si un admin habilita `anonymous_enabled`. Sin sesión muestra **sólo** un subset mínimo configurable (**por defecto: código público + tipo + botón "Reportar problema"**). Con `anonymous_enabled=0` responde 404/redirect a login. |
+| **Nunca en modo anónimo** | — | IP, MAC, hostname, VLAN, responsable/usuario, ubicación detallada, serie ni datos técnicos. |
 
+- **No se usa `NO_CHECK` para la ficha estándar**: así nadie la vuelve pública por error.
 - El token **no** autentica ni autoriza; sólo evita enumeración. La visibilidad de datos
   del activo es **siempre** la ACL nativa de GLPI (perfil + entidad + `canViewItem`).
-- El modo anónimo se activa por configuración global (y opcionalmente por entidad); su
-  subset de campos es configurable, con el default mínimo indicado.
+- El modo anónimo se activa por configuración global (`anonymous_enabled=0` por defecto), y
+  vive en su **propia ruta**; su subset de campos es configurable, con el default mínimo.
+- **Compensación aceptada:** el QR estándar apunta a la ruta autenticada. Si se quisiera un
+  set de etiquetas de acceso anónimo, se imprimirían apuntando a `/public/{token}`
+  (decisión deliberada). Se prioriza claridad de seguridad sobre comodidad del toggle.
 
 ## Código visible del activo
-- **Fuente primaria:** número de inventario nativo `otherserial` (ej. `PC-001245`).
-- **Fallback** (si `otherserial` está vacío): código generado y almacenado por el plugin
-  `<PREFIJO_POR_TIPO>-<secuencia>` (prefijo configurable por itemtype: `PC`, `MON`, `IMP`,
-  `NET`…); la secuencia vive en la tabla del plugin (**no** es el `items_id`).
-- **Unicidad:** se valida la unicidad del código visible dentro del alcance configurado
-  (por defecto, por entidad raíz). Si `otherserial` duplicado → se marca conflicto y se
-  usa el fallback generado hasta resolver.
+- El plugin gestiona una columna **propia y única** `public_code` (restricción `UNIQUE` en
+  `glpi_plugin_companyqr_codes`). **Nunca escribe en `otherserial`** (no modifica datos
+  maestros del inventario).
+- **Fuente primaria:** si el número de inventario nativo `otherserial` es válido (no vacío
+  y sin conflicto de unicidad), `public_code` **copia** ese valor. Nomenclatura esperada:
+  `NB-xxxxxx` = **notebook**, `PC-xxxxxx` = **computadora de escritorio** (desktop);
+  `MON-` monitor, `IMP-` impresora, `NET-` equipo de red, etc.
+- **Fallback** (si `otherserial` está vacío o duplicado): el plugin **genera y almacena**
+  `<PREFIJO_POR_TIPO>-<secuencia>` en su propia tabla; la secuencia vive en el plugin
+  (**no** es el `items_id`). El prefijo por `itemtype` es configurable (`code_prefix_map`).
+- **Unicidad:** `public_code` es `UNIQUE`; si `otherserial` viniera duplicado, se marca el
+  conflicto y se usa el fallback generado hasta resolverlo (a mano, en el inventario).
 - El `items_id` interno **nunca** se muestra ni se codifica en la URL pública.
 
 ## Ficha al escanear
@@ -68,8 +77,10 @@ Principio rector: **el QR identifica; GLPI autoriza.** Ver `../adr/ADR-0011-comp
 - Auditoría de acciones sensibles (rotar/revocar/imprimir) vía `AuditService` + `Log` core.
 
 ## Etiqueta física
-- **Default:** 70,75 × 24 mm, **horizontal**. **Contenido:** QR + **código de inventario**
-  + **tipo**. Configurable (tamaño y campos).
+- **Default:** 70,75 × 24 mm, **horizontal**, **fondo amarillo** (estándar inicial, para
+  continuidad visual con las etiquetas previas). **Contenido:** encabezado `TI • ACTIVOS`
+  + QR + **código de inventario** (`NB-…`/`PC-…`) + **tipo**. Ubicación/organización
+  **opcional** (no por defecto). Tamaño, color y campos **configurables**.
 - **Prohibido en la etiqueta:** IP, MAC, hostname, VLAN, datos técnicos sensibles.
 - **Impresión individual** en v1; diseño **preparado para lote** (no se agrega complejidad
   de lote si compromete la v1).

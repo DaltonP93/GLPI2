@@ -6,13 +6,24 @@
 - **Módulo/área:** `plugins/companyqr` (Fase 1)
 - **Reemplaza/complementa:** ADR-0001 (arquitectura), ADR-0002 (core inmutable), ADR-0003 (estrategia de plugins), ADR-0010 (observabilidad/auditoría)
 
-## Principio rector
+## Principio rector (regla formal de la plataforma)
 > **El QR identifica; GLPI autoriza.**
 > El QR (y su token) es un **identificador no enumerable**, **no** un secreto ni un
 > mecanismo de autenticación/autorización. Poseer físicamente la etiqueta **no**
 > concede acceso al activo. Toda información protegida depende **siempre** de
 > **sesión + ACL de GLPI**. Este principio se fija desde el primer módulo porque la
 > plataforma incorporará luego Compras, aprobaciones, firmas, inventario, tickets e IA.
+
+Este enunciado deja de ser exclusivo de `companyqr` y pasa a ser una **regla
+transversal** de toda la plataforma (identificador ≠ autorización), formalizada en
+`../security/security-baseline.md` § "Identidad vs. autorización". Aplica a cualquier
+módulo futuro que use tokens, enlaces o códigos.
+
+> **El core de GLPI es una dependencia upstream, no vive en este repositorio.** Toda
+> referencia a rutas `src/...`, `templates/...` o `composer.json` de este ADR apunta al
+> repositorio oficial **`glpi-project/glpi`** en el tag **`11.0.8`**
+> (`https://github.com/glpi-project/glpi/tree/11.0.8`), nunca a código de
+> `DaltonP93/GLPI2`.
 
 ## Contexto
 Necesitamos un QR por activo que, al escanearse, identifique el activo y —según los
@@ -21,7 +32,7 @@ permisos del usuario— muestre su ficha y permita **reportar un problema** crea
 
 Análisis native-first sobre **GLPI 11.0.8** (verificado en el código fuente):
 
-| Capacidad | Nativo | Evidencia (glpi-project/glpi @ 11.x) | Decisión |
+| Capacidad | Nativo | Evidencia (`glpi-project/glpi` @ `11.0.8`) | Decisión |
 |---|---|---|---|
 | Librería QR | ✅ `tecnickcom/tc-lib-barcode` + `BarcodeManager` (`generateQRCode`/`renderQRCode`) | `composer.json`, `src/BarcodeManager.php`, `templates/components/form/pictures.html.twig` | **Reuse** (vía `QrRenderer`) |
 | Librería PDF | ✅ `tecnickcom/tcpdf` | `composer.json` | **Reuse** (vía `LabelRenderer`) |
@@ -32,7 +43,7 @@ Análisis native-first sobre **GLPI 11.0.8** (verificado en el código fuente):
 | Ticket + vínculo a activo | ✅ `Ticket` + `Item_Ticket` | core estándar | **Reuse** (vía `TicketCreator`) |
 | Nº de inventario visible | ✅ campo `otherserial` ("Inventory number") en todos los activos | `src/Monitor.php`, `src/Phone.php`, `src/Rack.php`, … | **Reuse** para el código visible |
 | Forms → Ticket → activo asociado | ✅ `FormDestinationTicket` + `AssociatedItemsField`/`QuestionTypeItem` | `src/Glpi/Form/Destination/*` | ver spike (§ decisión) |
-| **Precargar/lockear el activo escaneado en un Form** | ❌ sin mecanismo `prefill` | búsqueda `prefill` en `src/Glpi/Form` = 0 resultados | **Build** flujo propio (ver spike) |
+| **Precargar/lockear el activo escaneado en un Form** | ⚠️ no identificado en análisis estático | búsqueda `prefill` en `src/Glpi/Form` = 0 resultados (indicio, no prueba) | **Gate runtime en CI** decide Forms vs. propio (ver spike) |
 | **Ficha pública segura (subset, sin datos técnicos)** | ❌ el QR nativo apunta a la URL **autenticada** del back-office | `BarcodeManager` codifica `getFormURLWithID` | **Build** (diferencial) |
 | **Token/código público, ciclo de vida, auditoría/métricas, i18n** | ❌ | — | **Build** sobre APIs core |
 
@@ -45,16 +56,26 @@ Construir el plugin **`companyqr`** que **reutiliza** toda la plomería nativa (
 rutas, hooks, tickets, Altcha, `otherserial`) y **construye** solo la capa diferencial,
 con estos principios obligatorios:
 
-1. **Autenticado por defecto.** Flujo normal:
-   `QR → resolución del token → login si no hay sesión → ficha del activo según ACL`.
-2. **Modo anónimo = opcional, apagado por defecto.** Si se habilita, muestra sólo un
-   subset mínimo configurable (por defecto **código público + tipo + botón "Reportar
-   problema"**). **Nunca** IP, MAC, hostname, VLAN, responsable, ubicación detallada ni
-   datos técnicos.
+1. **Ruta estándar autenticada (sin `NO_CHECK`).** El QR apunta por defecto a la ruta
+   `GET /plugins/companyqr/scan/{token}` protegida con `SecurityStrategy(AUTHENTICATED)`:
+   es el **firewall de GLPI** quien exige login y **preserva la URL de retorno** hacia la
+   ficha. No se usa `NO_CHECK` para la ficha estándar (así nadie la vuelve pública por
+   accidente). Flujo: `QR → /scan/{token} → login GLPI (con retorno) → ficha del activo
+   según ACL`.
+2. **Modo anónimo = ruta separada, apagada por defecto** (`anonymous_enabled = 0`). El
+   acceso sin sesión vive **sólo** en `GET /plugins/companyqr/public/{token}`
+   (`NO_CHECK`), y **únicamente** si un admin lo habilita. Muestra sólo un subset mínimo
+   configurable (por defecto **código público + tipo + botón "Reportar problema"**).
+   **Nunca** IP, MAC, hostname, VLAN, responsable, ubicación detallada ni datos técnicos.
 3. **El token no es autenticación ni secreto**: sólo evita la enumeración trivial. La
-   autorización real es **sesión + ACL de GLPI**.
-4. **Código visible = número de inventario** (`otherserial`, p. ej. `PC-001245`), nunca
-   el `items_id` interno. Con estrategia de fallback y validación de unicidad.
+   autorización real es **siempre sesión + ACL de GLPI**. Toda consulta protegida pasa por
+   ACL nativa (perfil + entidad + `canViewItem`).
+4. **Código visible propio y único.** El plugin gestiona su **propia** columna
+   `public_code` (**`UNIQUE`**). Usa el número de inventario nativo `otherserial` (p. ej.
+   `NB-001245` para notebooks, `PC-001245` para computadoras de escritorio) **cuando es un
+   valor válido**; si no existe, **genera y almacena** un `public_code` propio. **Nunca
+   escribe silenciosamente en `otherserial`** (no toca datos maestros del inventario). El
+   `items_id` interno nunca se muestra ni se codifica en la URL pública.
 5. **Token permanente + revocable** (sin expiración automática porque está impreso);
    soporta rotación/revocación manual y registra el estado del código.
 6. **Privacidad/auditoría mínima**: sin hashes permanentes de IP/User-Agent por defecto.
@@ -65,8 +86,12 @@ con estos principios obligatorios:
 8. **Rutas modernas**: controladores en `plugins/companyqr/src/Controller/` (PSR-4) con
    rutas Symfony bajo `/plugins/companyqr/...`; **sin** `front/*.php` legacy salvo bloqueo
    documentado.
-9. **Reporte de problema**: primero intentar **Forms nativo** (spike gate); si no permite
-   vincular el activo escaneado de forma soportada, construir formulario mínimo propio.
+9. **Reporte de problema**: el **gate de Forms** corre como **test de integración en CI**
+   (no pudo correr en la sesión de diseño por falta de Docker). v1 implementa un
+   **formulario mínimo propio** vía `TicketCreator` (conservador, 100 % bajo control, no
+   bloquea la entrega); si el gate runtime demuestra una vía **soportada y limpia** para
+   previncular/lockear el activo en Forms nativo, se registra la evidencia y se abre un ADR
+   de seguimiento para migrar el motor. Ver `../architecture/companyqr-forms-spike.md`.
 10. **Etiqueta** default 70,75 × 24 mm horizontal (QR + código de inventario + tipo),
     configurable; impresión individual y diseño preparado para lote.
 
@@ -82,15 +107,15 @@ con estos principios obligatorios:
 ## Spike de Forms (resumen; detalle en `companyqr-forms-spike.md`)
 - Nativo soporta `Form → FormDestinationTicket` y **asociar el ticket a un activo** vía
   `AssociatedItemsField` + `QuestionTypeItem`/`QuestionTypeUserDevice`.
-- **No hay `prefill`** en `src/Glpi/Form`: no se evidencia una vía soportada para
-  **precargar/lockear el activo escaneado** desde el contexto del QR (saldría de una
-  pregunta que el usuario responde a mano).
-- **Limitación de entorno:** sin Docker en esta sesión, no se pudo confirmar en runtime.
-- **Conclusión provisional:** la evidencia inclina a **formulario mínimo propio** para
-  garantizar el vínculo al activo exacto; se ejecutará un **test de integración gate** al
-  inicio de la implementación para confirmar/derogar Forms, y se documentará el resultado
-  aquí antes de construir el formulario. Si Forms resultara viable de forma limpia y
-  soportada, se reutiliza.
+- **No se identificó en el análisis estático** una API soportada/documentada para
+  **precargar y bloquear el activo escaneado** desde el contexto del QR (la ausencia de
+  `prefill` en `src/Glpi/Form` es un indicio, no una prueba). El **gate runtime** es el
+  criterio definitivo.
+- **Limitación de entorno:** sin Docker en la sesión de diseño, el gate corre como **test
+  de integración de CI**.
+- **Decisión v1:** **formulario mínimo propio** vía `TicketCreator` (conservador y bajo
+  control); el gate de Forms queda en CI y, si demuestra una vía limpia y soportada, se
+  documenta y se abre ADR de seguimiento para migrar el motor.
 
 ## Consecuencias
 - (+) Reutiliza el máximo de capacidades nativas; superficie propia acotada al diferencial.
