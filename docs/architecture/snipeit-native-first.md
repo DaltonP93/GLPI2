@@ -20,13 +20,23 @@ Análisis del **código real** de Snipe-IT (entregado como referencia **read-onl
 | **Accessories / components / consumables / licenses** | `*/checkout`, `*/checkin`, `requestable/*` (controllers respectivos) | **USE AS-IS** | dominio físico de Snipe (fases posteriores). |
 | **Acceptance / firma de entrega** | `CheckoutAcceptance` (`accept()/decline()`, `signature_filename`, PDF con `<img src="@signature">`) | **USE AS-IS (Snipe OWNED)** | GLPI2 sólo **referencia** estado/fecha/URL/hash. Imagen de firma ≠ firma digital (ADR-0014). |
 | **Suppliers / manufacturers / models / categories / custom fields** | modelos y endpoints nativos (`Supplier`, `Manufacturer`, `AssetModel`, `Category`, `CustomField`) | **API INTEGRATION (mapeo)** | mapeo por **ID** en `asset_bridge`/tablas de mapeo; nunca por nombre. |
-| **Users / locations / departments (companies)** | modelos nativos + `company_id` scoping | **API INTEGRATION (mapeo)** | correlación por ID; multi-entidad GLPI se respeta del lado GLPI. |
+| **Users** (identidad corporativa) | modelos nativos | **GLPI OWNED / IdP** | Snipe dueño de **custodia**, no de identidad; `map_users` explícito, nunca por nombre. |
+| **Locations / departments / companies** | modelos nativos + `company_id` scoping | **API INTEGRATION (mapeo)** | `company_id ↔ glpi_entity_id` por `map_companies`; multi-entidad se resuelve del lado GLPI; sin mapeo → conflicto. |
 | **Orders (adquisición)** | `app/Models/Order.php`: *"**Explicitly NOT a purchase-order workflow (no state machine, approvals, receiving)**"* | **GLPI2 OWNED** | **no** se usa como workflow; compras/aprobaciones = `companypurchasing`. |
 | **Inventario técnico (CPU/RAM/OS/software/red)** | — (GLPI Agent/SNMP) | **GLPI OWNED** | **no** se sobrescribe desde Snipe; no va a etiquetas. |
 | **Tickets / SLA / Help Desk / KB / CMDB técnica** | — | **GLPI OWNED** | **no** se crea un segundo help desk en Snipe. |
 | **Compras / workflow / aprobaciones / firma empresarial** | — | **GLPI2 OWNED** | `companyworkflow` + `companypurchasing` + `companysignature`. |
 | **Ficha segura por QR + creación de ticket** | — (`companyqr`, Fase 1) | **GLPI2 OWNED** | el QR de Snipe apunta al **gateway** de GLPI2. |
 | **Webhooks/eventos de Snipe** | Snipe emite notificaciones (Slack/webhook) limitadas; no un bus de dominio completo | **API INTEGRATION (polling + reconciliación)** | SI-1 usa **reconciliación read-only** por API; no se depende de webhooks Snipe para la verdad. |
+
+## Modelo de permisos / token (verificado en v8.7.2)
+- **Autenticación API = Laravel Passport** (`config/auth.php`: `api → passport`); rutas bajo
+  `middleware ['api', 'api-throttle:api']`.
+- **Autorización = RBAC granular por usuario** (`config/permissions.php`: `assets.view/create/edit/
+  delete/checkout/checkin/audit/files`, `accessories.*`, etc.).
+- **No hay scopes por endpoint:** el **personal access token** hereda los **permisos del usuario**.
+  → Mínimo privilegio = **cuenta de servicio con rol restringido** (p. ej. SI-1 = sólo
+  `assets.view`), no scopes por endpoint. (Detalle en `../security/snipeit-integration-security.md`.)
 
 ## Conclusiones
 1. **Snipe hace lo físico**; lo consumimos por **API** (o **CONFIGURE** para el QR/etiqueta).

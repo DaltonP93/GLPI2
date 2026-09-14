@@ -28,17 +28,41 @@ Tablas **propias** (nunca DB de Snipe ni SQL directo a core). Migraciones revers
 - `UNIQUE (idempotency_key)`
 - Índices por `sync_status`, `glpi_entity_id`.
 
-### Idempotencia (no duplicar activos al reintentar)
-- **Alta desde Compras (SI-4):** `idempotency_key = "purchase:<requests_id>:item:<line_no>"`.
-  Reintentar `purchase.received` con la misma clave **no** crea un segundo activo Snipe ni GLPI;
-  la operación busca primero el bridge por esa clave.
+### Idempotencia (no duplicar activos al reintentar) — **por unidad física**
+- **Cardinalidad:** una línea de compra con cantidad **N** produce **N activos físicos**. La
+  idempotencia es **por unidad**, no por línea:
+  `idempotency_key = "purchase:<requests_id>:item:<line_no>:unit:<n>"` (n = 1..N).
+  Cada unidad tiene **su propio** serial, `snipe_asset_id`/`snipe_asset_tag`, activo GLPI y fila
+  `asset_bridge`. Reintentar `purchase.received` con la misma clave por unidad **no** crea un
+  segundo activo.
 - **Alta/lectura desde Snipe (SI-1):** identidad = `snipe_asset_id` (+ `snipe_asset_tag`). Un
   `asset_tag` **no** puede mapear a dos activos (garantizado por los UNIQUE).
 - Toda escritura contra Snipe/GLPI usa **buscar-o-crear** por la clave natural antes de crear.
 
+## `..._receipt_units` (unidad física recibida — cardinalidad N por línea)
+Modela cada **unidad física** recibida para una línea de compra. Es el ancla de idempotencia por
+unidad y el origen de cada fila `asset_bridge`.
+
+| Columna | Tipo | Notas |
+|---|---|---|
+| `id` | int PK | |
+| `purchase_requests_id` | int | solicitud de compra (GLPI2) |
+| `item_line_no` | int | línea de la solicitud |
+| `unit_index` | int | n = 1..N dentro de la línea |
+| `serial` | varchar null | serial de **esta** unidad (política de serial, ver ownership) |
+| `snipe_asset_id`,`snipe_asset_tag` | int/varchar null | activo físico en Snipe (cuando se cree) |
+| `glpi_itemtype`,`glpi_items_id` | varchar/int null | activo GLPI vinculado (resolver-o-crear) |
+| `asset_bridge_id` | int null | fila `asset_bridge` de esta unidad |
+| `idempotency_key` | varchar **unique** | `purchase:<req>:item:<line>:unit:<n>` |
+| `status` | enum(`pending`,`snipe_created`,`glpi_linked`,`labeled`,`conflict`,`error`) | avance |
+| `date_creation`,`date_mod` | datetime | |
+
+- `UNIQUE (purchase_requests_id, item_line_no, unit_index)` y `UNIQUE (idempotency_key)`.
+
 ## Tablas de mapeo de catálogos (por **ID**, nunca por nombre)
-`..._map_users`, `..._map_locations`, `..._map_departments`, `..._map_categories`,
-`..._map_models`, `..._map_states`, `..._map_suppliers`, `..._map_manufacturers`.
+`..._map_companies`, `..._map_users`, `..._map_locations`, `..._map_departments`,
+`..._map_categories`, `..._map_models`, `..._map_states`, `..._map_suppliers`,
+`..._map_manufacturers`.
 
 Forma común: `id, snipe_id, snipe_name(cache), glpi_id, glpi_itemtype, entities_id,
 is_approved(bool), notes`.
@@ -47,13 +71,27 @@ is_approved(bool), notes`.
 - `snipe_name` se guarda **sólo como cache/legibilidad**; la correlación real es por `*_id`.
 - Estados: mapear `status label` de Snipe ↔ estado/uso en GLPI según política (tabla `..._map_states`).
 
+### `..._map_companies` (compañía Snipe ↔ **entidad** GLPI) — obligatorio para multi-entidad
+`snipe_company_id ↔ glpi_entity_id` (+ `is_approved`). **Regla dura:** un activo cuya
+`company` de Snipe **no** esté mapeada a una entidad GLPI **no** se sincroniza a una entidad
+**inferida**; queda en `conflict`/`pending`. Nunca se adivina la entidad. (Test multi-entidad
+obligatorio; ver `snipeit-integration-test-plan.md`.)
+
+### Identidad de usuarios (SoT = GLPI/IdP, **no** Snipe)
+Snipe es Source of Truth de la **custodia** (checkout/checkin), **no** de la **identidad
+corporativa**. El usuario corporativo lo define **GLPI / IdP**; `..._map_users` correlaciona
+`snipe_user_id ↔ glpi_users_id` de forma **explícita y aprobada**. **Nunca** se correlacionan
+usuarios automáticamente por nombre/email inferido.
+
 ## Ciclo de vida de una fila del bridge
 ```
 Snipe crea/actualiza activo ─┐
-Compras recibe (SI-4) ───────┼─► buscar-o-crear (idempotency_key / snipe_asset_id)
+Compras recibe (SI-4) ───────┼─► buscar-o-crear (idempotency_key POR UNIDAD / snipe_asset_id)
                              │        │
                              │        ├─ existe → actualizar reflejo (sync_status=mapped)
-                             │        └─ no existe → crear activo GLPI + companyqr → insertar bridge
+                             │        └─ no existe → RESOLVER-o-crear activo GLPI (dedup con GLPI
+                             │             Agent por serial/UUID; ambiguo → conflict, sin auto-merge)
+                             │             + companyqr → insertar bridge
 Reconciliación (SI-1) ───────┘        │
                                       ├─ sólo en Snipe → orphan_snipe (reportar, no crear aún en read-only)
                                       ├─ sólo en GLPI  → orphan_glpi

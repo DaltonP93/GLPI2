@@ -267,21 +267,25 @@
       <h2>Alta de activo tras <span class="chip">RECIBIDA</span></h2>
       <p class="note">Snipe-IT es autoridad de lo físico (asset tag, etiqueta). El alta pasa
         primero por Snipe, se puentea a GLPI con <code>asset_bridge</code> y se genera el QR
-        seguro de <code>companyqr</code>. Idempotente: reintentar no duplica.</p>
-      <div class="banner">Sólo se procesan los ítems marcados <b>inventariable</b>.
-        Clave de idempotencia: <code>purchase:CC-2026-000123:item:1</code>.</div>
+        seguro de <code>companyqr</code>. <b>Cardinalidad por unidad:</b> una línea con cantidad N
+        genera N activos físicos, cada uno con su serial/Snipe/GLPI/bridge. Idempotente por unidad.</p>
+      <div class="banner">Ítem inventariable <b>Notebook 14" · cantidad 2 → 2 unidades físicas</b>.
+        Clave por unidad: <code>purchase:CC-2026-000123:item:1:unit:1</code>,
+        <code>…:unit:2</code>. Reintentar no duplica. El activo GLPI se <b>resuelve-o-crea</b>
+        (dedup con GLPI Agent por serial/UUID; ambiguo → conflicto, sin auto-merge).</div>
       <div class="steps">
-        <span class="step done">RECIBIDA</span>
-        <span class="step cur">1 · Crear activo en Snipe-IT</span>
+        <span class="step done">RECIBIDA (x2)</span>
+        <span class="step cur">1 · Snipe (por unidad)</span>
         <span class="step">2 · asset_bridge</span>
-        <span class="step">3 · Activo GLPI + Infocom</span>
+        <span class="step">3 · Resolver-o-crear GLPI + Infocom</span>
         <span class="step">4 · companyqr</span>
         <span class="step">5 · Etiqueta (Snipe)</span>
       </div>
       <table>
-        <thead><tr><th>Ítem inventariable</th><th>Snipe asset_tag</th><th>Activo GLPI</th><th>QR</th><th>Etiqueta</th></tr></thead>
+        <thead><tr><th>Unidad</th><th>Serial</th><th>Snipe asset_tag</th><th>Activo GLPI (resuelto/creado)</th><th>QR</th><th>Etiqueta</th></tr></thead>
         <tbody>
-          <tr><td>Notebook 14" (x2)</td><td><b>NB-001245</b>, <b>NB-001246</b></td><td>Computer #4821, #4822</td><td>generado</td><td>lista</td></tr>
+          <tr><td>unit 1</td><td>SN-8841A</td><td><b>NB-001245</b></td><td>Computer #4821 (resuelto: GLPI Agent)</td><td>generado</td><td>lista</td></tr>
+          <tr><td>unit 2</td><td>SN-8842B</td><td><b>NB-001246</b></td><td>Computer #4822 (creado)</td><td>generado</td><td>lista</td></tr>
         </tbody>
       </table>
       <div class="grid3">

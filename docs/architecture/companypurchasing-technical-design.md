@@ -72,13 +72,16 @@ la secuencia vive en tabla propia (nunca el `items_id`), con reintento ante coli
 (patrón validado en `companyqr`).
 
 ## Integración inventario + Snipe-IT + companyqr (resumen; detalle en el doc de integración)
-`RECIBIDA` + ítem `is_inventoriable` → `InventoryHandoff` (idempotente por
-`purchase:<requests_id>:item:<line_no>`): **1)** crear activo en **Snipe-IT** (API; dueño del
-asset tag/físico) → **2)** `asset_bridge` → **3)** crear/vincular **activo GLPI** (itemtype
-configurable) + poblar **`Infocom`** (costo/proveedor/presupuesto) → **4)** **generar `companyqr`**
-→ **5)** etiqueta con el motor de Snipe (QR → gateway GLPI2). Ver ADR-0015 y
-`snipeit-integration-architecture.md` §Flujo D. **No** se usa `orders` de Snipe como workflow
-(no lo es). Sujeto a permisos + ACL de entidad + token de servicio Snipe de mínimo privilegio.
+`RECIBIDA` + ítem `is_inventoriable` con cantidad **N** → **N unidades físicas** (`receipt_unit`);
+`InventoryHandoff` es **idempotente por unidad** (`purchase:<req>:item:<line>:unit:<n>`). Por cada
+unidad: **1)** resolver **entidad** por company/entity mapping (no mapeada → conflicto) → **2)**
+crear activo en **Snipe-IT** (API; dueño del asset tag/físico) + serial de la unidad → **3)**
+`asset_bridge` → **4)** **RESOLVER-o-crear** el **activo GLPI** (dedup con GLPI Agent por
+serial/UUID; ambiguo → conflicto, sin auto-merge) + poblar **`Infocom`** (costo/presupuesto;
+**proveedor = el de la compra GLPI2**) → **5)** **generar `companyqr`** → **6)** etiqueta con el
+motor de Snipe (QR → gateway GLPI2). Ver ADR-0015 y `snipeit-integration-architecture.md` §Flujo D.
+**No** se usa `orders` de Snipe como workflow (no lo es). Sujeto a ACL de entidad + cuenta de
+servicio Snipe con rol restringido (RBAC por usuario; sin scopes por endpoint).
 
 ## Métricas (preparadas desde el modelo)
 Derivables de `..._requests`/`..._items`/`..._events`/instancia de workflow, por entidad:

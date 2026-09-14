@@ -58,21 +58,32 @@ de auditoría. Idempotente por `snipe_asset_id + checkout_id`.
 Quitar la asignación física reflejada en GLPI, **conservando historial**.
 
 ### D — Compra aprobada y recibida (GLPI2 → Snipe → GLPI) [SI-4]
+**Cardinalidad por unidad:** una línea con cantidad **N** genera **N unidades físicas**
+(`receipt_unit`), cada una con su propio serial / activo Snipe / activo GLPI / `asset_bridge`.
+La idempotencia es **por unidad**.
 ```
-companypurchasing: purchase.received  (ítem is_inventoriable = 1)
-   │  idempotency_key = purchase:<requests_id>:item:<line_no>
-   ▼  buscar-o-crear en asset_bridge por la clave
-   ├─ ya existe → no-op (idempotente)
-   └─ no existe:
-        1) crear activo en Snipe-IT (POST /api/v1/hardware) con modelo/categoría mapeados
-        2) obtener/asignar asset_tag (política Snipe)
-        3) crear/vincular activo GLPI (itemtype configurable) + poblar Infocom (costo/proveedor/presupuesto)
-        4) generar companyqr (Fase 1) + registrar companyqr_code_id
-        5) insertar fila asset_bridge (sync_status=mapped)
-        6) etiqueta imprimible por el motor de Snipe (QR → gateway GLPI2)
+companypurchasing: purchase.received  (ítem is_inventoriable = 1, cantidad N)
+   └─ para cada unidad n = 1..N:
+       idempotency_key = purchase:<requests_id>:item:<line_no>:unit:<n>
+       ▼  buscar-o-crear la receipt_unit / asset_bridge por la clave (POR UNIDAD)
+       ├─ ya existe → no-op (idempotente)
+       └─ no existe:
+            1) resolver **entidad** por company/entity mapping (si no mapeada → conflict, NO inferir)
+            2) crear activo en Snipe-IT (POST /api/v1/hardware) con modelo/categoría mapeados
+            3) obtener/asignar asset_tag (Snipe) y serial de la unidad (política de serial)
+            4) **RESOLVER-o-crear** el activo GLPI: buscar un activo existente (p. ej. descubierto
+               por GLPI Agent) por serial/UUID/identificador soportado → si hay match único, VINCULAR;
+               si es **ambiguo** → conflict (sin auto-merge); si no existe → crear (itemtype config)
+            5) poblar Infocom (costo/presupuesto; **proveedor = el de la compra GLPI2**)
+            6) generar companyqr (Fase 1) + registrar companyqr_code_id
+            7) insertar/actualizar fila asset_bridge (sync_status=mapped)
+            8) etiqueta imprimible por el motor de Snipe (QR → gateway GLPI2)
 ```
-**No** se usa `orders` de Snipe como workflow (confirmado: no es workflow). El workflow/compra
-es GLPI2 (`companypurchasing`).
+- **Dedup con GLPI Agent (item 5):** el paso 4 **nunca** crea a ciegas: primero intenta
+  **resolver** un activo GLPI existente por identificadores soportados; sólo crea si no existe;
+  un match **ambiguo** queda en `conflict` para decisión humana (jamás une dos activos ambiguos).
+- **No** se usa `orders` de Snipe como workflow (confirmado: no es workflow). El workflow/compra
+  es GLPI2 (`companypurchasing`).
 
 ### E — Solicitud de equipo [futuro]
 Primera etapa: **requestable assets nativo de Snipe**. El portal GLPI2 sólo **enlaza/consulta**
@@ -83,9 +94,16 @@ Snipe conserva la aceptación/firma (`CheckoutAcceptance`). GLPI2 **sólo refere
 estado/fecha/URL/hash. **No** se copian firmas/PII entre sistemas.
 
 ## Reconciliación y conflictos (SI-1)
-- **Read-only:** listar activos Snipe (paginado por API), cruzar con `asset_bridge` y con activos
-  GLPI; clasificar: `mapped` · `orphan_snipe` (sólo en Snipe) · `orphan_glpi` (sólo en GLPI) ·
-  `conflict` (divergencia en campo con dueño único).
+- **SI-1 es read-only sobre Snipe y sobre los activos core de GLPI** (no crea ni modifica esos
+  datos), **pero sí persiste en tablas propias de `companyintegrations`**: `asset_bridge`,
+  `receipt_units`, resultados de reconciliación, **auditoría** y `estado/error/timestamps`.
+- **Cruce:** listar activos Snipe (paginado por API), cruzar con `asset_bridge` y con activos GLPI;
+  clasificar: `mapped` · `orphan_snipe` (sólo en Snipe) · `orphan_glpi` (sólo en GLPI) ·
+  `conflict` (divergencia en campo con dueño único) · `serial_conflict` · **`company_unmapped`**
+  (compañía Snipe sin entidad GLPI mapeada).
+- **Entidad/compañía:** si la `company` de Snipe **no** está mapeada a una entidad GLPI, la fila
+  queda `company_unmapped`/`pending` y **no** se sincroniza a una entidad **inferida** (nunca se
+  adivina la entidad).
 - **No auto-resuelve** conflictos: los reporta en un **tablero de diferencias** para decisión
   humana. La precedencia por campo la fija la matriz Source of Truth.
 - Ejecutable como **tarea programada** (CronTask GLPI) + on-demand; respeta **entidad**.
@@ -105,8 +123,9 @@ estado/fecha/URL/hash. **No** se copian firmas/PII entre sistemas.
 
 ## Impacto sobre módulos existentes
 - **`companypurchasing` (ADR-0013):** el flujo de recepción cambia a
-  `received → si inventariable → Snipe → asset_bridge → GLPI → companyqr → etiqueta` (idempotente).
-  El `InventoryHandoff` delega la creación física a Snipe (no crea el activo GLPI "a secas").
+  `received → si inventariable → POR UNIDAD → Snipe → asset_bridge → resolver-o-crear GLPI →
+  companyqr → etiqueta` (idempotente **por unidad**). El `InventoryHandoff` delega la creación
+  física a Snipe y **resuelve** (no duplica) el activo GLPI existente (dedup con GLPI Agent).
 - **`companyqr` (ADR-0011):** se **mantiene**. La ficha segura y la creación de ticket no cambian;
   sólo se añade una **puerta de entrada por `asset_tag`** (gateway) que resuelve vía `asset_bridge`
   y luego entra al flujo `companyqr` habitual. La etiqueta puede imprimirse desde Snipe con el QR
@@ -118,10 +137,10 @@ estado/fecha/URL/hash. **No** se copian firmas/PII entre sistemas.
 | Fase | Alcance | Escribe datos |
 |---|---|---|
 | **SI-0** | Contrato/descubrimiento: ADR, matriz ownership, mapeos, OpenAPI del hub, credenciales sandbox | no |
-| **SI-1** | `SnipeItClient` + auth + `asset_bridge` + **reconciliación read-only** + mapping + **gateway QR** + prueba de label | **no** (read-only) |
+| **SI-1** | `SnipeItClient` + auth + `asset_bridge`/`receipt_units` + **reconciliación read-only** + mapping + **gateway QR** + prueba de label | **no** en Snipe ni en activos core GLPI; **sí** en tablas propias de `companyintegrations` (bridge, reconciliación, auditoría, estado/error/timestamps) |
 | **SI-2** | Checkout/checkin Snipe → GLPI (custodia) | sí (reflejo en GLPI) |
 | **SI-3** | Labels/impresión masiva completa (70,75×24 amarilla, QR→gateway) | config |
-| **SI-4** | Compra recibida → crear activo Snipe → bridge → GLPI → etiqueta | sí (idempotente) |
+| **SI-4** | Compra recibida → por unidad: Snipe → bridge → resolver-o-crear GLPI → etiqueta | sí (idempotente por unidad) |
 | **SI-5** | Aceptación/firma física referenciada desde GLPI2 | referencia |
 
 > **La primera implementación (tras aprobación) es SOLO SI-1** (read-only). No checkout/checkin

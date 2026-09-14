@@ -67,6 +67,35 @@ crear/vincular activo GLPI → companyqr → etiqueta`. **Idempotente** (reinten
 - (−) Dependencia operativa de una API externa; se diseña para **degradar** (falla Snipe no tumba
   GLPI; falla GLPI deja evento reintentable).
 
+## Correcciones de diseño (revisión previa a implementación)
+1. **Cardinalidad Compras→Activos:** una línea con cantidad **N** produce **N activos físicos**.
+   Se modela la **unidad física recibida** (`receipt_unit`) y la idempotencia es **por unidad**:
+   `purchase:<req>:item:<line>:unit:<n>`. Cada unidad tiene su propio serial, `snipe_asset_id`/
+   `tag`, activo GLPI y `asset_bridge`. (Detalle en `../architecture/asset-bridge-model.md`.)
+2. **Identidad ≠ custodia:** Snipe es SoT de **custodia** (checkout/checkin), **no** de la
+   **identidad corporativa**. Los usuarios son SoT de **GLPI/IdP**; `map_users` explícito; nunca
+   correlación automática por nombre/email.
+3. **Compañía ↔ entidad:** `map_companies` (`snipe_company_id ↔ glpi_entity_id`). Un activo de
+   compañía **no** mapeada queda en `conflict`/`pending` y **no** se sincroniza a una entidad
+   inferida. Test multi-entidad obligatorio.
+4. **Proveedor de adquisición = GLPI2/GLPI** (`Supplier`): Snipe lo **recibe como reflejo/mapping**,
+   no es segundo dueño.
+5. **Dedup con GLPI Agent:** en SI-4 el paso GLPI es **resolver-o-crear**: buscar un activo GLPI
+   existente (p. ej. descubierto por Agent) por serial/UUID/identificador soportado y **vincular**;
+   crear **sólo** si no existe; un match **ambiguo** queda en `conflict` (jamás auto-merge).
+6. **Política de serial:** origina quien crea el activo físico (Snipe/Compras); GLPI Agent lo
+   **verifica**; divergencia Snipe↔GLPI → `serial_conflict` (decisión humana), **sin** sobreescritura
+   silenciosa.
+7. **Alcance SI-1:** read-only sobre **Snipe** y sobre **activos core de GLPI**; **sí** persiste en
+   **tablas propias** de `companyintegrations` (`asset_bridge`, `receipt_units`, reconciliación,
+   auditoría, estado/error/timestamps).
+8. **Permisos reales de Snipe-IT (v8.7.2):** autenticación **API por Laravel Passport**
+   (`config/auth.php`: `api → passport`); autorización por **RBAC granular por usuario**
+   (`config/permissions.php`: `assets.view/create/edit/checkout/checkin/audit/...`). **No** hay
+   *scopes por endpoint*: el token (personal access token) **hereda los permisos del usuario**.
+   → Mínimo privilegio = **cuenta de servicio con rol restringido**, no scopes por endpoint (ver
+   `../security/snipeit-integration-security.md`).
+
 ## Regla 0 / cumplimiento
 No se modifica el core de GLPI ni el de Snipe-IT; integración sólo por **API soportada**. Sin
 copiar código (AGPL). Verificación de core intacto por CI, como en fases previas.

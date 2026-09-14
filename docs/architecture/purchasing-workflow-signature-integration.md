@@ -45,23 +45,26 @@ Snipe-IT es **autoridad de lo físico** (asset tag, custodia, etiquetas). Por es
 activo en la recepción pasa **primero por Snipe-IT** y se puentea a GLPI con `asset_bridge`:
 ```
 Compra RECIBIDA
-   │  (por cada ítem is_inventoriable = 1)  ·  idempotency_key = purchase:<requests_id>:item:<line_no>
-   ▼
-InventoryHandoff (idempotente): buscar-o-crear por la clave en asset_bridge
+   │  (ítem is_inventoriable = 1, cantidad N)  ·  POR UNIDAD n=1..N
+   ▼  idempotency_key = purchase:<requests_id>:item:<line_no>:unit:<n>
+InventoryHandoff (idempotente por unidad): buscar-o-crear receipt_unit / asset_bridge por la clave
    ├─ ya existe → no-op
    └─ no existe:
-        1) crear activo en Snipe-IT (POST /api/v1/hardware, modelo/categoría mapeados)
-        2) obtener/asignar asset_tag (Snipe = dueño del código físico)
-        3) crear/vincular activo GLPI (itemtype configurable) + poblar Infocom (costo/proveedor/presupuesto)
-        4) generar companyqr (ADR-0011) + registrar companyqr_code_id en asset_bridge
-        5) imprimir etiqueta con el motor de Snipe (70,75×24 amarilla; QR → gateway GLPI2)
+        1) resolver ENTIDAD por company/entity mapping (no mapeada → conflicto, sin inferir)
+        2) crear activo en Snipe-IT (POST /api/v1/hardware, modelo/categoría mapeados)
+        3) obtener/asignar asset_tag (Snipe) + serial de la unidad (política de serial)
+        4) RESOLVER-o-crear activo GLPI (dedup con GLPI Agent por serial/UUID; ambiguo → conflicto,
+           sin auto-merge) + poblar Infocom (costo/presupuesto; proveedor = el de la compra GLPI2)
+        5) generar companyqr (ADR-0011) + registrar companyqr_code_id en asset_bridge
+        6) imprimir etiqueta con el motor de Snipe (70,75×24 amarilla; QR → gateway GLPI2)
 ```
 - **No se implementa aún**; se documenta (ver `snipeit-integration-architecture.md` §Flujo D y
   `asset-bridge-model.md`). Snipe `orders` **no** se usa como workflow (no lo es).
-- **Permisos:** crear el itemtype destino + `companyqr:generate`/`print` + token de servicio Snipe
-  (mínimo privilegio), todo bajo ACL de **entidad**.
-- **Idempotencia:** reintentar `receive` **no** duplica activos (Snipe ni GLPI) ni códigos, por la
-  `idempotency_key` y los UNIQUE de `asset_bridge`.
+- **Permisos:** crear/resolver el itemtype destino + `companyqr:generate`/`print` + cuenta de
+  servicio Snipe con **rol restringido** (RBAC por usuario; sin scopes por endpoint), todo bajo
+  ACL de **entidad**.
+- **Idempotencia POR UNIDAD:** N unidades → N activos; reintentar `receive` **no** duplica activos
+  (Snipe ni GLPI) ni códigos, por la `idempotency_key` de unidad y los UNIQUE de `asset_bridge`.
 
 ## Eventos y API (item 12)
 ### Eventos de dominio (emitidos por `companypurchasing`)

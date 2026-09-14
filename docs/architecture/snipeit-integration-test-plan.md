@@ -15,8 +15,18 @@ del cliente (nunca la DB de Snipe).
 ## Integración (fail-closed; contra sandbox/stub)
 - 🔒 **Mapping único:** un mismo `asset_tag` **no** puede mapear a dos activos (UNIQUE) ni un
   activo GLPI a dos Snipe.
-- 🔒 **Idempotencia:** reintentar el mismo evento (misma `idempotency_key`) **no** crea dos
-  activos ni dos checkouts.
+- 🔒 **Idempotencia por unidad:** una línea con cantidad **N** produce **N** activos (uno por
+  `receipt_unit`), cada uno con su serial/Snipe/GLPI/bridge; **reintentar** con la misma
+  `purchase:<req>:item:<line>:unit:<n>` **no** crea un activo extra (ni en Snipe ni en GLPI).
+- 🔒 **Compañía/entidad:** un activo Snipe cuya `company` **no** está mapeada a una entidad GLPI
+  → queda `company_unmapped`/`pending` y **no** se sincroniza a una entidad inferida (obligatorio,
+  multi-entidad).
+- 🔒 **Dedup con GLPI Agent:** si ya existe un activo GLPI (por serial/UUID) → **vincular**, no
+  duplicar; match **ambiguo** → `conflict`, **sin** auto-merge.
+- 🔒 **Serial:** divergencia Snipe↔GLPI → `serial_conflict` reportado; **nunca** sobreescritura
+  silenciosa.
+- 🔒 **Identidad de usuarios:** **no** se correlacionan usuarios automáticamente por nombre/email;
+  sólo por `map_users` aprobado.
 - 🔒 **Sin DB directa:** la integración sólo usa endpoints HTTP (verificado por diseño/lint del
   cliente; ninguna conexión a la DB de Snipe).
 - 🔒 **Sin secretos en logs:** ningún token/credencial aparece en logs/auditoría.
@@ -37,7 +47,11 @@ del cliente (nunca la DB de Snipe).
 - [ ] mapping único · [ ] idempotencia · [ ] no acceso DB directo · [ ] ningún secreto en logs ·
   [ ] falla Snipe no tumba GLPI · [ ] falla GLPI deja evento pendiente/reintentable ·
   [ ] multi-entidad respetada · [ ] QR exige GLPI ACL · [ ] no fuga IP/MAC/hostname/VLAN ·
-  [ ] label física correcta · [ ] no duplicar activo al reintentar.
+  [ ] label física correcta · [ ] no duplicar activo al reintentar ·
+  [ ] **idempotencia por unidad (N unidades → N activos)** · [ ] **compañía no mapeada → conflicto
+  (no entidad inferida)** · [ ] **dedup GLPI Agent (resolver-o-crear; ambiguo → conflicto)** ·
+  [ ] **serial: divergencia → conflicto, sin sobreescritura** · [ ] **usuarios no correlacionados
+  por nombre**.
 
 ## Fuera de alcance de SI-1 (fases posteriores)
 checkout/checkin sync (SI-2) · labels masivas completas (SI-3) · compras→activo (SI-4) ·

@@ -4,9 +4,17 @@ Complementa `security-baseline.md` y ADR-0015. **Diseño, sin implementación.**
 **sólo por API soportada**; **nunca** acceso directo a la base de datos de Snipe-IT ni a tablas
 core de GLPI para saltar reglas.
 
-## Credenciales y tokens
-- **Service account** dedicado en Snipe-IT con **mínimo privilegio** (sólo los endpoints que la
-  integración usa por fase; SI-1 = lectura + labels).
+## Credenciales y tokens (modelo real de Snipe-IT v8.7.2)
+- **Autenticación API = Laravel Passport** (`config/auth.php`: `api → passport`). El **personal
+  access token** autentica **como un usuario**; la **autorización** la da el **RBAC granular por
+  usuario** de Snipe (`config/permissions.php`: `assets.view/create/edit/checkout/checkin/
+  audit/...`). **No** existen *scopes por endpoint*.
+- **Mínimo privilegio ⇒ cuenta de servicio con ROL restringido**, no scopes por endpoint. Para
+  **SI-1 (read-only)** el rol basta con **lectura de activos** (`assets.view`) + ver labels; nada
+  de create/edit/checkout. Para fases de escritura se amplía el rol lo mínimo (p. ej. `assets.create`
+  en SI-4).
+- **No documentar scopes por endpoint** (la plataforma no los soporta): el control es el conjunto
+  de permisos del rol del usuario del token.
 - **Token fuera de Git** (secrets del entorno / gestor de secretos), **nunca** en código ni en el
   repo (ver `secrets-management.md`). `.env.example` sólo con placeholders.
 - Rotación de token soportada por configuración; sin credenciales embebidas.
