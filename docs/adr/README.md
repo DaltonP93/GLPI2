@@ -33,5 +33,6 @@ las cosas son como son.
 | [0012](ADR-0012-companyworkflow.md) | `companyworkflow` — motor de workflow configurable y reusable (Fase 2) | Aceptado (diseño) |
 | [0013](ADR-0013-companypurchasing.md) | `companypurchasing` — solicitudes de compra sobre el motor (Fase 2) | Aceptado (diseño) |
 | [0014](ADR-0014-companysignature.md) | `companysignature` — aprobación electrónica interna y evidencia (Fase 2) | Aceptado (diseño) |
+| [0015](ADR-0015-snipeit-integration.md) | Integración con Snipe-IT (gestión física de activos, API-only) | Aceptado (diseño) |
 
 > Plantilla para nuevos ADR: [`adr-template.md`](adr-template.md).

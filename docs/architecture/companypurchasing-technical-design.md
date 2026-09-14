@@ -71,10 +71,14 @@ ver `companyworkflow-technical-design.md` §Máquina de estados / §Matriz). `co
 la secuencia vive en tabla propia (nunca el `items_id`), con reintento ante colisión UNIQUE
 (patrón validado en `companyqr`).
 
-## Integración inventario + companyqr (resumen; detalle en el doc de integración)
-`RECIBIDA` + ítem `is_inventoriable` → `InventoryHandoff`: crear/vincular **activo GLPI**
-(itemtype configurable), poblar **`Infocom`** (costo/proveedor/presupuesto), asignar nº de
-inventario, y **generar código `companyqr`** + etiqueta. **Idempotente** y sujeto a permisos.
+## Integración inventario + Snipe-IT + companyqr (resumen; detalle en el doc de integración)
+`RECIBIDA` + ítem `is_inventoriable` → `InventoryHandoff` (idempotente por
+`purchase:<requests_id>:item:<line_no>`): **1)** crear activo en **Snipe-IT** (API; dueño del
+asset tag/físico) → **2)** `asset_bridge` → **3)** crear/vincular **activo GLPI** (itemtype
+configurable) + poblar **`Infocom`** (costo/proveedor/presupuesto) → **4)** **generar `companyqr`**
+→ **5)** etiqueta con el motor de Snipe (QR → gateway GLPI2). Ver ADR-0015 y
+`snipeit-integration-architecture.md` §Flujo D. **No** se usa `orders` de Snipe como workflow
+(no lo es). Sujeto a permisos + ACL de entidad + token de servicio Snipe de mínimo privilegio.
 
 ## Métricas (preparadas desde el modelo)
 Derivables de `..._requests`/`..._items`/`..._events`/instancia de workflow, por entidad:

@@ -31,8 +31,10 @@ El circuito completo (máquina de estados + matriz de transiciones) vive en `com
 - **Cotizaciones y documentos versionados** (Document nativo), ligados a la solicitud.
 - **Devolución para corrección** (`DEVUELTA`) permite editar y reenviar; una **edición
   sustantiva tras aprobar reinicia** las aprobaciones afectadas (evidencia/firma).
-- Al **recibir** un bien inventariable → crear/vincular **activo GLPI**, poblar `Infocom` y
-  **generar QR** (`companyqr`). Ver flujo en `../architecture/purchasing-workflow-signature-integration.md`.
+- Al **recibir** un bien inventariable → **crear activo en Snipe-IT** (autoridad de lo físico) →
+  `asset_bridge` → **crear/vincular activo GLPI** + poblar `Infocom` → **generar QR** (`companyqr`)
+  → **etiqueta** (motor de Snipe; QR → gateway GLPI2). **Idempotente**. Ver ADR-0015 y
+  `../architecture/snipeit-integration-architecture.md`.
 - Importes en **PYG** (sin decimales por defecto): estimado / aprobado / final.
 
 ## Multi-entidad

@@ -58,6 +58,7 @@
   <button data-v="gerencia">5 · Gerencia Financiera</button>
   <button data-v="historial">6 · Historial/auditoría</button>
   <button data-v="pdf">7 · PDF aprobado</button>
+  <button data-v="alta">8 · Alta de activo (post-RECIBIDA)</button>
 </nav>
 <main>
 
@@ -257,6 +258,42 @@
           <i>Evidencia interna: identidad autenticada + acción + hash + timestamp + auditoría. Una imagen de firma NO es firma digital.</i>
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- 8 ALTA DE ACTIVO POST-RECIBIDA (Snipe-IT + asset_bridge + companyqr) -->
+  <section class="view" id="alta">
+    <div class="card">
+      <h2>Alta de activo tras <span class="chip">RECIBIDA</span></h2>
+      <p class="note">Snipe-IT es autoridad de lo físico (asset tag, etiqueta). El alta pasa
+        primero por Snipe, se puentea a GLPI con <code>asset_bridge</code> y se genera el QR
+        seguro de <code>companyqr</code>. Idempotente: reintentar no duplica.</p>
+      <div class="banner">Sólo se procesan los ítems marcados <b>inventariable</b>.
+        Clave de idempotencia: <code>purchase:CC-2026-000123:item:1</code>.</div>
+      <div class="steps">
+        <span class="step done">RECIBIDA</span>
+        <span class="step cur">1 · Crear activo en Snipe-IT</span>
+        <span class="step">2 · asset_bridge</span>
+        <span class="step">3 · Activo GLPI + Infocom</span>
+        <span class="step">4 · companyqr</span>
+        <span class="step">5 · Etiqueta (Snipe)</span>
+      </div>
+      <table>
+        <thead><tr><th>Ítem inventariable</th><th>Snipe asset_tag</th><th>Activo GLPI</th><th>QR</th><th>Etiqueta</th></tr></thead>
+        <tbody>
+          <tr><td>Notebook 14" (x2)</td><td><b>NB-001245</b>, <b>NB-001246</b></td><td>Computer #4821, #4822</td><td>generado</td><td>lista</td></tr>
+        </tbody>
+      </table>
+      <div class="grid3">
+        <div><div class="kv"><span class="k">Proveedor (Infocom)</span><span class="v">TecnoSA</span></div></div>
+        <div><div class="kv"><span class="k">Costo (Infocom)</span><span class="v">₲ 2.825.000 c/u</span></div></div>
+        <div><div class="kv"><span class="k">Entidad</span><span class="v">Casa Central</span></div></div>
+      </div>
+      <p class="muted">La etiqueta se imprime con el <b>motor de Snipe-IT</b> (70,75×24 mm amarilla)
+        con el QR apuntando al <b>gateway GLPI2</b> (<code>/asset/NB-001245</code>): el asset tag
+        identifica; GLPI autoriza. Sin IP/MAC/hostname/VLAN.</p>
+      <button class="btn sec">Ver etiqueta (mock companyqr)</button>
+      <button class="btn">Reintentar handoff (idempotente)</button>
     </div>
   </section>
 

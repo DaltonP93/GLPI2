@@ -40,23 +40,28 @@ deliver → ENTREGADA → close → CERRADA
 En cualquier etapa de aprobación: `reject`→RECHAZADA, `return`→DEVUELTA (editable). Una **edición
 sustantiva** tras aprobar **reinicia** las aprobaciones afectadas (ver `companysignature`).
 
-## Integración con inventario + companyqr (flujo, item 6)
+## Integración con inventario + Snipe-IT + companyqr (flujo, item 6 — actualizado con ADR-0015)
+Snipe-IT es **autoridad de lo físico** (asset tag, custodia, etiquetas). Por eso la creación de
+activo en la recepción pasa **primero por Snipe-IT** y se puentea a GLPI con `asset_bridge`:
 ```
 Compra RECIBIDA
-   │  (por cada ítem is_inventoriable = 1)
+   │  (por cada ítem is_inventoriable = 1)  ·  idempotency_key = purchase:<requests_id>:item:<line_no>
    ▼
-marcar ítem inventariable → InventoryHandoff (idempotente, con permisos)
-   ▼
-crear/vincular Activo GLPI (itemtype configurable) ── poblar Infocom (costo/proveedor/presupuesto)
-   ▼
-asignar número de inventario (otherserial o public_code companyqr)
-   ▼
-generar código companyqr (ADR-0011) → imprimir etiqueta 70,75×24 mm
+InventoryHandoff (idempotente): buscar-o-crear por la clave en asset_bridge
+   ├─ ya existe → no-op
+   └─ no existe:
+        1) crear activo en Snipe-IT (POST /api/v1/hardware, modelo/categoría mapeados)
+        2) obtener/asignar asset_tag (Snipe = dueño del código físico)
+        3) crear/vincular activo GLPI (itemtype configurable) + poblar Infocom (costo/proveedor/presupuesto)
+        4) generar companyqr (ADR-0011) + registrar companyqr_code_id en asset_bridge
+        5) imprimir etiqueta con el motor de Snipe (70,75×24 amarilla; QR → gateway GLPI2)
 ```
-- **No se implementa aún**; se documenta. **Permisos:** requiere derecho de crear el itemtype
-  destino + derecho `companyqr:generate`/`print`, todo bajo ACL de **entidad**.
-- **Idempotencia:** reintentar `receive` no duplica activos ni códigos (clave por
-  `requests_id + item line`).
+- **No se implementa aún**; se documenta (ver `snipeit-integration-architecture.md` §Flujo D y
+  `asset-bridge-model.md`). Snipe `orders` **no** se usa como workflow (no lo es).
+- **Permisos:** crear el itemtype destino + `companyqr:generate`/`print` + token de servicio Snipe
+  (mínimo privilegio), todo bajo ACL de **entidad**.
+- **Idempotencia:** reintentar `receive` **no** duplica activos (Snipe ni GLPI) ni códigos, por la
+  `idempotency_key` y los UNIQUE de `asset_bridge`.
 
 ## Eventos y API (item 12)
 ### Eventos de dominio (emitidos por `companypurchasing`)

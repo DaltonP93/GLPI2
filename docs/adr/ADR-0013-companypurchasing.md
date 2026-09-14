@@ -25,8 +25,10 @@ Construir **`companypurchasing`** como **dominio de compras** que:
    (aislamiento y roles), Notificaciones, `Log`, TCPDF, API v2 + Webhooks.
 4. **Moneda PYG** por defecto (sin decimales), con importes estimado/aprobado/final; nada de
    montos, departamentos ni aprobadores hardcodeados.
-5. Al **recibir**, integra con inventario + `companyqr` (ver
-   `../architecture/purchasing-workflow-signature-integration.md`).
+5. Al **recibir** un ítem inventariable, el alta de activo pasa **primero por Snipe-IT**
+   (autoridad de lo físico) → `asset_bridge` → activo GLPI → `companyqr` → etiqueta, de forma
+   **idempotente** (ver ADR-0015 y `../architecture/snipeit-integration-architecture.md` §Flujo D).
+   Snipe `orders` **no** es workflow (confirmado en su código); el workflow es este módulo.
 6. Emite el **documento aprobado** (PDF versionado con hash + QR de verificación) vía
    `companysignature` (ADR-0014).
 
