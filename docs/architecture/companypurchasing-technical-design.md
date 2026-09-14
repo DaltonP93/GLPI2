@@ -45,8 +45,27 @@ Prefijo `glpi_plugin_companypurchasing_`.
 
 ### `..._items` (uno o varios por solicitud)
 `id, requests_id, line_no, description, quantity, unit, category, estimated_unit_price,
-estimated_line_total, is_inventoriable(bool), notes` — al recibir, los `is_inventoriable`
-disparan el handoff a inventario/`companyqr`.
+estimated_line_total, is_inventoriable(bool), notes`.
+
+**Cantidades de recepción (recepción parcial):** una línea `qty=N` puede recibirse en varios
+eventos/lotes; el modelo lleva el conteo:
+- `ordered_qty` — cantidad pedida (normalmente = `quantity`).
+- `received_qty` — acumulado recibido (suma de `receipt_unit` de la línea).
+- `pending_qty` — derivable (`ordered_qty − received_qty`); una línea puede quedar **parcialmente
+  recibida** hasta completar `N`.
+
+**Costos por línea (NO prorratear el total general):** el costo del activo **no** se calcula
+dividiendo el total general de la solicitud/cotización entre los activos. Se registra:
+- `final_unit_price` — **precio final por unidad de la línea** (tras negociación/cotización
+  seleccionada).
+- `final_line_total` — total final de la línea.
+- **Ajustes opcionales por línea:** `discount`, `tax`, `extra_expense` (flete/instalación/otros),
+  con política de asignación configurable (incluidos o no en el costo del activo).
+- `unit_cost` (derivado) — costo atribuible a **cada unidad** de esa línea (= `final_unit_price`
+  ± ajustes según política). Es el valor que viaja a `receipt_unit.unit_cost` y a `Infocom`.
+
+Al recibir, los ítems `is_inventoriable` disparan el handoff a inventario/Snipe/`companyqr`; cada
+unidad hereda su `unit_cost` **de la línea**, no del total general.
 
 ### `..._quotes` (cotizaciones)
 `id, requests_id, suppliers_id(null)/supplier_text, documents_id(Document nativo), amount,
@@ -72,16 +91,22 @@ la secuencia vive en tabla propia (nunca el `items_id`), con reintento ante coli
 (patrón validado en `companyqr`).
 
 ## Integración inventario + Snipe-IT + companyqr (resumen; detalle en el doc de integración)
-`RECIBIDA` + ítem `is_inventoriable` con cantidad **N** → **N unidades físicas** (`receipt_unit`);
-`InventoryHandoff` es **idempotente por unidad** (`purchase:<req>:item:<line>:unit:<n>`). Por cada
-unidad: **1)** resolver **entidad** por company/entity mapping (no mapeada → conflicto) → **2)**
-crear activo en **Snipe-IT** (API; dueño del asset tag/físico) + serial de la unidad → **3)**
-`asset_bridge` → **4)** **RESOLVER-o-crear** el **activo GLPI** (dedup con GLPI Agent por
-serial/UUID; ambiguo → conflicto, sin auto-merge) + poblar **`Infocom`** (costo/presupuesto;
-**proveedor = el de la compra GLPI2**) → **5)** **generar `companyqr`** → **6)** etiqueta con el
-motor de Snipe (QR → gateway GLPI2). Ver ADR-0015 y `snipeit-integration-architecture.md` §Flujo D.
-**No** se usa `orders` de Snipe como workflow (no lo es). Sujeto a ACL de entidad + cuenta de
-servicio Snipe con rol restringido (RBAC por usuario; sin scopes por endpoint).
+`RECIBIDA` + ítem `is_inventoriable` → **una unidad física (`receipt_unit`) por unidad recibida**,
+admitiendo **recepciones parciales** (una línea `qty=N` se puede recibir en varios lotes). Cada
+`receipt_unit` tiene **identidad canónica `receipt_unit_uuid`** (UUID interno inmutable); el
+`InventoryHandoff` es **idempotente por ese UUID** (la clave `purchase:<req>:item:<line>:unit:<n>`
+es sólo **correlación/debug**). El alta de cada unidad es una **saga** con estado persistente
+(reintento resume desde el último paso confirmado, nunca duplica). Por cada unidad: **1)** resolver
+**entidad** por company/entity mapping (no mapeada → conflicto) → **2)** crear activo en **Snipe-IT**
+(API; dueño del asset tag/físico; **idempotencia saliente por buscar-primero**) + serial de la
+unidad → **3)** `asset_bridge` → **4)** **RESOLVER-o-crear** el **activo GLPI** (dedup con GLPI
+Agent por serial/UUID; ambiguo → conflicto, sin auto-merge) + poblar **`Infocom`** con el **costo
+atribuible a esa unidad** (`unit_cost` derivado de la **línea**, **no** del total general
+prorrateado; **proveedor = el de la compra GLPI2**) → **5)** **generar `companyqr`** → **6)**
+etiqueta con el motor de Snipe (QR → gateway GLPI2). Ver ADR-0015 y
+`snipeit-integration-architecture.md` §Flujo D. **No** se usa `orders` de Snipe como workflow (no
+lo es). Sujeto a ACL de entidad + cuenta de servicio Snipe con rol restringido (RBAC por usuario;
+sin scopes por endpoint).
 
 ## Métricas (preparadas desde el modelo)
 Derivables de `..._requests`/`..._items`/`..._events`/instancia de workflow, por entidad:
@@ -96,8 +121,11 @@ Derivables de `..._requests`/`..._items`/`..._events`/instancia de workflow, por
 
 ## Plan de tests (tras aprobación)
 - **Unit:** numeración (unicidad/reintento); cálculo de `amount_estimated` (suma de líneas);
-  selección de cotización (una sola `is_selected`).
+  selección de cotización (una sola `is_selected`); **costo por línea** (`unit_cost` derivado de
+  `final_unit_price` ± descuento/impuesto/gasto, **no** del total general prorrateado).
 - **Integración (fail-closed):** 🔒 multi-entidad (no ver/actuar solicitudes de otra entidad);
   ciclo completo por el motor; snapshot de estado consistente con la instancia; handoff a
-  inventario **idempotente**; auditoría de cambios de monto/ítems/proveedor.
+  inventario **idempotente por `receipt_unit_uuid`** (incluye **recepción parcial**: 4+6 de una
+  línea de 10 sin duplicar); `Infocom` recibe el `unit_cost` de la línea; auditoría de cambios de
+  monto/ítems/proveedor.
 - **E2E HTTP:** nueva solicitud → envío → aprobación jefe → compras → gerencia → PDF aprobado.

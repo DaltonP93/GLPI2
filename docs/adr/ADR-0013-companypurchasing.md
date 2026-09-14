@@ -28,7 +28,12 @@ Construir **`companypurchasing`** como **dominio de compras** que:
 5. Al **recibir** un ítem inventariable, el alta de activo pasa **primero por Snipe-IT**
    (autoridad de lo físico) → `asset_bridge` → activo GLPI → `companyqr` → etiqueta, de forma
    **idempotente** (ver ADR-0015 y `../architecture/snipeit-integration-architecture.md` §Flujo D).
-   Snipe `orders` **no** es workflow (confirmado en su código); el workflow es este módulo.
+   Cada **unidad física** recibida (`receipt_unit`) tiene **identidad canónica `receipt_unit_uuid`**
+   (UUID inmutable) y admite **recepciones parciales** (una línea `qty=N` en varios lotes:
+   `ordered_qty`/`received_qty`/`pending_qty`). El costo que viaja a `Infocom` es el **costo
+   atribuible a la unidad** (`unit_cost` derivado del **precio final de la línea**, no del total
+   general prorrateado). El alta es una **saga** con estado persistente (reintento resume sin
+   duplicar). Snipe `orders` **no** es workflow (confirmado en su código); el workflow es este módulo.
 6. Emite el **documento aprobado** (PDF versionado con hash + QR de verificación) vía
    `companysignature` (ADR-0014).
 

@@ -28,36 +28,78 @@ Tablas **propias** (nunca DB de Snipe ni SQL directo a core). Migraciones revers
 - `UNIQUE (idempotency_key)`
 - Índices por `sync_status`, `glpi_entity_id`.
 
-### Idempotencia (no duplicar activos al reintentar) — **por unidad física**
-- **Cardinalidad:** una línea de compra con cantidad **N** produce **N activos físicos**. La
-  idempotencia es **por unidad**, no por línea:
-  `idempotency_key = "purchase:<requests_id>:item:<line_no>:unit:<n>"` (n = 1..N).
-  Cada unidad tiene **su propio** serial, `snipe_asset_id`/`snipe_asset_tag`, activo GLPI y fila
-  `asset_bridge`. Reintentar `purchase.received` con la misma clave por unidad **no** crea un
-  segundo activo.
+### Identidad canónica e idempotencia — **por unidad física**
+- **Identidad canónica = `receipt_unit_uuid`** (UUID interno inmutable), generado al **recibir
+  físicamente** la unidad. Es la identidad **técnica** que atraviesa Snipe/GLPI/companyqr.
+- `idempotency_key = "purchase:<req>:item:<line>:unit:<n>"` queda como **clave de correlación /
+  debug legible por humanos**, **no** como única identidad técnica (una reimpresión o cambio de
+  numeración de líneas no debe reasignar identidad; el UUID sí es estable).
+- Cada unidad tiene **su propio** serial, `snipe_asset_id`/`snipe_asset_tag`, activo GLPI y fila
+  `asset_bridge`. Reintentar el alta con el **mismo `receipt_unit_uuid`** **no** crea un segundo
+  activo.
+- **Idempotencia del request saliente a Snipe** (su API **no** tiene idempotency key nativa):
+  antes de `POST /hardware`, el cliente hace **buscar-primero** (por `snipe_asset_id` ya
+  persistido para ese `receipt_unit_uuid`, o por un marcador único que nosotros controlamos —
+  serial); y **persiste `snipe_asset_id` inmediatamente** tras crear, de modo que un reintento
+  tras `SNIPE_CREATED` **vincula**, no recrea.
 - **Alta/lectura desde Snipe (SI-1):** identidad = `snipe_asset_id` (+ `snipe_asset_tag`). Un
   `asset_tag` **no** puede mapear a dos activos (garantizado por los UNIQUE).
-- Toda escritura contra Snipe/GLPI usa **buscar-o-crear** por la clave natural antes de crear.
 
-## `..._receipt_units` (unidad física recibida — cardinalidad N por línea)
-Modela cada **unidad física** recibida para una línea de compra. Es el ancla de idempotencia por
-unidad y el origen de cada fila `asset_bridge`.
+## `..._receipt_units` (unidad física recibida — cardinalidad N, recepciones parciales, saga)
+Modela cada **unidad física** recibida. Nace **al recibir físicamente** la unidad (no al aprobar):
+una línea `qty=N` puede recibirse en **varios eventos/lotes** (recepción parcial). Es el ancla de
+idempotencia y el origen de cada fila `asset_bridge`.
 
 | Columna | Tipo | Notas |
 |---|---|---|
 | `id` | int PK | |
+| `receipt_unit_uuid` | char(36) **unique** | **identidad canónica inmutable** (UUID) |
 | `purchase_requests_id` | int | solicitud de compra (GLPI2) |
 | `item_line_no` | int | línea de la solicitud |
-| `unit_index` | int | n = 1..N dentro de la línea |
+| `unit_index` | int | n dentro de lo recibido de la línea |
+| `receipt_batch_id` | int null | evento/lote de recepción (recepciones parciales) |
 | `serial` | varchar null | serial de **esta** unidad (política de serial, ver ownership) |
+| `unit_cost` | decimal(18,2) null | **costo atribuible a esta unidad** (derivado de la línea; ver técnico de compras) |
 | `snipe_asset_id`,`snipe_asset_tag` | int/varchar null | activo físico en Snipe (cuando se cree) |
 | `glpi_itemtype`,`glpi_items_id` | varchar/int null | activo GLPI vinculado (resolver-o-crear) |
 | `asset_bridge_id` | int null | fila `asset_bridge` de esta unidad |
-| `idempotency_key` | varchar **unique** | `purchase:<req>:item:<line>:unit:<n>` |
-| `status` | enum(`pending`,`snipe_created`,`glpi_linked`,`labeled`,`conflict`,`error`) | avance |
+| `saga_state` | enum (ver saga) | `PENDING…LABEL_READY` + `RETRYABLE_ERROR/CONFLICT/MANUAL_REVIEW` |
+| `last_confirmed_step` | varchar | último paso **confirmado** (reintento resume desde aquí) |
+| `attempts` | int | intentos; para backoff/circuit breaker |
+| `correlation_key` | varchar | `purchase:<req>:item:<line>:unit:<n>` (correlación/debug, no identidad) |
+| `last_error` | varchar(255) null | último error (sin secretos) |
 | `date_creation`,`date_mod` | datetime | |
 
-- `UNIQUE (purchase_requests_id, item_line_no, unit_index)` y `UNIQUE (idempotency_key)`.
+- `UNIQUE (receipt_unit_uuid)`. La correlación humana **no** es UNIQUE por sí sola (permite
+  re-numeración); la unicidad real la da el UUID.
+
+## Saga de integración (estado persistente por unidad)
+Snipe-IT, GLPI y `companyqr` **no comparten transacción**; el alta de una unidad es una **saga**
+con estado persistente en `receipt_units.saga_state` y `last_confirmed_step`:
+```
+PENDING → SNIPE_CREATED → GLPI_RESOLVED_OR_CREATED → BRIDGED → QR_READY → LABEL_READY
+   estados de excepción: RETRYABLE_ERROR · CONFLICT · MANUAL_REVIEW
+```
+- Cada paso, al confirmarse, **persiste** su resultado (p. ej. `snipe_asset_id` en `SNIPE_CREATED`)
+  **antes** de avanzar. Un **reintento** continúa desde `last_confirmed_step` y **nunca** duplica
+  (buscar-primero por `receipt_unit_uuid`/`snipe_asset_id`).
+- `RETRYABLE_ERROR` → reintento con backoff (respeta circuit breaker). `CONFLICT` (p. ej. match
+  ambiguo con GLPI Agent, serial en conflicto, compañía no mapeada) y `MANUAL_REVIEW` → **no**
+  auto-avanzan; van al tablero de diferencias para decisión humana.
+- La saga es **fail-closed**: si falla tras `SNIPE_CREATED` pero antes de `BRIDGED`, la unidad
+  queda en ese estado con el `snipe_asset_id` guardado; al reintentar, **vincula** (no recrea).
+
+## Estabilidad del QR ante cambio de `asset_tag` (una etiqueta impresa nunca se rompe)
+- La **identidad estable** del activo puenteado es técnica (`asset_bridge.id` / `receipt_unit_uuid`),
+  **no** el `asset_tag` (que Snipe podría renombrar).
+- Se conserva un **alias histórico** de asset tags: tabla `..._asset_tag_aliases`
+  (`id, asset_bridge_id, asset_tag, is_current(bool), valid_from, valid_to null`). El **gateway
+  QR** resuelve `/asset/<asset_tag>` buscando **primero el actual y también los históricos** →
+  una etiqueta física impresa con un tag viejo **sigue resolviendo** al mismo activo.
+- **Política recomendada:** declarar el `asset_tag` **inmutable después de emitir la etiqueta**;
+  si aun así se renombra en Snipe, el alias histórico garantiza que el QR impreso no quede roto.
+- El QR de la etiqueta lo imprime Snipe con `plain_asset_tag`; por eso el gateway **debe** resolver
+  también tags históricos (no se puede reimprimir todas las etiquetas físicas por un rename).
 
 ## Tablas de mapeo de catálogos (por **ID**, nunca por nombre)
 `..._map_companies`, `..._map_users`, `..._map_locations`, `..._map_departments`,

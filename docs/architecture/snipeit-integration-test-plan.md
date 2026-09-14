@@ -52,6 +52,33 @@ del cliente (nunca la DB de Snipe).
   (no entidad inferida)** · [ ] **dedup GLPI Agent (resolver-o-crear; ambiguo → conflicto)** ·
   [ ] **serial: divergencia → conflicto, sin sobreescritura** · [ ] **usuarios no correlacionados
   por nombre**.
+- **SI-4 (precisión final):** [ ] recepción parcial 4+6 de una línea de 10 · [ ] reintento tras
+  `SNIPE_CREATED` sin duplicar · [ ] cambio de `asset_tag` sin romper QR existente · [ ] dos
+  unidades con costos correctos por línea · [ ] fallo tras crear Snipe antes de vincular GLPI ·
+  [ ] `receipt_unit_uuid` estable aunque cambie un dato visible del documento.
+
+## Tests de diseño obligatorios (SI-4 — precisión final; a implementar en su fase)
+Estos seis casos **quedan comprometidos por diseño** y son requisito de la fase de recepción
+(SI-4). No se implementan ahora; se documentan como contrato de prueba:
+
+1. 🔒 **Recepción parcial 4 + 6 de una línea de 10.** Una línea `qty=10` recibida en dos lotes
+   (4 y luego 6) crea **exactamente 10** `receipt_unit` (10 activos), con `received_qty` 4→10 y
+   `pending_qty` 6→0; **ningún** duplicado; reenviar un lote no crea unidades extra.
+2. 🔒 **Reintento tras `SNIPE_CREATED` sin duplicar.** Si el proceso falla después de crear el
+   activo en Snipe pero antes de `BRIDGED`, el reintento **resume** desde `last_confirmed_step` y
+   **vincula** el `snipe_asset_id` ya persistido — **no** crea un segundo activo Snipe.
+3. 🔒 **Cambio de `asset_tag` sin romper el QR existente.** Tras renombrar el `asset_tag` en Snipe,
+   una etiqueta física impresa con el tag **viejo** **sigue resolviendo** al mismo activo (alias
+   histórico); el gateway resuelve tag actual **e** histórico.
+4. 🔒 **Dos unidades con costos correctos por línea.** Dos unidades de líneas distintas reciben
+   cada una su `unit_cost` **derivado de su propia línea** (no el total general prorrateado);
+   `Infocom` de cada activo refleja el costo atribuible correcto.
+5. 🔒 **Fallo tras crear en Snipe pero antes de vincular GLPI.** La unidad queda en
+   `SNIPE_CREATED`/`RETRYABLE_ERROR` (fail-closed) con el `snipe_asset_id` guardado; al reintentar,
+   completa `GLPI_RESOLVED_OR_CREATED`→`BRIDGED` **sin** recrear en Snipe ni en GLPI.
+6. 🔒 **`receipt_unit_uuid` estable aunque cambie un dato visible del documento.** Cambiar un dato
+   visible de la solicitud/línea (p. ej. renumeración de líneas, reimpresión) **no** altera el
+   `receipt_unit_uuid` ni reasigna identidad; la correlación humana puede cambiar, el UUID no.
 
 ## Fuera de alcance de SI-1 (fases posteriores)
 checkout/checkin sync (SI-2) · labels masivas completas (SI-3) · compras→activo (SI-4) ·

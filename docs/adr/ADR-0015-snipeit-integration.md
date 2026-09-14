@@ -96,6 +96,33 @@ crear/vincular activo GLPI → companyqr → etiqueta`. **Idempotente** (reinten
    → Mínimo privilegio = **cuenta de servicio con rol restringido**, no scopes por endpoint (ver
    `../security/snipeit-integration-security.md`).
 
+### Precisión documental final (previa a implementar Fase 2 + Snipe-IT)
+9. **Identidad canónica por unidad = `receipt_unit_uuid`** (UUID interno inmutable), generado al
+   **recibir físicamente** la unidad. La clave `purchase:<req>:item:<line>:unit:<n>` pasa a ser
+   **correlación/debug legible**, **no** la única identidad técnica (una reimpresión o
+   renumeración de líneas no reasigna identidad; el UUID sí es estable).
+10. **Saga de integración (estado persistente por unidad):** Snipe/GLPI/`companyqr` **no comparten
+    transacción**. Estados `PENDING → SNIPE_CREATED → GLPI_RESOLVED_OR_CREATED → BRIDGED → QR_READY
+    → LABEL_READY` + excepciones `RETRYABLE_ERROR / CONFLICT / MANUAL_REVIEW`. Cada paso persiste su
+    resultado **antes** de avanzar; el reintento **resume desde el último paso confirmado** y
+    **nunca** duplica. (Detalle en `../architecture/asset-bridge-model.md` §Saga.)
+11. **Idempotencia del request saliente a Snipe:** su API **no** tiene idempotency key nativa → el
+    cliente hace **buscar-primero** (por `snipe_asset_id` ya persistido para ese `receipt_unit_uuid`
+    o por serial único) antes de `POST /hardware`, y **persiste `snipe_asset_id` inmediatamente**
+    tras crear, de modo que un fallo tras `SNIPE_CREATED` **vincula, no recrea**.
+12. **Recepciones parciales:** una línea `qty=N` puede recibirse en **varios eventos/lotes**
+    (`ordered_qty`/`received_qty`/`pending_qty`, `receipt_batch_id`). Cada `receipt_unit` nace en la
+    recepción física; reenviar un lote **no** duplica (UUID + saga).
+13. **Estabilidad del QR ante cambio de `asset_tag`:** la identidad estable es técnica
+    (`asset_bridge.id`/`receipt_unit_uuid`), **no** el `asset_tag`. Se conserva un **alias histórico**
+    (`..._asset_tag_aliases`) y el gateway resuelve tag **actual e históricos** → una etiqueta física
+    impresa **nunca** queda rota por un rename. Política recomendada: `asset_tag` **inmutable tras
+    emitir la etiqueta**.
+14. **Costo del activo = costo por línea, no prorrateo del total general.** Se registra
+    `final_unit_price`/`final_line_total` por línea (+ descuento/impuesto/gasto opcionales, con
+    política de asignación) y un `unit_cost` **derivado de esa línea**; `Infocom` recibe el **costo
+    atribuible al activo concreto**, nunca el total general dividido entre activos.
+
 ## Regla 0 / cumplimiento
 No se modifica el core de GLPI ni el de Snipe-IT; integración sólo por **API soportada**. Sin
 copiar código (AGPL). Verificación de core intacto por CI, como en fases previas.

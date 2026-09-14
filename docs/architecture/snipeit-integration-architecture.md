@@ -34,7 +34,8 @@ Etiqueta Snipe (QR = https://<portal>/asset/NB-001245)
         │  (Snipe CONFIGURE: label2_2d_target=plain_asset_tag + label2_2d_prefix)
         ▼
 GET /plugins/companyintegrations/asset/{asset_tag}   (companyintegrations)
-        ▼  resolver por asset_bridge (asset_tag → glpi_itemtype/items_id + companyqr_code_id)
+        ▼  resolver por asset_bridge: asset_tag ACTUAL **o histórico** (asset_tag_aliases)
+        ▼      → glpi_itemtype/items_id + companyqr_code_id   (identidad = asset_bridge.id, no el tag)
         ▼  AUTHENTICATED (firewall GLPI: login + retorno)   ← el asset_tag NO autoriza
         ▼  ACL nativa + entidad
         ▼  entregar ficha segura de companyqr (Fase 1) → "Reportar problema" → Ticket vinculado
@@ -44,6 +45,11 @@ GET /plugins/companyintegrations/asset/{asset_tag}   (companyintegrations)
   Snipe** (CONFIGURE del template + `POST /api/v1/hardware/labels`); el **contenido del QR** es
   la URL del gateway (no datos técnicos).
 - El gateway **no** convierte el `asset_tag` en autorización (idéntico principio a `companyqr`).
+- **Estabilidad ante rename:** una etiqueta física ya impresa **nunca** queda rota si el
+  `asset_tag` cambia en Snipe. La identidad estable es técnica (`asset_bridge.id` /
+  `receipt_unit_uuid`), no el tag; el gateway resuelve el tag **actual y también los históricos**
+  (`..._asset_tag_aliases`). Política recomendada: `asset_tag` **inmutable tras emitir la
+  etiqueta** (detalle en `asset-bridge-model.md` §Estabilidad del QR).
 
 ## Flujos de sincronización
 ### A — Alta física (Snipe → GLPI) [SI-1 read-only; escritura en SI-4+]
@@ -58,30 +64,46 @@ de auditoría. Idempotente por `snipe_asset_id + checkout_id`.
 Quitar la asignación física reflejada en GLPI, **conservando historial**.
 
 ### D — Compra aprobada y recibida (GLPI2 → Snipe → GLPI) [SI-4]
-**Cardinalidad por unidad:** una línea con cantidad **N** genera **N unidades físicas**
-(`receipt_unit`), cada una con su propio serial / activo Snipe / activo GLPI / `asset_bridge`.
-La idempotencia es **por unidad**.
+**Cardinalidad por unidad + recepciones parciales:** una línea con cantidad **N** genera **N
+unidades físicas** (`receipt_unit`), cada una con su propio serial / activo Snipe / activo GLPI /
+`asset_bridge`. Una línea `qty=N` **puede recibirse en varios eventos/lotes** (p. ej. 4 hoy y 6
+mañana); cada `receipt_unit` **nace al recibir físicamente** su unidad. La **identidad canónica**
+de cada unidad es `receipt_unit_uuid` (UUID interno inmutable); la `idempotency_key`/
+`correlation_key` `purchase:<req>:item:<line>:unit:<n>` es **clave de correlación/debug legible**,
+**no** la identidad técnica.
 ```
-companypurchasing: purchase.received  (ítem is_inventoriable = 1, cantidad N)
-   └─ para cada unidad n = 1..N:
-       idempotency_key = purchase:<requests_id>:item:<line_no>:unit:<n>
-       ▼  buscar-o-crear la receipt_unit / asset_bridge por la clave (POR UNIDAD)
-       ├─ ya existe → no-op (idempotente)
-       └─ no existe:
-            1) resolver **entidad** por company/entity mapping (si no mapeada → conflict, NO inferir)
-            2) crear activo en Snipe-IT (POST /api/v1/hardware) con modelo/categoría mapeados
-            3) obtener/asignar asset_tag (Snipe) y serial de la unidad (política de serial)
-            4) **RESOLVER-o-crear** el activo GLPI: buscar un activo existente (p. ej. descubierto
-               por GLPI Agent) por serial/UUID/identificador soportado → si hay match único, VINCULAR;
-               si es **ambiguo** → conflict (sin auto-merge); si no existe → crear (itemtype config)
-            5) poblar Infocom (costo/presupuesto; **proveedor = el de la compra GLPI2**)
-            6) generar companyqr (Fase 1) + registrar companyqr_code_id
-            7) insertar/actualizar fila asset_bridge (sync_status=mapped)
-            8) etiqueta imprimible por el motor de Snipe (QR → gateway GLPI2)
+companypurchasing: purchase.received  (ítem is_inventoriable = 1) — llega received_qty (parcial o total)
+   └─ para cada unidad recibida en ESTE lote (receipt_batch_id):
+       receipt_unit_uuid = UUID interno inmutable (identidad canónica)
+       correlation_key    = purchase:<requests_id>:item:<line_no>:unit:<n>   (correlación/debug)
+       ▼  buscar-o-crear la receipt_unit por receipt_unit_uuid (NO por correlation_key)
+       │  SAGA (estado persistente en receipt_units.saga_state / last_confirmed_step):
+       │  reintento RESUME desde last_confirmed_step; cada paso PERSISTE su resultado antes de avanzar
+       ├─ ya BRIDGED/QR_READY/LABEL_READY → no-op (idempotente)
+       └─ PENDING → avanzar:
+            0) resolver **entidad** por company/entity mapping (si no mapeada → CONFLICT, NO inferir)
+            1) SNIPE_CREATED: crear activo en Snipe-IT — **idempotencia saliente** (su API no tiene
+               idempotency key): **buscar-primero** (por snipe_asset_id ya persistido / serial único)
+               antes de POST /api/v1/hardware; **persistir snipe_asset_id inmediatamente** tras crear
+            2) obtener/asignar asset_tag (Snipe) + serial de la unidad (política de serial)
+            3) GLPI_RESOLVED_OR_CREATED: **RESOLVER-o-crear** el activo GLPI por serial/UUID/
+               identificador soportado → match único, VINCULAR; **ambiguo** → CONFLICT (sin
+               auto-merge); no existe → crear (itemtype config)
+            4) poblar Infocom con el **costo atribuible a ESTA unidad** (`unit_cost` derivado de la
+               línea; **proveedor = el de la compra GLPI2**) — nunca el total general prorrateado
+            5) BRIDGED: insertar/actualizar fila asset_bridge (sync_status=mapped) + alias de asset_tag
+            6) QR_READY: generar companyqr (Fase 1) + registrar companyqr_code_id
+            7) LABEL_READY: etiqueta imprimible por el motor de Snipe (QR → gateway GLPI2)
 ```
-- **Dedup con GLPI Agent (item 5):** el paso 4 **nunca** crea a ciegas: primero intenta
-  **resolver** un activo GLPI existente por identificadores soportados; sólo crea si no existe;
-  un match **ambiguo** queda en `conflict` para decisión humana (jamás une dos activos ambiguos).
+- **Saga (item detallado en `asset-bridge-model.md` §Saga):** Snipe/GLPI/companyqr **no comparten
+  transacción**; si el proceso falla tras `SNIPE_CREATED` pero antes de `BRIDGED`, la unidad queda
+  en ese estado con `snipe_asset_id` guardado y el reintento **vincula, no recrea**. `CONFLICT`/
+  `MANUAL_REVIEW` no auto-avanzan (tablero de diferencias).
+- **Recepción parcial:** la línea lleva `ordered_qty / received_qty / pending_qty`; cada lote crea
+  sólo las unidades de ese lote; reenviar el mismo lote **no** duplica (UUID + saga).
+- **Dedup con GLPI Agent:** el paso 3 **nunca** crea a ciegas: primero intenta **resolver** un
+  activo GLPI existente; sólo crea si no existe; un match **ambiguo** queda en `conflict` para
+  decisión humana (jamás une dos activos ambiguos).
 - **No** se usa `orders` de Snipe como workflow (confirmado: no es workflow). El workflow/compra
   es GLPI2 (`companypurchasing`).
 
@@ -140,7 +162,7 @@ estado/fecha/URL/hash. **No** se copian firmas/PII entre sistemas.
 | **SI-1** | `SnipeItClient` + auth + `asset_bridge`/`receipt_units` + **reconciliación read-only** + mapping + **gateway QR** + prueba de label | **no** en Snipe ni en activos core GLPI; **sí** en tablas propias de `companyintegrations` (bridge, reconciliación, auditoría, estado/error/timestamps) |
 | **SI-2** | Checkout/checkin Snipe → GLPI (custodia) | sí (reflejo en GLPI) |
 | **SI-3** | Labels/impresión masiva completa (70,75×24 amarilla, QR→gateway) | config |
-| **SI-4** | Compra recibida → por unidad: Snipe → bridge → resolver-o-crear GLPI → etiqueta | sí (idempotente por unidad) |
+| **SI-4** | Compra recibida → por unidad (saga con estado persistente, recepciones parciales): Snipe → bridge → resolver-o-crear GLPI → companyqr → etiqueta | sí (idempotente por `receipt_unit_uuid`) |
 | **SI-5** | Aceptación/firma física referenciada desde GLPI2 | referencia |
 
 > **La primera implementación (tras aprobación) es SOLO SI-1** (read-only). No checkout/checkin
