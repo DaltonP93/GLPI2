@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fase 2 — mocks de compras/workflow/firma</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--ink:#1f2430;--muted:#6b7280;--line:#e5e7eb;
+        --accent:#0a58ca;--ok:#0a7d33;--warn:#b45309;--bad:#b42318;--chip:#eef2ff;--chipink:#3730a3;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{background:#111827;color:#fff;padding:12px 18px}
+  header h1{font-size:15px;margin:0} header .sub{color:#9ca3af;font-size:12px}
+  nav{display:flex;flex-wrap:wrap;gap:6px;padding:10px 14px;background:#fff;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+  nav button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:6px 12px;font:inherit;font-size:12.5px;cursor:pointer;color:var(--ink)}
+  nav button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+  main{max-width:960px;margin:0 auto;padding:18px}
+  .view{display:none} .view.active{display:block}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+  h2{font-size:17px;margin:0 0 2px} h3{font-size:14px;margin:16px 0 8px}
+  .note{color:var(--muted);font-size:12.5px;margin:0 0 14px}
+  label{display:block;font-size:12.5px;color:#374151;margin:10px 0 4px;font-weight:600}
+  input,select,textarea{width:100%;padding:8px;border:1px solid #d1d5db;border-radius:8px;font:inherit;background:#fff}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+  @media(max-width:680px){.grid2,.grid3{grid-template-columns:1fr}}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px}
+  .right{text-align:right}
+  .btn{display:inline-block;margin-top:12px;background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 14px;font-weight:700;cursor:pointer;font-size:13px}
+  .btn.sec{background:#fff;color:var(--accent);border:1px solid var(--accent)}
+  .btn.ok{background:var(--ok)} .btn.warn{background:var(--warn)} .btn.bad{background:var(--bad)}
+  .chip{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;background:var(--chip);color:var(--chipink)}
+  .chip.ok{background:#dcfce7;color:#166534}.chip.warn{background:#fef3c7;color:#92400e}.chip.bad{background:#fee2e2;color:#991b1b}
+  .steps{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+  .step{font-size:11.5px;padding:4px 9px;border-radius:999px;background:#eef2f7;color:#64748b}
+  .step.done{background:#dcfce7;color:#166534}.step.cur{background:var(--accent);color:#fff}
+  .kv{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px dashed var(--line)}
+  .kv .k{color:var(--muted)} .kv .v{font-weight:600;text-align:right}
+  .req{background:#fafbfc;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;display:flex;justify-content:space-between;gap:10px;align-items:center}
+  .muted{color:var(--muted);font-size:12px}
+  .qr{width:120px;height:120px} .qr rect{fill:var(--ink)}
+  .banner{font-size:12px;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af;border-radius:8px;padding:8px 10px;margin-bottom:12px}
+  .pdf{border:1px solid #cbd5e1;border-radius:6px;padding:22px;background:#fff;max-width:720px;margin:0 auto}
+</style>
+</head>
+<body>
+<header>
+  <h1>Plataforma Interna · Compras — mocks funcionales (Fase 2)</h1>
+  <div class="sub">NO es UI final. Estados/aprobadores/umbrales configurables · moneda PYG · multi-entidad · “el identificador identifica; GLPI autoriza”.</div>
+</header>
+<nav>
+  <button data-v="nueva" class="active">1 · Nueva solicitud</button>
+  <button data-v="solicitante">2 · Vista solicitante</button>
+  <button data-v="jefe">3 · Bandeja del jefe</button>
+  <button data-v="compras">4 · Compras</button>
+  <button data-v="gerencia">5 · Gerencia Financiera</button>
+  <button data-v="historial">6 · Historial/auditoría</button>
+  <button data-v="pdf">7 · PDF aprobado</button>
+</nav>
+<main>
+
+  <!-- 1 NUEVA SOLICITUD -->
+  <section class="view active" id="nueva">
+    <div class="card">
+      <h2>Nueva solicitud de compra</h2>
+      <p class="note">Formulario propio (Forms nativo no modela ítems/cotizaciones). Campos configurables por tipo de solicitud.</p>
+      <div class="grid3">
+        <div><label>Número</label><input value="CC-2026-000123" readonly></div>
+        <div><label>Fecha</label><input value="14/09/2026" readonly></div>
+        <div><label>Solicitante</label><input value="(usuario en sesión)" readonly></div>
+      </div>
+      <div class="grid3">
+        <div><label>Departamento / área</label><select><option>Ventas</option><option>TI</option><option>Administración</option></select></div>
+        <div><label>Categoría</label><select><option>Equipamiento informático</option><option>Insumos</option><option>Servicios</option></select></div>
+        <div><label>Entidad</label><input value="Casa Central" readonly></div>
+      </div>
+      <label>Motivo / justificación</label><textarea rows="2" placeholder="¿Para qué se necesita?"></textarea>
+
+      <h3>Ítems</h3>
+      <table>
+        <thead><tr><th>#</th><th>Descripción</th><th>Cant.</th><th>Categoría</th><th class="right">Precio est. (PYG)</th><th>Inventariable</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>Notebook 14" i5 16GB</td><td>2</td><td>Informática</td><td class="right">₲ 5.400.000</td><td>Sí</td></tr>
+          <tr><td>2</td><td>Mochila para notebook</td><td>2</td><td>Accesorios</td><td class="right">₲ 300.000</td><td>No</td></tr>
+        </tbody>
+        <tfoot><tr><th colspan="4" class="right">Estimado total</th><th class="right">₲ 5.700.000</th><th></th></tr></tfoot>
+      </table>
+      <button class="btn sec">+ Agregar ítem</button>
+
+      <div class="grid2">
+        <div><label>Destino / uso</label><input placeholder="Piso 2 · Ventas"></div>
+        <div><label>Lugar / proveedor sugerido</label><input placeholder="(opcional, texto libre)"></div>
+      </div>
+      <label>Observaciones</label><textarea rows="2"></textarea>
+      <label>Archivos (cotizaciones, especificaciones)</label><input type="file" multiple>
+      <div>
+        <button class="btn sec">Guardar borrador</button>
+        <button class="btn">Enviar solicitud</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2 VISTA SOLICITANTE -->
+  <section class="view" id="solicitante">
+    <div class="card">
+      <h2>CC-2026-000123 <span class="chip warn">PENDIENTE JEFE DE ÁREA</span></h2>
+      <p class="note">Vista del solicitante: seguimiento del estado y acciones disponibles.</p>
+      <div class="steps">
+        <span class="step done">Borrador</span><span class="step done">Enviada</span>
+        <span class="step cur">Pend. Jefe</span><span class="step">En Compras</span>
+        <span class="step">Pend. Gerencia</span><span class="step">Aprobada</span>
+        <span class="step">En compra</span><span class="step">Recibida</span>
+        <span class="step">Entregada</span><span class="step">Cerrada</span>
+      </div>
+      <div class="grid2">
+        <div>
+          <div class="kv"><span class="k">Solicitante</span><span class="v">(usuario)</span></div>
+          <div class="kv"><span class="k">Área</span><span class="v">Ventas</span></div>
+          <div class="kv"><span class="k">Estimado</span><span class="v">₲ 5.700.000</span></div>
+        </div>
+        <div>
+          <div class="kv"><span class="k">Enviada</span><span class="v">14/09/2026 10:12</span></div>
+          <div class="kv"><span class="k">Aprobador actual</span><span class="v">Jefe de Ventas (rol)</span></div>
+          <div class="kv"><span class="k">SLA etapa</span><span class="v">24 h (vence 15/09 10:12)</span></div>
+        </div>
+      </div>
+      <p class="muted">Acciones: editar sólo si vuelve como <b>DEVUELTA</b>; podés <b>cancelar</b> mientras no sea estado final.</p>
+      <button class="btn sec">Ver PDF</button><button class="btn bad">Cancelar solicitud</button>
+    </div>
+  </section>
+
+  <!-- 3 BANDEJA JEFE -->
+  <section class="view" id="jefe">
+    <div class="card">
+      <h2>Bandeja de aprobación — Jefe de Área</h2>
+      <p class="note">Sólo solicitudes de <b>su área/entidad</b> (ACL + entidad estrictas).</p>
+      <div class="req"><div><b>CC-2026-000123</b> · Ventas · ₲ 5.700.000 · <span class="muted">2 ítems</span></div><span class="chip warn">Pendiente</span></div>
+      <div class="req"><div><b>CC-2026-000118</b> · Ventas · ₲ 900.000 · <span class="muted">1 ítem</span></div><span class="chip warn">Pendiente</span></div>
+      <h3>Detalle · CC-2026-000123</h3>
+      <table>
+        <thead><tr><th>Ítem</th><th>Cant.</th><th class="right">Estimado</th></tr></thead>
+        <tbody><tr><td>Notebook 14"</td><td>2</td><td class="right">₲ 5.400.000</td></tr>
+        <tr><td>Mochila</td><td>2</td><td class="right">₲ 300.000</td></tr></tbody>
+      </table>
+      <label>Comentario (obligatorio para devolver/rechazar)</label><textarea rows="2"></textarea>
+      <div>
+        <button class="btn ok">Aprobar</button>
+        <button class="btn warn">Devolver para corrección</button>
+        <button class="btn bad">Rechazar</button>
+        <button class="btn sec">Delegar</button>
+      </div>
+      <p class="muted">Quórum de etapa configurable (p. ej. 1 aprobador de rol “Jefe”). Toda acción queda en auditoría.</p>
+    </div>
+  </section>
+
+  <!-- 4 COMPRAS -->
+  <section class="view" id="compras">
+    <div class="card">
+      <h2>CC-2026-000123 <span class="chip">EN COMPRAS</span></h2>
+      <p class="note">Compras cotiza, selecciona proveedor y define montos; luego eleva a Gerencia.</p>
+      <h3>Cotizaciones</h3>
+      <table>
+        <thead><tr><th>Proveedor</th><th>Documento</th><th class="right">Monto (PYG)</th><th>Válida</th><th>Seleccionar</th></tr></thead>
+        <tbody>
+          <tr><td>TecnoSA (Supplier)</td><td>cotiz-tecnosa.pdf</td><td class="right">₲ 5.650.000</td><td>30/09</td><td><input type="radio" name="q" checked></td></tr>
+          <tr><td>CompuMax</td><td>cotiz-compumax.pdf</td><td class="right">₲ 5.900.000</td><td>25/09</td><td><input type="radio" name="q"></td></tr>
+        </tbody>
+      </table>
+      <button class="btn sec">+ Agregar cotización</button>
+      <div class="grid3">
+        <div><label>Proveedor seleccionado</label><select><option>TecnoSA</option><option>CompuMax</option></select></div>
+        <div><label>Presupuesto (Budget)</label><select><option>Presup. TI 2026</option></select></div>
+        <div><label>Monto aprobado (PYG)</label><input value="₲ 5.650.000"></div>
+      </div>
+      <label>Comentario</label><textarea rows="2"></textarea>
+      <button class="btn ok">Elevar a Gerencia Financiera</button>
+      <button class="btn warn">Devolver</button>
+    </div>
+  </section>
+
+  <!-- 5 GERENCIA -->
+  <section class="view" id="gerencia">
+    <div class="card">
+      <h2>CC-2026-000123 <span class="chip warn">PENDIENTE GERENCIA FINANCIERA</span></h2>
+      <div class="banner">Condición por monto: ≥ ₲ 5.000.000 requiere aprobación de Gerencia (configurable). Quórum: 1 de rol “Gerencia”.</div>
+      <div class="grid2">
+        <div>
+          <div class="kv"><span class="k">Proveedor</span><span class="v">TecnoSA</span></div>
+          <div class="kv"><span class="k">Presupuesto</span><span class="v">Presup. TI 2026</span></div>
+        </div>
+        <div>
+          <div class="kv"><span class="k">Estimado</span><span class="v">₲ 5.700.000</span></div>
+          <div class="kv"><span class="k">Monto a aprobar</span><span class="v">₲ 5.650.000</span></div>
+        </div>
+      </div>
+      <label>Comentario (obligatorio)</label><textarea rows="2"></textarea>
+      <button class="btn ok">Aprobar</button>
+      <button class="btn warn">Devolver</button>
+      <button class="btn bad">Rechazar</button>
+      <p class="muted">Al aprobar: <b>companysignature</b> registra evidencia (identidad + hash + timestamp) y genera el PDF aprobado.</p>
+    </div>
+  </section>
+
+  <!-- 6 HISTORIAL -->
+  <section class="view" id="historial">
+    <div class="card">
+      <h2>Historial / auditoría — CC-2026-000123</h2>
+      <p class="note">Append-only: no se borra ni edita; las correcciones son eventos nuevos.</p>
+      <table>
+        <thead><tr><th>Fecha/hora (America/Asuncion)</th><th>Evento</th><th>Actor / rol</th><th>De → A</th><th>Comentario</th></tr></thead>
+        <tbody>
+          <tr><td>14/09 10:05</td><td>created</td><td>Solicitante</td><td>— → BORRADOR</td><td></td></tr>
+          <tr><td>14/09 10:12</td><td>submitted</td><td>Solicitante</td><td>BORRADOR → ENVIADA</td><td></td></tr>
+          <tr><td>14/09 10:12</td><td>routed</td><td>sistema</td><td>ENVIADA → PENDIENTE_JEFE_AREA</td><td>auto</td></tr>
+          <tr><td>14/09 11:40</td><td>approved</td><td>Jefe de Ventas</td><td>PENDIENTE_JEFE_AREA → EN_COMPRAS</td><td>OK</td></tr>
+          <tr><td>14/09 15:20</td><td>quote_selected</td><td>Compras</td><td>—</td><td>TecnoSA ₲ 5.650.000</td></tr>
+          <tr><td>14/09 15:22</td><td>approved</td><td>Compras</td><td>EN_COMPRAS → PENDIENTE_GERENCIA_FINANCIERA</td><td></td></tr>
+        </tbody>
+      </table>
+      <p class="muted">Cambios sustantivos (ítems/montos/proveedor) tras una aprobación generan <b>approval_invalidated</b> y reabren etapas.</p>
+    </div>
+  </section>
+
+  <!-- 7 PDF -->
+  <section class="view" id="pdf">
+    <div class="card">
+      <h2>Documento aprobado (PDF)</h2>
+      <p class="note">Versionado, con hash del contenido y QR de verificación interno.</p>
+      <div class="pdf">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div><div style="font-weight:800;font-size:16px">Solicitud de compra — APROBADA</div>
+            <div class="muted">N.º CC-2026-000123 · Casa Central · v3</div></div>
+          <svg class="qr" viewBox="0 0 7 7" shape-rendering="crispEdges" aria-label="QR verificación">
+            <rect x="0" y="0" width="3" height="3"/><rect x="1" y="1" width="1" height="1" fill="#fff"/>
+            <rect x="4" y="0" width="3" height="3"/><rect x="5" y="1" width="1" height="1" fill="#fff"/>
+            <rect x="0" y="4" width="3" height="3"/><rect x="1" y="5" width="1" height="1" fill="#fff"/>
+            <rect x="4" y="4" width="1" height="1"/><rect x="6" y="4" width="1" height="1"/><rect x="5" y="5" width="1" height="1"/><rect x="4" y="6" width="1" height="1"/><rect x="6" y="6" width="1" height="1"/>
+          </svg>
+        </div>
+        <div class="kv"><span class="k">Solicitante / Área</span><span class="v">(usuario) · Ventas</span></div>
+        <div class="kv"><span class="k">Proveedor seleccionado</span><span class="v">TecnoSA — ₲ 5.650.000</span></div>
+        <table style="margin-top:8px">
+          <thead><tr><th>Ítem</th><th>Cant.</th><th class="right">Importe (PYG)</th></tr></thead>
+          <tbody><tr><td>Notebook 14"</td><td>2</td><td class="right">₲ 5.400.000</td></tr>
+          <tr><td>Mochila</td><td>2</td><td class="right">₲ 300.000</td></tr></tbody>
+          <tfoot><tr><th colspan="2" class="right">Monto aprobado</th><th class="right">₲ 5.650.000</th></tr></tfoot>
+        </table>
+        <h3>Aprobadores</h3>
+        <div class="kv"><span class="k">Jefe de Área (rol)</span><span class="v">✔ 14/09 11:40</span></div>
+        <div class="kv"><span class="k">Gerencia Financiera (rol)</span><span class="v">✔ 14/09 16:05</span></div>
+        <div class="kv"><span class="k">Resultado</span><span class="v"><span class="chip ok">APROBADA</span></span></div>
+        <div style="margin-top:10px;font-size:11.5px;color:#475569">
+          Hash del contenido (SHA-256): <code>3b7e…a91c</code><br>
+          Verificación: <code>/plugins/companysignature/verify/ab7jx…</code><br>
+          <i>Evidencia interna: identidad autenticada + acción + hash + timestamp + auditoría. Una imagen de firma NO es firma digital.</i>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+<script>
+  const btns=[...document.querySelectorAll('nav button')], views=[...document.querySelectorAll('.view')];
+  btns.forEach(b=>b.onclick=()=>{
+    btns.forEach(x=>x.classList.toggle('active',x===b));
+    views.forEach(v=>v.classList.toggle('active',v.id===b.dataset.v));
+    window.scrollTo({top:0,behavior:'smooth'});
+  });
+</script>
+</body>
+</html>
