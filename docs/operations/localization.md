@@ -32,11 +32,21 @@ el **formato numérico** para que coincida con la convención local.
 # Con el stack levantado (infra/docker):
 bash infra/docker/glpi-config/install-and-localize.sh
 ```
-Este script hace, con comandos oficiales:
+Este script es la fase de **configuración** (mutación). Hace, con comandos
+oficiales y **fail-closed** en cada prerequisito (ver ADR-0016):
+0. Espera a que MariaDB acepte conexiones.
 1. `database:install --default-language=es_ES` → idioma por defecto Español.
-2. Carga de tablas de husos horarios en MariaDB (`mariadb-tzinfo-to-sql`).
+2. Carga de tablas de husos horarios en MariaDB (`mariadb-tzinfo-to-sql`) **sin
+   enmascarar errores**, y **verifica** que `mysql.time_zone_name` quedó poblada.
 3. `GRANT SELECT ON mysql.time_zone_name` al usuario de GLPI.
-4. `database:enable_timezones` → habilita timezones por usuario.
+4. `database:enable_timezones` → habilita timezones (paso de configuración, **una
+   sola vez**).
+5. **Verifica** que el usuario de GLPI resuelve una zona nombrada
+   (`CONVERT_TZ(...,'America/Asuncion')`).
+
+> **Importante:** `database:enable_timezones` es un comando de **configuración**,
+> no una sonda de estado. Se ejecuta aquí una vez; **nunca** debe reejecutarse
+> como "test" (produce fallos intermitentes "faltan requisitos"). Ver ADR-0016.
 
 ## Pasos administrativos (parte no cubierta por consola en GLPI 11)
 En **Configuración → General** (requiere sesión de administrador):
@@ -50,14 +60,22 @@ En **Configuración → General** (requiere sesión de administrador):
 > un plugin de infraestructura propio). Por eso se documentan aquí y se verifican
 > automáticamente abajo.
 
-## Verificación automática (fail-closed)
+## Verificación automática (fail-closed, sólo lectura)
 ```bash
 bash tests/localization/verify-localization.sh
 ```
-Comprueba: (1) la interfaz anónima se sirve en español, (2) la zona horaria del
-servidor PHP es `America/Asuncion`, (3) el soporte de timezones está habilitado.
-Sale con error si algo no cumple. Se ejecuta también en CI (job *integration*).
+Comprueba, **sin reconfigurar** (comprobaciones de sólo lectura e idempotentes):
+1. La interfaz anónima se sirve en español.
+2. La zona horaria del servidor PHP es `America/Asuncion`.
+3. `mysql.time_zone_name` está poblada y es **accesible por el usuario de GLPI**.
+4. El usuario de GLPI resuelve la zona nombrada `America/Asuncion` (`CONVERT_TZ`).
+
+Sale con error si algo no cumple. Se ejecuta en CI (job *integration*), y además
+**se repite N veces** sobre la misma instalación como **regresión de
+idempotencia** (garantiza que la verificación es estable y no reintroduce el
+anti-patrón de reejecutar `database:enable_timezones`; ver ADR-0016).
 
 ## Referencias
 - ADR: `../adr/ADR-0005-localization-paraguay.md`
+- ADR: `../adr/ADR-0016-timezone-init-verification.md` (configuración vs. verificación de timezones)
 - Comandos GLPI 11 verificados: `database:install`, `database:enable_timezones`.
