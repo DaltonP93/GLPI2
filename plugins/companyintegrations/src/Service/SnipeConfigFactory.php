@@ -26,7 +26,8 @@ final class SnipeConfigFactory
             (int) PluginConfig::get('max_retries', '3'),
             (int) PluginConfig::get('backoff_base_ms', '200'),
             (int) PluginConfig::get('breaker_threshold', '5'),
-            (int) PluginConfig::get('breaker_cooldown_sec', '30')
+            (int) PluginConfig::get('breaker_cooldown_sec', '30'),
+            (int) PluginConfig::get('allow_insecure_http', '0') === 1 // DEV-only override
         );
     }
 }
