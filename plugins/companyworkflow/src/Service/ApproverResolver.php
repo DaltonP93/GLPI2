@@ -20,15 +20,22 @@ use GlpiPlugin\Companyworkflow\Model\Step;
 final class ApproverResolver
 {
     private DelegationResolver $delegations;
+    private EntityAccess $entityAccess;
 
-    public function __construct(?DelegationResolver $delegations = null)
+    public function __construct(?DelegationResolver $delegations = null, ?EntityAccess $entityAccess = null)
     {
-        $this->delegations = $delegations ?? new DelegationResolver();
+        $this->delegations  = $delegations ?? new DelegationResolver();
+        $this->entityAccess = $entityAccess ?? new EntityAccess();
     }
 
     /**
+     * Aprobadores efectivos de una etapa: base (group/profile/user) + delegados vigentes,
+     * EXCLUYENDO a quienes NO pueden actuar en la entidad de la instancia (multi-entidad estricta).
+     * Los excluidos tampoco cuentan para el denominador del quórum (lo calcula quien recibe esta
+     * lista: `count()` sobre el conjunto ya filtrado).
+     *
      * @param array<string,mixed> $step        fila de ..._steps
-     * @return array<int,int> ids de usuarios aprobadores (base + delegados vigentes)
+     * @return array<int,int> ids de usuarios aprobadores válidos en la entidad
      */
     public function resolveForStep(array $step, int $workflowdefsId, int $entitiesId): array
     {
@@ -38,11 +45,14 @@ final class ApproverResolver
         $base = $this->resolveBase($kind, $ref, $entitiesId);
         $withDelegates = $this->expandDelegations($base, $workflowdefsId, $entitiesId);
 
+        // Multi-entidad ESTRICTA: sólo quienes pueden actuar en la entidad de la instancia.
+        $effective = $this->entityAccess->filterActable($withDelegates, $entitiesId);
+
         $max = (int) PluginConfig::get('max_resolved_approvers', '500');
-        if ($max > 0 && count($withDelegates) > $max) {
-            $withDelegates = array_slice($withDelegates, 0, $max);
+        if ($max > 0 && count($effective) > $max) {
+            $effective = array_slice($effective, 0, $max);
         }
-        return $withDelegates;
+        return $effective;
     }
 
     /** @return array<int,int> */

@@ -24,6 +24,25 @@ y versionado [SemVer](https://semver.org/lang/es/).
 - **CI:** el job estático corre los runners unitarios de todos los plugins; el job de integración
   ejecuta los selftests de los plugins Fase 2 (cambio genérico y guardado).
 
+### Hardening (pasada de consistencia/concurrencia)
+- **`DefinitionBuilder::createVersion` fail-closed y transaccional:** validación previa
+  (`DefinitionSpecValidator`, pura) → rechazo sin escrituras; definición creada **inactiva** +
+  hijos verificados; **switch atómico** de versión activa al final; **rollback** ante cualquier
+  fallo (la versión anterior sigue activa); **retry** ante colisión de versión (UNIQUE code,version);
+  nunca quedan cero versiones activas.
+- **Aprobación recovery-safe y atómica:** voto + quórum + cambio de estado en **una** transacción
+  con `SELECT ... FOR UPDATE` de la instancia (serializa por instancia; conteo sin carreras). Un
+  reintento con voto ya presente y quórum alcanzado **avanza** (no queda bloqueado como DUPLICATE).
+- **Multi-entidad de aprobadores:** `EntityAccess` excluye del conjunto efectivo (y del
+  denominador del quórum) a usuarios que no pueden actuar en la entidad de la instancia
+  (group/profile/user + delegación).
+- **`startInstance` fail-closed:** valida definición activa/versionada, `itemtype_target`,
+  existencia del objeto, coherencia de entidad y ACL; creación + evento inicial transaccionales.
+- **Tests añadidos:** validador de spec (unit); fallo creando estado→versión anterior activa;
+  transición a estado inexistente→rechazo sin escrituras; colisión de versión→consistente;
+  fallo durante el avance→recuperable; retry de voto atascado→avanza; multi-entidad del quórum;
+  validaciones de `startInstance`.
+
 ### Notes
 - No hay lógica de Compras en el motor (config-first). `entity_manager`, plantillas de correo
   nativo y UI de bandeja quedan como follow-up (ver README).

@@ -17,8 +17,10 @@ require $svc . 'ConditionEvaluator.php';
 require $svc . 'QuorumCalculator.php';
 require $svc . 'TransitionResolver.php';
 require $svc . 'DelegationResolver.php';
+require $svc . 'DefinitionSpecValidator.php';
 
 use GlpiPlugin\Companyworkflow\Service\ConditionEvaluator;
+use GlpiPlugin\Companyworkflow\Service\DefinitionSpecValidator;
 use GlpiPlugin\Companyworkflow\Service\DelegationResolver;
 use GlpiPlugin\Companyworkflow\Service\QuorumCalculator;
 use GlpiPlugin\Companyworkflow\Service\TransitionResolver;
@@ -109,6 +111,63 @@ $scoped = $dr->effectiveDelegates([
      'date_start' => null, 'date_end' => null],
 ], 5, 42, 3);
 ok('alcance def+entidad coincidente → incluido (11)', in_array(11, $scoped, true));
+
+echo "== DefinitionSpecValidator ==\n";
+$dv = new DefinitionSpecValidator();
+$validSpec = [
+    'code' => 'demo',
+    'states' => [
+        ['code' => 'A', 'kind' => 'initial'],
+        ['code' => 'B', 'kind' => 'final'],
+    ],
+    'transitions' => [
+        ['from' => 'A', 'to' => 'B', 'action' => 'submit'],
+    ],
+];
+ok('spec válida → sin errores', $dv->validate($validSpec) === []);
+ok('code faltante → error', $dv->validate(['states' => [['code' => 'A', 'kind' => 'initial']]]) !== []);
+ok('cero estados iniciales → error', $dv->validate([
+    'code' => 'x', 'states' => [['code' => 'A', 'kind' => 'intermediate']], 'transitions' => [],
+]) !== []);
+ok('dos estados iniciales → error', $dv->validate([
+    'code' => 'x', 'states' => [['code' => 'A', 'kind' => 'initial'], ['code' => 'B', 'kind' => 'initial']], 'transitions' => [],
+]) !== []);
+ok('códigos de estado duplicados → error', $dv->validate([
+    'code' => 'x', 'states' => [['code' => 'A', 'kind' => 'initial'], ['code' => 'A', 'kind' => 'final']], 'transitions' => [],
+]) !== []);
+ok('transición a estado inexistente → error', $dv->validate([
+    'code' => 'x', 'states' => [['code' => 'A', 'kind' => 'initial']],
+    'transitions' => [['from' => 'A', 'to' => 'NOPE', 'action' => 'submit']],
+]) !== []);
+ok('action vacía → error', $dv->validate([
+    'code' => 'x', 'states' => [['code' => 'A', 'kind' => 'initial'], ['code' => 'B', 'kind' => 'final']],
+    'transitions' => [['from' => 'A', 'to' => 'B', 'action' => '']],
+]) !== []);
+ok('quorum_type inválido → error', $dv->validate([
+    'code' => 'x', 'states' => [['code' => 'A', 'kind' => 'initial'], ['code' => 'B', 'kind' => 'final']],
+    'transitions' => [['from' => 'A', 'to' => 'B', 'action' => 'approve',
+        'steps' => [['quorum_type' => 'majority', 'quorum_value' => 1, 'approver_kind' => 'group', 'approver_ref' => 1]]]],
+]) !== []);
+ok('quorum_value 0 → error', $dv->validate([
+    'code' => 'x', 'states' => [['code' => 'A', 'kind' => 'initial'], ['code' => 'B', 'kind' => 'final']],
+    'transitions' => [['from' => 'A', 'to' => 'B', 'action' => 'approve',
+        'steps' => [['quorum_type' => 'count', 'quorum_value' => 0, 'approver_kind' => 'group', 'approver_ref' => 1]]]],
+]) !== []);
+ok('percent > 100 → error', $dv->validate([
+    'code' => 'x', 'states' => [['code' => 'A', 'kind' => 'initial'], ['code' => 'B', 'kind' => 'final']],
+    'transitions' => [['from' => 'A', 'to' => 'B', 'action' => 'approve',
+        'steps' => [['quorum_type' => 'percent', 'quorum_value' => 150, 'approver_kind' => 'group', 'approver_ref' => 1]]]],
+]) !== []);
+ok('approver_kind inválido → error', $dv->validate([
+    'code' => 'x', 'states' => [['code' => 'A', 'kind' => 'initial'], ['code' => 'B', 'kind' => 'final']],
+    'transitions' => [['from' => 'A', 'to' => 'B', 'action' => 'approve',
+        'steps' => [['quorum_type' => 'count', 'quorum_value' => 1, 'approver_kind' => 'wizard', 'approver_ref' => 1]]]],
+]) !== []);
+ok('group sin approver_ref → error', $dv->validate([
+    'code' => 'x', 'states' => [['code' => 'A', 'kind' => 'initial'], ['code' => 'B', 'kind' => 'final']],
+    'transitions' => [['from' => 'A', 'to' => 'B', 'action' => 'approve',
+        'steps' => [['quorum_type' => 'count', 'quorum_value' => 1, 'approver_kind' => 'group', 'approver_ref' => 0]]]],
+]) !== []);
 
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"
