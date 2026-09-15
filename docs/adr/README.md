@@ -34,5 +34,6 @@ las cosas son como son.
 | [0013](ADR-0013-companypurchasing.md) | `companypurchasing` — solicitudes de compra sobre el motor (Fase 2) | Aceptado (diseño) |
 | [0014](ADR-0014-companysignature.md) | `companysignature` — aprobación electrónica interna y evidencia (Fase 2) | Aceptado (diseño) |
 | [0015](ADR-0015-snipeit-integration.md) | Integración con Snipe-IT (gestión física de activos, API-only) | Aceptado (diseño) |
+| [0016](ADR-0016-timezone-init-verification.md) | Inicialización y verificación de timezones (separar configuración de verificación) | Aceptado |
 
 > Plantilla para nuevos ADR: [`adr-template.md`](adr-template.md).

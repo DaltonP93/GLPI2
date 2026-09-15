@@ -196,6 +196,20 @@ jobs:
       - name: Verificar localización (fail-closed)
         run: bash tests/localization/verify-localization.sh
 
+      - name: Regresión — verify-localization estable/idempotente (repetir N veces)
+        run: |
+          set -euo pipefail
+          # La verificación es de SÓLO LECTURA: repetirla sobre la MISMA
+          # instalación debe dar siempre el mismo resultado (ADR-0016). Esto
+          # es la regresión que impide reintroducir el flake de timezone
+          # (reejecutar `database:enable_timezones` como sonda de estado).
+          N=5
+          for i in $(seq 1 "$N"); do
+            echo "== verify-localization: pasada $i/$N (misma instalación) =="
+            bash tests/localization/verify-localization.sh
+          done
+          echo "OK: verify-localization estable/idempotente en $N pasadas consecutivas."
+
       - name: Verificar correo -> MailHog (fail-closed)
         run: bash tests/mail/verify-mail.sh
 
