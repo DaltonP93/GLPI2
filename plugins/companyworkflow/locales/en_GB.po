@@ -1,0 +1,64 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: companyworkflow 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"Language: en_GB\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Workflow definition"
+msgid_plural "Workflow definitions"
+msgstr[0] "Workflow definition"
+msgstr[1] "Workflow definitions"
+
+msgid "Workflow state"
+msgid_plural "Workflow states"
+msgstr[0] "Workflow state"
+msgstr[1] "Workflow states"
+
+msgid "Workflow transition"
+msgid_plural "Workflow transitions"
+msgstr[0] "Workflow transition"
+msgstr[1] "Workflow transitions"
+
+msgid "Workflow step"
+msgid_plural "Workflow steps"
+msgstr[0] "Workflow step"
+msgstr[1] "Workflow steps"
+
+msgid "Workflow instance"
+msgid_plural "Workflow instances"
+msgstr[0] "Workflow instance"
+msgstr[1] "Workflow instances"
+
+msgid "Workflow assignment"
+msgid_plural "Workflow assignments"
+msgstr[0] "Workflow assignment"
+msgstr[1] "Workflow assignments"
+
+msgid "Workflow delegation"
+msgid_plural "Workflow delegations"
+msgstr[0] "Workflow delegation"
+msgstr[1] "Workflow delegations"
+
+msgid "Workflow history event"
+msgid_plural "Workflow history events"
+msgstr[0] "Workflow history event"
+msgstr[1] "Workflow history events"
+
+msgid "Act on transitions (approve/reject/return)"
+msgstr "Act on transitions (approve/reject/return)"
+
+msgid "Administer workflow definitions"
+msgstr "Administer workflow definitions"
+
+msgid "Manage delegations"
+msgstr "Manage delegations"
+
+msgid "Configure plugin"
+msgstr "Configure plugin"
+
+msgid "Detect overdue workflow stages and escalate"
+msgstr "Detect overdue workflow stages and escalate"
