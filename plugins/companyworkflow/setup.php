@@ -2,8 +2,12 @@
 /**
  * Company Workflow — plugin propio de la Plataforma GLPI Modular.
  *
- * Estrategia (Configure -> Existing -> Extend -> Integrate -> Build): Build/Extend
- * Propósito: Motor configurable de estados y transiciones (delegacion, escalamiento) reutilizable por otros modulos.
+ * Estrategia (Configure -> Existing -> Extend -> Integrate -> Build): Build/Extend.
+ * Propósito: MOTOR GENÉRICO y REUSABLE de máquina de estados (definiciones versionadas,
+ * estados/transiciones/condiciones configurables, quórum, delegación, SLA, escalamiento,
+ * notificaciones, auditoría append-only, multi-entidad, ACL). NO conoce el dominio de
+ * Compras: los estados/aprobadores/montos los aporta quien lo consuma (companypurchasing).
+ * Ver docs/adr/ADR-0012-companyworkflow.md y docs/architecture/companyworkflow-technical-design.md.
  *
  * -------------------------------------------------------------------------
  *  REGLA 0: este plugin NO modifica el core de GLPI. Solo usa hooks/API
@@ -14,18 +18,15 @@
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYWORKFLOW_VERSION', '0.1.0');
+define('PLUGIN_COMPANYWORKFLOW_VERSION', '0.2.0');
 
 // Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
-// max='12.0' => GLPI 11.x soportado; 12.x NO hasta pasar la suite de regresion.
-// Ver docs/architecture/glpi-version-compatibility.md
 define('PLUGIN_COMPANYWORKFLOW_GLPI_MIN_VERSION', '11.0');
 define('PLUGIN_COMPANYWORKFLOW_GLPI_MAX_VERSION', '12.0');
 
 /**
  * Inicialización del plugin (se ejecuta en cada carga de GLPI).
- * Aquí se registran hooks oficiales. En Fase 0 solo se declara
- * el cumplimiento CSRF; la lógica funcional llegará en su fase.
+ * Registra hooks oficiales (nunca edita core).
  */
 function plugin_init_companyworkflow() {
     global $PLUGIN_HOOKS;
@@ -33,11 +34,16 @@ function plugin_init_companyworkflow() {
     // Cumplimiento CSRF exigido por GLPI para todo plugin.
     $PLUGIN_HOOKS['csrf_compliant']['companyworkflow'] = true;
 
-    // TODO(fase-modulo): registrar menús, clases y hooks de negocio.
-    // Ejemplos de extensión SOPORTADA (nunca editar core):
-    //   Plugin::registerClass(\GlpiPlugin\Xxx\MiClase::class);
-    //   $PLUGIN_HOOKS['menu_toadd']['companyworkflow'] = [...];
-    //   $PLUGIN_HOOKS['item_add']['companyworkflow']   = [...];
+    // Registrar clases del motor (para derechos/perfiles). Sólo si el autoload las ve.
+    $classes = [
+        \GlpiPlugin\Companyworkflow\Model\WorkflowDef::class,
+        \GlpiPlugin\Companyworkflow\Model\Instance::class,
+    ];
+    foreach ($classes as $class) {
+        if (class_exists($class)) {
+            Plugin::registerClass($class);
+        }
+    }
 }
 
 /**
@@ -68,8 +74,6 @@ function plugin_version_companyworkflow() {
  * @return boolean
  */
 function plugin_companyworkflow_check_prerequisites() {
-    // El rango de versión lo valida GLPI a partir de 'requirements'.
-    // Aquí irían chequeos adicionales propios del módulo.
     return true;
 }
 

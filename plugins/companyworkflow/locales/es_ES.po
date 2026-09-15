@@ -1,0 +1,64 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: companyworkflow 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"Language: es_ES\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Workflow definition"
+msgid_plural "Workflow definitions"
+msgstr[0] "Definición de workflow"
+msgstr[1] "Definiciones de workflow"
+
+msgid "Workflow state"
+msgid_plural "Workflow states"
+msgstr[0] "Estado de workflow"
+msgstr[1] "Estados de workflow"
+
+msgid "Workflow transition"
+msgid_plural "Workflow transitions"
+msgstr[0] "Transición de workflow"
+msgstr[1] "Transiciones de workflow"
+
+msgid "Workflow step"
+msgid_plural "Workflow steps"
+msgstr[0] "Etapa de workflow"
+msgstr[1] "Etapas de workflow"
+
+msgid "Workflow instance"
+msgid_plural "Workflow instances"
+msgstr[0] "Instancia de workflow"
+msgstr[1] "Instancias de workflow"
+
+msgid "Workflow assignment"
+msgid_plural "Workflow assignments"
+msgstr[0] "Asignación de workflow"
+msgstr[1] "Asignaciones de workflow"
+
+msgid "Workflow delegation"
+msgid_plural "Workflow delegations"
+msgstr[0] "Delegación de workflow"
+msgstr[1] "Delegaciones de workflow"
+
+msgid "Workflow history event"
+msgid_plural "Workflow history events"
+msgstr[0] "Evento de historial de workflow"
+msgstr[1] "Eventos de historial de workflow"
+
+msgid "Act on transitions (approve/reject/return)"
+msgstr "Actuar en transiciones (aprobar/rechazar/devolver)"
+
+msgid "Administer workflow definitions"
+msgstr "Administrar definiciones de workflow"
+
+msgid "Manage delegations"
+msgstr "Gestionar delegaciones"
+
+msgid "Configure plugin"
+msgstr "Configurar el plugin"
+
+msgid "Detect overdue workflow stages and escalate"
+msgstr "Detectar etapas de workflow vencidas y escalar"
