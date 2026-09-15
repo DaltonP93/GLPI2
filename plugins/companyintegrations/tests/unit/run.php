@@ -156,6 +156,48 @@ ok('target incorrecto → no ok',
     $lc->check(['label2_2d_target' => 'asset_id', 'label2_2d_prefix' => 'x'])['ok'] === false);
 ok('null → no ok', $lc->check(null)['ok'] === false);
 
+echo "== SnipeClientConfig (TLS obligatorio) ==\n";
+ok('https:// → aceptado', (function () {
+    try {
+        new SnipeClientConfig('https://snipe.test', 'tok');
+        return true;
+    } catch (\Throwable) {
+        return false;
+    }
+})());
+ok('http:// → RECHAZADO por defecto', (function () {
+    try {
+        new SnipeClientConfig('http://snipe.test', 'tok');
+        return false;
+    } catch (\InvalidArgumentException) {
+        return true;
+    }
+})());
+ok('http:// con override DEV explícito → aceptado', (function () {
+    try {
+        new SnipeClientConfig('http://snipe.test', 'tok', 5000, 3, 200, 5, 30, true);
+        return true;
+    } catch (\Throwable) {
+        return false;
+    }
+})());
+ok('base_url vacía → rechazada', (function () {
+    try {
+        new SnipeClientConfig('', 'tok');
+        return false;
+    } catch (\InvalidArgumentException) {
+        return true;
+    }
+})());
+ok('esquema no-http/https → rechazado', (function () {
+    try {
+        new SnipeClientConfig('ftp://snipe.test', 'tok');
+        return false;
+    } catch (\InvalidArgumentException) {
+        return true;
+    }
+})());
+
 echo "== SnipeItClient (contract) ==\n";
 // auth ok
 $c = makeClient([resp(200, ['total' => 1, 'rows' => [['id' => 1, 'asset_tag' => 'NB-1']]])]);

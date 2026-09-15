@@ -72,6 +72,11 @@ final class SelftestCommand extends Command
         $this->buildFixtures();
         $this->scenarioReconcileAndBridge();
         $this->scenarioSerialConflict();
+        $this->scenarioPagination();
+        $this->scenarioCompanyUnmap();
+        $this->scenarioTargetIntegrity();
+        $this->scenarioTagRename();
+        $this->scenarioCreateBridgeIdempotent();
         $this->scenarioGatewayMultiEntity();
         $this->scenarioLabelConfig();
         $this->cleanup();
@@ -267,6 +272,137 @@ final class SelftestCommand extends Command
         $this->check('[RECON] puente marcado serial_conflict', (string) $b->fields['sync_status'] === AssetBridge::STATUS_SERIAL_CONFLICT);
     }
 
+    // ------------------------------------------------------------------ [PAGINATION]
+
+    private function scenarioPagination(): void
+    {
+        $this->out->writeln('== [PAGINATION] cobertura completa >50 activos ==');
+        (new MapCompany())->add(['snipe_company_id' => 30, 'snipe_name' => 'PAGE', 'glpi_entity_id' => $this->entityB, 'is_approved' => 1]);
+
+        // Página 1 = 50 activos, página 2 = 15 activos → 65 en total (todos company_unmapped:
+        // usamos company 999 no mapeada para no crear 65 computers; lo que importa es el conteo).
+        $page1 = [];
+        for ($i = 1; $i <= 50; $i++) {
+            $page1[] = ['id' => 5000 + $i, 'asset_tag' => 'PG-' . $i . '-' . $this->suffix, 'serial' => '', 'company' => ['id' => 999]];
+        }
+        $page2 = [];
+        for ($i = 51; $i <= 65; $i++) {
+            $page2[] = ['id' => 5000 + $i, 'asset_tag' => 'PG-' . $i . '-' . $this->suffix, 'serial' => '', 'company' => ['id' => 999]];
+        }
+        $transport = new ArrayTransport([$this->pageResp($page1), $this->pageResp($page2)]);
+        $client = new SnipeItClient($transport, new SnipeClientConfig('https://snipe.test', 'tok', 5000, 0, 1, 5, 60), null, false);
+
+        $summary = (new Reconciler())->reconcile($client, ['Computer'], 50, 10000);
+        $this->check('[PAGINATION] procesó 2 páginas (2 llamadas listHardware)', count($transport->calls) === 2);
+        $this->check('[PAGINATION] procesó los 65 activos (cobertura completa)', ($summary['_processed'] ?? 0) === 65);
+
+        // Tope maxAssets: corta y no hace loop infinito aunque haya más.
+        $transport2 = new ArrayTransport([$this->pageResp($page1), $this->pageResp($page2)]);
+        $client2 = new SnipeItClient($transport2, new SnipeClientConfig('https://snipe.test', 'tok', 5000, 0, 1, 5, 60), null, false);
+        $summary2 = (new Reconciler())->reconcile($client2, ['Computer'], 50, 10);
+        $this->check('[PAGINATION] respeta maxAssets (corta en 10)', ($summary2['_processed'] ?? 0) === 10);
+    }
+
+    // ------------------------------------------------------------------ [BRIDGE-STATE] company unmap
+
+    private function scenarioCompanyUnmap(): void
+    {
+        $this->out->writeln('== [BRIDGE-STATE] bridge existente + quitar map_company → COMPANY_UNMAPPED ==');
+        $serial = 'CU-' . $this->suffix;
+        $pc = $this->makeComputer($serial);
+        (new MapCompany())->add(['snipe_company_id' => 40, 'snipe_name' => 'CU', 'glpi_entity_id' => $this->entityB, 'is_approved' => 1]);
+
+        $asset = ['id' => 401, 'asset_tag' => 'CU-401-' . $this->suffix, 'serial' => $serial, 'company' => ['id' => 40]];
+        (new Reconciler())->reconcile($this->clientFor([$asset]), ['Computer'], 50);
+        $b = new AssetBridge();
+        $this->check('[BRIDGE-STATE] puente creado y matched', $b->getFromDBByCrit(['snipe_asset_id' => 401]) && (string) $b->fields['sync_status'] === AssetBridge::STATUS_MATCHED);
+
+        // Quitar el mapeo de compañía (desaprobar).
+        $mc = new MapCompany();
+        $mc->getFromDBByCrit(['snipe_company_id' => 40]);
+        $mc->update(['id' => $mc->getID(), 'is_approved' => 0]);
+
+        $summary = (new Reconciler())->reconcile($this->clientFor([$asset]), ['Computer'], 50);
+        $this->check('[BRIDGE-STATE] reclasifica COMPANY_UNMAPPED', ($summary[ReconciliationClassifier::COMPANY_UNMAPPED] ?? 0) >= 1);
+        $b->getFromDBByCrit(['snipe_asset_id' => 401]);
+        $this->check('[BRIDGE-STATE] 🔒 sync_status YA NO es matched', (string) $b->fields['sync_status'] === AssetBridge::STATUS_COMPANY_UNMAPPED);
+    }
+
+    // ------------------------------------------------------------------ [TARGET] integridad del objetivo
+
+    private function scenarioTargetIntegrity(): void
+    {
+        $this->out->writeln('== [TARGET] objetivo GLPI borrado → ERROR (no MATCHED silencioso) ==');
+        $serial = 'TI-' . $this->suffix;
+        $pc = $this->makeComputer($serial);
+        (new MapCompany())->add(['snipe_company_id' => 41, 'snipe_name' => 'TI', 'glpi_entity_id' => $this->entityB, 'is_approved' => 1]);
+        $asset = ['id' => 402, 'asset_tag' => 'TI-402-' . $this->suffix, 'serial' => $serial, 'company' => ['id' => 41]];
+        (new Reconciler())->reconcile($this->clientFor([$asset]), ['Computer'], 50);
+        $b = new AssetBridge();
+        $this->check('[TARGET] puente creado', $b->getFromDBByCrit(['snipe_asset_id' => 402]));
+
+        // Borrar (purgar) el activo GLPI referenciado.
+        (new Computer())->delete(['id' => $pc], true);
+
+        $summary = (new Reconciler())->reconcile($this->clientFor([$asset]), ['Computer'], 50);
+        $this->check('[TARGET] objetivo inexistente → ERROR', ($summary[ReconciliationClassifier::ERROR] ?? 0) >= 1);
+        $b->getFromDBByCrit(['snipe_asset_id' => 402]);
+        $this->check('[TARGET] 🔒 sync_status = error (no matched)', (string) $b->fields['sync_status'] === AssetBridge::STATUS_ERROR);
+    }
+
+    // ------------------------------------------------------------------ [RENAME] identidad estable
+
+    private function scenarioTagRename(): void
+    {
+        $this->out->writeln('== [RENAME] cambio de asset_tag mantiene identidad estable ==');
+        $serial = 'RN-' . $this->suffix;
+        $pc = $this->makeComputer($serial);
+        (new MapCompany())->add(['snipe_company_id' => 42, 'snipe_name' => 'RN', 'glpi_entity_id' => $this->entityB, 'is_approved' => 1]);
+        $oldTag = 'RN-OLD-' . $this->suffix;
+        $newTag = 'RN-NEW-' . $this->suffix;
+
+        (new Reconciler())->reconcile($this->clientFor([['id' => 403, 'asset_tag' => $oldTag, 'serial' => $serial, 'company' => ['id' => 42]]]), ['Computer'], 50);
+        $b = new AssetBridge();
+        $b->getFromDBByCrit(['snipe_asset_id' => 403]);
+        $bridgeId = (int) $b->getID();
+
+        // Mismo snipe_asset_id, NUEVO tag → rename estable.
+        (new Reconciler())->reconcile($this->clientFor([['id' => 403, 'asset_tag' => $newTag, 'serial' => $serial, 'company' => ['id' => 42]]]), ['Computer'], 50);
+        $resolver = new AssetResolver();
+        $this->check('[RENAME] tag NUEVO resuelve al mismo puente', ($resolver->resolveByTag($newTag)?->getID()) === $bridgeId);
+        $this->check('[RENAME] tag VIEJO (alias histórico) resuelve al mismo puente', ($resolver->resolveByTag($oldTag)?->getID()) === $bridgeId);
+        $b->getFromDB($bridgeId);
+        $this->check('[RENAME] el puente adopta el tag nuevo como actual', (string) $b->fields['snipe_asset_tag'] === $newTag);
+
+        // Conflicto: el nuevo tag ya pertenece a OTRO puente → fail-closed, sin reasignar.
+        $otherTag = 'RN-OTHER-' . $this->suffix;
+        (new AssetBridge())->add([
+            'snipe_asset_id' => 404, 'snipe_asset_tag' => $otherTag, 'glpi_itemtype' => 'Computer',
+            'glpi_items_id' => $this->makeComputer('RN2-' . $this->suffix), 'glpi_entity_id' => $this->entityB,
+            'serial' => 'RN2-' . $this->suffix, 'sync_status' => AssetBridge::STATUS_MATCHED, 'date_creation' => date('Y-m-d H:i:s'),
+        ]);
+        $summary = (new Reconciler())->reconcile($this->clientFor([['id' => 403, 'asset_tag' => $otherTag, 'serial' => $serial, 'company' => ['id' => 42]]]), ['Computer'], 50);
+        $this->check('[RENAME] 🔒 tag de otro puente → ERROR (conflicto)', ($summary[ReconciliationClassifier::ERROR] ?? 0) >= 1);
+        $b->getFromDB($bridgeId);
+        $this->check('[RENAME] 🔒 sin reasignación silenciosa (conserva su tag)', (string) $b->fields['snipe_asset_tag'] === $newTag);
+    }
+
+    // ------------------------------------------------------------------ [IDEMPOTENT] createBridge
+
+    private function scenarioCreateBridgeIdempotent(): void
+    {
+        $this->out->writeln('== [IDEMPOTENT] createBridge no duplica (race-safe) ==');
+        $serial = 'ID-' . $this->suffix;
+        $pc = $this->makeComputer($serial);
+        (new MapCompany())->add(['snipe_company_id' => 43, 'snipe_name' => 'ID', 'glpi_entity_id' => $this->entityB, 'is_approved' => 1]);
+        $asset = ['id' => 405, 'asset_tag' => 'ID-405-' . $this->suffix, 'serial' => $serial, 'company' => ['id' => 43]];
+
+        (new Reconciler())->reconcile($this->clientFor([$asset]), ['Computer'], 50);
+        (new Reconciler())->reconcile($this->clientFor([$asset]), ['Computer'], 50);
+        $this->check('[IDEMPOTENT] exactamente 1 puente para el snipe_asset_id', $this->countBridges(405) === 1);
+        $this->check('[IDEMPOTENT] exactamente 1 alias actual para su tag', $this->countAliases('ID-405-' . $this->suffix) === 1);
+    }
+
     // ------------------------------------------------------------------ [MULTI-ENT] gateway ACL
 
     private function scenarioGatewayMultiEntity(): void
@@ -302,6 +438,40 @@ final class SelftestCommand extends Command
     }
 
     // ------------------------------------------------------------------ helpers
+
+    /** @param array<int,array<string,mixed>> $rows */
+    private function pageResp(array $rows): HttpResponse
+    {
+        return new HttpResponse(200, [], json_encode(['total' => count($rows), 'rows' => $rows]) ?: '');
+    }
+
+    /** Cliente con una sola página de respuesta (transporte fake). @param array<int,array<string,mixed>> $rows */
+    private function clientFor(array $rows): SnipeItClient
+    {
+        return new SnipeItClient(new ArrayTransport([$this->pageResp($rows)]), new SnipeClientConfig('https://snipe.test', 'tok', 5000, 0, 1, 5, 60), null, false);
+    }
+
+    private function countBridges(int $snipeId): int
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $n = 0;
+        foreach ($DB->request(['COUNT' => 'c', 'FROM' => AssetBridge::getTable(), 'WHERE' => ['snipe_asset_id' => $snipeId]]) as $row) {
+            $n = (int) $row['c'];
+        }
+        return $n;
+    }
+
+    private function countAliases(string $tag): int
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $n = 0;
+        foreach ($DB->request(['COUNT' => 'c', 'FROM' => AssetTagAlias::getTable(), 'WHERE' => ['asset_tag' => $tag]]) as $row) {
+            $n = (int) $row['c'];
+        }
+        return $n;
+    }
 
     /**
      * @param array<int>        $entities

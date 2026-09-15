@@ -28,9 +28,13 @@ final class PluginConfig
         'backoff_base_ms'       => '200',
         'breaker_threshold'     => '5',
         'breaker_cooldown_sec'  => '30',
+        // TLS: HTTP inseguro deshabilitado por defecto (sólo DEV vía override explícito).
+        'allow_insecure_http'   => '0',
         // Itemtypes GLPI candidatos para el match por serial (config-first, sin hardcode de negocio).
         'match_itemtypes'       => 'Computer,Monitor,NetworkEquipment,Printer,Phone',
+        // Paginación de reconciliación.
         'reconcile_page_size'   => '50',
+        'reconcile_max_assets'  => '10000',
     ];
 
     /** @return array<string,mixed> */
