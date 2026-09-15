@@ -2,42 +2,45 @@
 /**
  * Company Integrations — plugin propio de la Plataforma GLPI Modular.
  *
- * Estrategia (Configure -> Existing -> Extend -> Integrate -> Build): Integrate/Build
- * Propósito: Conectores y webhooks salientes apoyados en los webhooks nativos de GLPI 11, con idempotencia y correlation_id.
+ * Estrategia (Configure -> Existing -> Extend -> Integrate -> Build): Integrate.
+ * Propósito (SI-1, ADR-0015): integración READ-ONLY con Snipe-IT por API — cliente HTTP resiliente
+ * (timeout/retry/backoff/circuit-breaker/correlation-id/logs sanitizados), tablas propias
+ * (`asset_bridge`, `map_companies`, `map_users`, alias de asset tag), reconciliación con detección
+ * de conflictos (sin auto-corregir) y gateway de resolución estable por asset tag.
+ *
+ * SI-1 NO escribe en Snipe ni modifica activos core de GLPI. Sólo persiste en tablas propias.
  *
  * -------------------------------------------------------------------------
- *  REGLA 0: este plugin NO modifica el core de GLPI. Solo usa hooks/API
- *  oficiales. Ver ../../CLAUDE.md y docs/adr/ADR-0002-glpi-core-immutable.md.
+ *  REGLA 0: este plugin NO modifica el core de GLPI (ni el de Snipe-IT). Solo API/hooks
+ *  oficiales. Snipe-IT es AGPL-3.0 → integración SÓLO por API, sin copiar código.
  * -------------------------------------------------------------------------
  *
  * @license GPL-3.0-or-later
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYINTEGRATIONS_VERSION', '0.1.0');
+define('PLUGIN_COMPANYINTEGRATIONS_VERSION', '0.2.0');
 
-// Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
-// max='12.0' => GLPI 11.x soportado; 12.x NO hasta pasar la suite de regresion.
-// Ver docs/architecture/glpi-version-compatibility.md
 define('PLUGIN_COMPANYINTEGRATIONS_GLPI_MIN_VERSION', '11.0');
 define('PLUGIN_COMPANYINTEGRATIONS_GLPI_MAX_VERSION', '12.0');
 
 /**
  * Inicialización del plugin (se ejecuta en cada carga de GLPI).
- * Aquí se registran hooks oficiales. En Fase 0 solo se declara
- * el cumplimiento CSRF; la lógica funcional llegará en su fase.
  */
 function plugin_init_companyintegrations() {
     global $PLUGIN_HOOKS;
 
-    // Cumplimiento CSRF exigido por GLPI para todo plugin.
     $PLUGIN_HOOKS['csrf_compliant']['companyintegrations'] = true;
 
-    // TODO(fase-modulo): registrar menús, clases y hooks de negocio.
-    // Ejemplos de extensión SOPORTADA (nunca editar core):
-    //   Plugin::registerClass(\GlpiPlugin\Xxx\MiClase::class);
-    //   $PLUGIN_HOOKS['menu_toadd']['companyintegrations'] = [...];
-    //   $PLUGIN_HOOKS['item_add']['companyintegrations']   = [...];
+    $classes = [
+        \GlpiPlugin\Companyintegrations\Model\AssetBridge::class,
+        \GlpiPlugin\Companyintegrations\Model\MapCompany::class,
+    ];
+    foreach ($classes as $class) {
+        if (class_exists($class)) {
+            Plugin::registerClass($class);
+        }
+    }
 }
 
 /**
@@ -68,8 +71,6 @@ function plugin_version_companyintegrations() {
  * @return boolean
  */
 function plugin_companyintegrations_check_prerequisites() {
-    // El rango de versión lo valida GLPI a partir de 'requirements'.
-    // Aquí irían chequeos adicionales propios del módulo.
     return true;
 }
 
