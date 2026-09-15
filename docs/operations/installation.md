@@ -14,6 +14,18 @@ La imagen `infra/docker/Dockerfile.glpi` **descarga** el release oficial estable
 - Cargar tablas de husos horarios para habilitar timezones por usuario.
 
 ## 4. Instalar GLPI (consola, reproducible)
+
+> **Antes de instalar — clave de seguridad (workaround GLPI 11, ver ADR-0017).**
+> GLPI usa `config/glpicrypt.key` (32 bytes binarios) como `kernel.secret` de
+> Symfony. Si esa clave aleatoria contiene un byte `%`, Symfony la interpreta como
+> `%parameter%` y **cualquier** `bin/console` falla con `ParameterNotFoundException`
+> (bug upstream, intermitente). Como GLPI **respeta** una clave ya existente, se
+> pre-provisiona una clave criptográfica de 32 bytes **sin `%`** antes de instalar:
+> ```bash
+> bash infra/docker/glpi-config/provision-security-key.sh
+> ```
+> No es un cambio del core ni del algoritmo criptográfico; es infraestructura.
+
 ```bash
 docker compose exec -u www-data glpi php bin/console db:install \
   --db-host=db --db-name=<DB> --db-user=<USER> --db-password=<PASS> \

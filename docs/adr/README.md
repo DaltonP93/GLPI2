@@ -34,5 +34,6 @@ las cosas son como son.
 | [0013](ADR-0013-companypurchasing.md) | `companypurchasing` — solicitudes de compra sobre el motor (Fase 2) | Aceptado (diseño) |
 | [0014](ADR-0014-companysignature.md) | `companysignature` — aprobación electrónica interna y evidencia (Fase 2) | Aceptado (diseño) |
 | [0015](ADR-0015-snipeit-integration.md) | Integración con Snipe-IT (gestión física de activos, API-only) | Aceptado (diseño) |
+| [0017](ADR-0017-glpi-security-key-hardening.md) | Pre-provisión de `glpicrypt.key` (workaround del bug `kernel.secret` de GLPI 11) | Aceptado |
 
 > Plantilla para nuevos ADR: [`adr-template.md`](adr-template.md).
