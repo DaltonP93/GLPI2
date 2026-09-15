@@ -131,6 +131,9 @@ jobs:
           done
           echo "Timeout esperando al contenedor glpi"; docker compose ps; exit 1
 
+      - name: Provisionar glpicrypt.key (workaround GLPI 11 / kernel.secret) — FAIL-CLOSED
+        run: bash infra/docker/glpi-config/provision-security-key.sh
+
       - name: Instalar GLPI + localización (reproducible)
         run: bash infra/docker/glpi-config/install-and-localize.sh
 
@@ -144,6 +147,9 @@ jobs:
             docker compose exec -T -u www-data glpi php bin/console plugin:install --username=glpi "$p"
             docker compose exec -T -u www-data glpi php bin/console plugin:activate "$p"
           done
+
+      - name: Regresión — clave de seguridad GLPI (kernel.secret) — FAIL-CLOSED
+        run: bash tests/security/verify-glpi-security-key.sh
 
       - name: Selftests de integración + E2E Fase 2 (workflow/integraciones) — FAIL-CLOSED
         working-directory: infra/docker
