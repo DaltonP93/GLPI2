@@ -1,0 +1,43 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: companyintegrations 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"Language: es_ES\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Asset bridge"
+msgid_plural "Asset bridges"
+msgstr[0] "Puente de activo"
+msgstr[1] "Puentes de activo"
+
+msgid "Company mapping"
+msgid_plural "Company mappings"
+msgstr[0] "Mapeo de compañía"
+msgstr[1] "Mapeos de compañía"
+
+msgid "User mapping"
+msgid_plural "User mappings"
+msgstr[0] "Mapeo de usuario"
+msgstr[1] "Mapeos de usuario"
+
+msgid "Asset tag alias"
+msgid_plural "Asset tag aliases"
+msgstr[0] "Alias de asset tag"
+msgstr[1] "Alias de asset tag"
+
+msgid "Reconciliation result"
+msgid_plural "Reconciliation results"
+msgstr[0] "Resultado de reconciliación"
+msgstr[1] "Resultados de reconciliación"
+
+msgid "Run reconciliation (read-only)"
+msgstr "Ejecutar reconciliación (sólo lectura)"
+
+msgid "Approve mappings"
+msgstr "Aprobar mapeos"
+
+msgid "Configure plugin"
+msgstr "Configurar el plugin"
