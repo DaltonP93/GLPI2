@@ -145,6 +145,21 @@ final class WorkflowApi
         return $this->engine->transition($instance, $action, $ctx);
     }
 
+    /**
+     * Invalidación GENÉRICA de aprobaciones (extensión para plugins de dominio, p. ej.
+     * `companysignature` cuando el contenido aprobado cambia de forma sustantiva).
+     *
+     * Domain-agnostic · fail-closed · concurrencia (`expectedVersion`) · IDEMPOTENTE
+     * (`context['idempotency_key']`) · auditoría append-only · reabre al checkpoint
+     * (`context['reopen_to_code']` o estado inicial) · emite `companyworkflow:approval_invalidated`.
+     *
+     * @param array<string,mixed> $context
+     */
+    public function invalidateApprovals(int $instanceId, string $reason, array $context = [], ?int $expectedVersion = null): TransitionResult
+    {
+        return $this->engine->invalidateApprovals($instanceId, $reason, $context, $expectedVersion);
+    }
+
     public function builder(): DefinitionBuilder
     {
         return $this->builder;

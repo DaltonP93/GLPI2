@@ -14,7 +14,7 @@
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYSIGNATURE_VERSION', '0.1.0');
+define('PLUGIN_COMPANYSIGNATURE_VERSION', '0.2.0');
 
 // Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
 // max='12.0' => GLPI 11.x soportado; 12.x NO hasta pasar la suite de regresion.
@@ -33,11 +33,15 @@ function plugin_init_companysignature() {
     // Cumplimiento CSRF exigido por GLPI para todo plugin.
     $PLUGIN_HOOKS['csrf_compliant']['companysignature'] = true;
 
-    // TODO(fase-modulo): registrar menús, clases y hooks de negocio.
-    // Ejemplos de extensión SOPORTADA (nunca editar core):
-    //   Plugin::registerClass(\GlpiPlugin\Xxx\MiClase::class);
-    //   $PLUGIN_HOOKS['menu_toadd']['companysignature'] = [...];
-    //   $PLUGIN_HOOKS['item_add']['companysignature']   = [...];
+    // Registrar la clase de evidencia (para derechos/perfiles y futuras pestañas).
+    if (class_exists(\GlpiPlugin\Companysignature\Model\ApprovalEvidence::class)) {
+        Plugin::registerClass(\GlpiPlugin\Companysignature\Model\ApprovalEvidence::class);
+    }
+
+    // Escuchar los eventos de dominio de companyworkflow (hooks soportados; nunca editan core).
+    // La evidencia se registra de forma IDEMPOTENTE ante retry/duplicado/restart.
+    $PLUGIN_HOOKS['companyworkflow:transitioned']['companysignature']         = 'plugin_companysignature_on_transitioned';
+    $PLUGIN_HOOKS['companyworkflow:approval_invalidated']['companysignature'] = 'plugin_companysignature_on_approval_invalidated';
 }
 
 /**

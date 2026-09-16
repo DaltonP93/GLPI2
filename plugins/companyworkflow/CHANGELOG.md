@@ -3,6 +3,27 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.3.0]
+### Added
+- **Extensión genérica `invalidateApprovals()` (D2, para Fase 2C `companysignature`):**
+  - `Engine::invalidateApprovals(int $instanceId, string $reason, array $context = [], ?int $expectedVersion = null)`
+    y su fachada `Api\WorkflowApi::invalidateApprovals(...)`. **Domain-agnostic**: no conoce firmas,
+    documentos ni Compras — cualquier consumidor la invoca al detectar que el contenido aprobado
+    cambió de forma sustantiva.
+  - **Fail-closed:** instancia inexistente → `ERROR`; sin acceso a la entidad → `DENIED_ENTITY`;
+    sin derecho `plugin_companyworkflow` (READ) → `DENIED_ACL`; instancia no abierta → `CLOSED`.
+  - **Concurrencia:** `SELECT ... FOR UPDATE` + `expectedVersion`/`lock_version` (control optimista);
+    conflicto → `CONFLICT_VERSION`.
+  - **Idempotente:** `context['idempotency_key']` (misma clave ⇒ no-op OK, no reabre dos veces).
+  - **Política v1:** limpia los votos y **reabre** al checkpoint configurable
+    (`context['reopen_to_code']`) o, por defecto, al **estado inicial** de la definición.
+  - **Auditoría append-only** (`approval_invalidated` con `reason` + `idempotency_key` + trazabilidad
+    opcional `subject_type`/`subject_id`/`document_version`). **Nunca borra historial.**
+  - Emite el evento post-commit `companyworkflow:approval_invalidated` (best-effort, no revierte).
+- **Tests:** escenario `[INVALIDATE]` en `plugins:companyworkflow:selftest` (integración/E2E):
+  reapertura al inicial, idempotencia, checkpoint configurable, conflicto de versión, fail-closed
+  sobre instancia cerrada e instancia inexistente.
+
 ## [Unreleased]
 ### Added
 - **Motor de workflow genérico (ADR-0012):**

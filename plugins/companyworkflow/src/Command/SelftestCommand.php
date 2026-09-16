@@ -103,6 +103,7 @@ final class SelftestCommand extends Command
         $this->scenarioHappyPath();
         $this->scenarioNegatives();
         $this->scenarioReturnInvalidation();
+        $this->scenarioInvalidateApprovals();
         $this->scenarioMultiEntityApprovers();
         $this->scenarioRecovery();
         $this->scenarioDefinitionBuilderHardening();
@@ -367,6 +368,87 @@ final class SelftestCommand extends Command
         $this->applySession($this->requester, [$this->entityB], ['plugin_companyworkflow' => READ]);
         $r = $api->transition($inst, 'submit', []);
         $this->check('[RETURN] resubmit → PENDING_L1', $r->success && ($r->data['to'] ?? '') === 'PENDING_L1');
+    }
+
+    // ------------------------------------------------------------------ [INVALIDATE] extensión D2
+
+    /**
+     * Invalidación GENÉRICA de aprobaciones (extensión reutilizable por plugins de dominio, p. ej.
+     * companysignature). Domain-agnostic · fail-closed · idempotente · concurrencia · reabre checkpoint.
+     */
+    private function scenarioInvalidateApprovals(): void
+    {
+        $this->out->writeln('== [INVALIDATE] invalidación genérica de aprobaciones (extensión D2) ==');
+        $api = new WorkflowApi();
+
+        // (a) Feliz: PENDING_L1 con 1 voto → invalidar → reabre al estado inicial (DRAFT), 0 votos, OPEN.
+        $this->applySession($this->requester, [$this->entityB], ['plugin_companyworkflow' => READ]);
+        $inst = $api->startInstance($this->def, 'Computer', $this->makeComputer(), $this->entityB, 0);
+        if ($inst === null) {
+            $this->check('[INVALIDATE] instancia', false);
+            return;
+        }
+        $api->transition($inst, 'submit', []);
+        $this->applySession($this->uA1, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $api->transition($inst, 'approve', ['comment' => 'a1']);
+        $this->check('[INVALIDATE] preludio: 1 voto en PENDING_L1', $this->approvalsCount((int) $inst->getID()) === 1 && $this->stateCodeOf($inst) === 'PENDING_L1');
+
+        // La invalidación la dispara un consumidor autenticado (identidad real + ACL mínima READ + entidad).
+        $idem = 'sig:demo:' . $this->suffix . ':v1';
+        $this->applySession($this->requester, [$this->entityB], ['plugin_companyworkflow' => READ]);
+        $r = $api->invalidateApprovals((int) $inst->getID(), 'contenido aprobado cambió', [
+            'idempotency_key' => $idem,
+            'subject_type'    => 'Computer',
+            'subject_id'      => (int) $inst->fields['items_id'],
+            'document_version' => 2,
+        ]);
+        $this->check('[INVALIDATE] OK + advanced', $r->success && ($r->data['advanced'] ?? false) === true);
+        $inst->getFromDB((int) $inst->getID());
+        $this->check('[INVALIDATE] reabre al estado inicial (DRAFT)', $this->stateCodeOf($inst) === 'DRAFT');
+        $this->check('[INVALIDATE] votos limpiados (0)', $this->approvalsCount((int) $inst->getID()) === 0);
+        $this->check('[INVALIDATE] instancia sigue OPEN', ($inst->fields['status'] ?? '') === Instance::STATUS_OPEN);
+        $this->check('[INVALIDATE] evento approval_invalidated en historial', $this->hasHistoryEvent((int) $inst->getID(), HistoryEvent::EVENT_APPROVAL_INVALIDATED));
+
+        // (b) IDEMPOTENCIA: misma idempotency_key → no-op OK, sin nuevo avance ni cambio de versión.
+        $lockBefore = (int) $inst->fields['lock_version'];
+        $r2 = $api->invalidateApprovals((int) $inst->getID(), 'contenido aprobado cambió', ['idempotency_key' => $idem]);
+        $inst->getFromDB((int) $inst->getID());
+        $this->check('[INVALIDATE] idempotente: OK sin avanzar', $r2->success && ($r2->data['idempotent'] ?? false) === true && ($r2->data['advanced'] ?? true) === false);
+        $this->check('[INVALIDATE] idempotente: lock_version intacto', (int) $inst->fields['lock_version'] === $lockBefore);
+
+        // (c) Checkpoint CONFIGURABLE: reopen_to_code respetado (reabre a RETURNED, no al inicial).
+        $this->applySession($this->requester, [$this->entityB], ['plugin_companyworkflow' => READ]);
+        $inst2 = $api->startInstance($this->def, 'Computer', $this->makeComputer(), $this->entityB, 0);
+        $api->transition($inst2, 'submit', []);
+        $this->applySession($this->uA1, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $api->transition($inst2, 'approve', ['comment' => 'a1']);
+        $this->applySession($this->requester, [$this->entityB], ['plugin_companyworkflow' => READ]);
+        $r3 = $api->invalidateApprovals((int) $inst2->getID(), 'reabrir a RETURNED', ['reopen_to_code' => 'RETURNED', 'idempotency_key' => 'k2-' . $this->suffix]);
+        $inst2->getFromDB((int) $inst2->getID());
+        $this->check('[INVALIDATE] reopen_to_code=RETURNED respetado', $r3->success && $this->stateCodeOf($inst2) === 'RETURNED');
+
+        // (d) CONCURRENCIA: expectedVersion incorrecto → CONFLICT_VERSION (sin mutar).
+        $this->applySession($this->requester, [$this->entityB], ['plugin_companyworkflow' => READ]);
+        $inst3 = $api->startInstance($this->def, 'Computer', $this->makeComputer(), $this->entityB, 0);
+        $api->transition($inst3, 'submit', []);
+        $inst3->getFromDB((int) $inst3->getID());
+        $wrong = (int) $inst3->fields['lock_version'] + 5;
+        $r4 = $api->invalidateApprovals((int) $inst3->getID(), 'stale', ['idempotency_key' => 'k3-' . $this->suffix], $wrong);
+        $this->check('[INVALIDATE] expectedVersion incorrecto → CONFLICT_VERSION', !$r4->success && $r4->code === TransitionResult::CONFLICT_VERSION);
+
+        // (e) FAIL-CLOSED sobre instancia cerrada → CLOSED.
+        $this->applySession($this->requester, [$this->entityB], ['plugin_companyworkflow' => READ]);
+        $inst4 = $api->startInstance($this->def, 'Computer', $this->makeComputer(), $this->entityB, 0);
+        $api->transition($inst4, 'submit', []);
+        $this->applySession($this->uA1, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $api->transition($inst4, 'reject', ['comment' => 'no']);
+        $this->applySession($this->requester, [$this->entityB], ['plugin_companyworkflow' => READ]);
+        $r5 = $api->invalidateApprovals((int) $inst4->getID(), 'sobre cerrada', ['idempotency_key' => 'k4-' . $this->suffix]);
+        $this->check('[INVALIDATE] instancia cerrada → CLOSED', !$r5->success && $r5->code === TransitionResult::CLOSED);
+
+        // (f) Instancia inexistente → ERROR (fail-closed).
+        $r6 = $api->invalidateApprovals(999999999, 'fantasma', []);
+        $this->check('[INVALIDATE] instancia inexistente → ERROR', !$r6->success && $r6->code === TransitionResult::ERROR);
     }
 
     // ------------------------------------------------------------------ [MULTI-ENT] denominador de quórum

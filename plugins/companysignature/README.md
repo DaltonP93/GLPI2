@@ -3,9 +3,30 @@
 Plugin propio de la **Plataforma GLPI Modular**.
 
 - **Estrategia (matriz):** Build + Integrate
-- **Propósito:** Evidencia de aprobacion electronica (hash, timestamp, auditoria) y punto de integracion para firma digital certificada.
+- **Propósito:** Evidencia de aprobación electrónica interna (identidad autenticada + **hash del
+  contenido versionado** + timestamp + auditoría) y **puerto** de integración para firma digital
+  certificada. **No** es firma digital certificada.
 - **GLPI soportado:** `>=11.0` y `<12.0` (el `max=12.0` es límite superior **excluyente**; probado en 11.0.8; GLPI 12 no soportado hasta suite de regresión — ver `../../docs/architecture/glpi-version-compatibility.md`)
-- **Estado:** Fase 0 — esqueleto (sin lógica de negocio)
+- **Estado:** Fase 2C — v1 implementada (evidencia + versionado/hash + verificación interna + PDF nativo)
+- **Diseño:** `../../docs/architecture/companysignature-native-first-gate.md` (gate D1–D5) y
+  `../../docs/adr/ADR-0014-companysignature.md`.
+
+## Qué hace (v1)
+| Pieza | Rol |
+|------|-----|
+| `Service/Canonicalizer` + `Hasher` | Canonicaliza el snapshot `{schema, subject_type, subject_id, entity_id, document_version, payload}` (determinista, floats rechazados) y calcula `content_sha256` reproducible (**D4**). |
+| `Model/DocumentVersion` + `Service/VersionStore` | Versión **inmutable** del contenido aprobado; el PDF es artefacto derivado con regeneración idempotente (**D1**). |
+| `Model/ApprovalEvidence` + `Service/EvidenceRecorder` | Evidencia **append-only** e idempotente (`verification_token` opaco, `idempotency_key` UNIQUE). |
+| `Service/WorkflowEventListener` | Consume `companyworkflow:transitioned` / `:approval_invalidated` (idempotente). La invalidación usa `WorkflowApi::invalidateApprovals()` (**D2**) y **conserva** la evidencia previa. |
+| `Service/ApprovedPdfComposer` | PDF aprobado como `Document` **nativo** (TCPDF) con versión + hash + QR; no bloquea la evidencia. |
+| `Service/VerificationQrRenderer` | QR propio sobre la librería nativa de GLPI (**D3**, sin depender de `companyqr`). |
+| `Controller/VerifyController` + `Service/VerificationService` | `GET /plugins/companysignature/verify/{token}` (AUTHENTICATED): ACL + multi-entidad, recomputa hash, refleja `invalidated`/`tampered`, no filtra datos. |
+| `Service/CertifiedSignerInterface` + `NullSigner` | Puerto de firma certificada (**sin proveedor** en Fase 2). |
+| `Api/SignatureApi` | Fachada para el dominio (companypurchasing y futuros). Domain-agnostic (**D5**). |
+
+## Tests
+- Unit puro: `php plugins/companysignature/tests/unit/run.php`
+- Integración + E2E (en GLPI): `php bin/console plugins:companysignature:selftest`
 
 ## Regla 0
 Este plugin **no modifica el core de GLPI**. Solo usa hooks/API oficiales.
