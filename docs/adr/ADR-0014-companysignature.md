@@ -65,3 +65,36 @@ Sólo plugin + identidad/sesión/Log/TCPDF nativos. **Sin modificar el core.**
 
 ## Compatibilidad
 `requirements.glpi` min `11.0`, max `12.0` (excluyente).
+
+## Adenda (2026-09-16) — decisiones D1–D5 aprobadas
+Tras el **gate native-first** (`../architecture/companysignature-native-first-gate.md`, §12–§15),
+se aprueban estas definiciones que rigen la implementación (detalle completo en el gate):
+
+- **D1 (PDF nativo, inmutable):** cada versión = `document_version → canonical_snapshot →
+  content_sha256 → PDF Document`, sin sobrescribir PDFs previos. Se guardan **dos hashes**:
+  `content_sha256` (representación canónica aprobada) y `pdf_sha256` (integridad del artefacto). El
+  PDF es **derivado**: si falla su alta como `Document` tras registrar la evidencia, la aprobación
+  **no desaparece ni se repite** (artefacto `pending/error`, **regeneración idempotente**).
+- **D2 (invalidación explícita):** se **extiende `companyworkflow`** con una operación genérica
+  `invalidateApprovals(instanceId, reason, context, expectedVersion)` — domain-agnostic, fail-closed,
+  con control de concurrencia, idempotente; invalida según la política del workflow, reabre el
+  checkpoint configurado, audita append-only y **emite `companyworkflow:approval_invalidated`**.
+  `companysignature` **consume** el evento y registra una **nueva evidencia** (jamás borra/edita
+  evidencia histórica). **Sin referencias a Compras** en la extensión.
+- **D3 (QR):** adapter propio `VerificationQrRenderer` (reusa la lib QR de GLPI, apunta al endpoint
+  de verificación de Firma); **sin dependencia funcional de `companyqr`**.
+- **D4 (contenido sustantivo):** contrato **domain-agnostic** de snapshot canónico
+  `{schema, subject_type, subject_id, entity_id, document_version, payload}`; el dominio provee
+  `payload`; Firma **canonicaliza determinísticamente** (UTF-8, orden de claves determinista, arrays
+  con orden semántico, fechas explícitas, decimales/monetarios exactos —no floats—, `schema/version`
+  hasheados) y calcula SHA-256, **conservando el snapshot canónico exacto**. Los campos sustantivos
+  concretos los define `companypurchasing` (Fase 2D).
+- **D5 (domain-agnostic estricto):** prohibido en `companysignature` todo lo de compras (estados,
+  suppliers, cotizaciones, ítems, presupuestos, montos, referencias a `companypurchasing`).
+
+**Evidencia v1** append-only con `verification_token` **opaco/aleatorio/no secuencial/no derivado
+del hash**; una invalidación **produce otro registro** (sin `UPDATE` destructivo). **Idempotencia**
+por UNIQUE key = identidad estable del evento de workflow + versión documental + tipo de evidencia.
+**Verificación v1** sólo **interna autenticada** (login+ACL+multi-entidad, token no enumerable).
+**Firma digital certificada**: sólo `CertifiedSignerInterface`+`NullSigner` (una imagen de firma
+**nunca** es firma digital certificada).
