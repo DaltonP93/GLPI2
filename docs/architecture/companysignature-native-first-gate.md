@@ -191,28 +191,116 @@ Superficies **reales** disponibles hoy en `main`:
 
 ## 12. Decisiones abiertas para tu aprobación (antes de codificar)
 
-| # | Decisión | Recomendación |
-|---|---|---|
-| **D1** | ¿El PDF aprobado se almacena como **`Document` nativo** (+`Document_Item`) o como archivo del plugin? | **Document nativo** (reusa ACL/entidad/almacenamiento; más native-first). |
-| **D2** | Contrato de **invalidación** con `companyworkflow`: ¿(a) reutilizar `transition()` con una transición de devolución ya definida, o (b) agregar `WorkflowApi::reopenApprovals()`? | Cerrar esto **primero**; probable **(b)** para una semántica "reabrir por cambio de contenido" independiente del actor. |
-| **D3** | **QR**: ¿extraer un helper QR compartido (nueva lib común) o replicar el patrón mínimo en `companysignature`? | Replicar el patrón mínimo (evitar acoplar clases entre plugins); helper compartido = follow-up si se repite. |
-| **D4** | **Lista exacta de campos sustantivos** que disparan invalidación. | Sign-off del dominio; congelar como spec versionada de canonicalización. |
-| **D5** | En v1 **no existe `companypurchasing`** (Fase 2D, pendiente). ¿`companysignature` se valida contra un **itemtype neutro** en su selftest (como hizo `companyworkflow`) y `companypurchasing` será su primer integrador real después? | **Sí**: `companysignature` **domain-agnostic** en v1, validado con itemtype de prueba; integración real con compras = Fase 2D. |
+**APROBADAS (2026-09-16).** Definiciones finales que rigen la implementación:
+
+### D1 — PDF como `Document` nativo (inmutable, hashes separados) — APROBADO
+- Cada versión documental es **inmutable**:
+  `document_version → canonical_snapshot → content_sha256 → PDF Document`. **No** se sobrescriben
+  PDFs anteriores.
+- Se guardan **dos hashes separados**:
+  - `content_sha256`: hash de la **representación canónica aprobada** (la prueba).
+  - `pdf_sha256`: integridad del **artefacto PDF** generado (derivado).
+- El PDF es un **artefacto derivado**. Si su generación/alta como `Document` **falla después** de
+  registrar la evidencia, la aprobación **no desaparece ni se repite**: el artefacto se marca
+  `pending/error` y se permite **regeneración idempotente** (mismo `document_version` ⇒ mismo PDF
+  lógico; no duplica evidencia).
+
+### D2 — Extender `companyworkflow` con `invalidateApprovals()` — APROBADO
+- **No** reutilizar `WorkflowApi::transition()` simulando una devolución.
+- Agregar a `companyworkflow` una operación **genérica y explícita**:
+  `invalidateApprovals(instanceId, reason, context, expectedVersion)` que debe ser:
+  **domain-agnostic · fail-closed · con control de concurrencia (`expectedVersion`/`lock_version`) ·
+  idempotente**; invalida las aprobaciones según la **política del workflow**; **reabre** la
+  etapa/checkpoint configurado; genera **auditoría append-only**; **emite**
+  `companyworkflow:approval_invalidated`.
+- `companysignature` **consume** ese evento y registra una **nueva evidencia de invalidación**.
+  **Nunca** borra ni modifica silenciosamente una evidencia histórica aprobada.
+- La extensión de `companyworkflow` se mantiene **pequeña, genérica y con Unit + Integration + E2E
+  propios**. **Ninguna referencia a Compras.**
+
+### D3 — QR: adapter propio `VerificationQrRenderer` — APROBADO
+- `companysignature` **no depende funcionalmente de `companyqr`**.
+- Adapter propio mínimo `VerificationQrRenderer` que reutiliza la **librería QR ya disponible en
+  GLPI**; el QR apunta al **endpoint propio de verificación** de Firma.
+- **No** extraer todavía una librería compartida entre plugins (sólo si aparece un 3.º consumidor real).
+
+### D4 — Contenido sustantivo: contrato domain-agnostic (snapshot canónico) — APROBADO
+- `companysignature` **no decide** campos de negocio. Recibe un **snapshot canónico** con contrato:
+  ```
+  { schema, subject_type, subject_id, entity_id, document_version, payload }
+  ```
+  El **dominio suministra `payload`**. Firma **canonicaliza determinísticamente** y calcula SHA-256.
+- **Requisitos de canonicalización** (deterministas y demostrables):
+  - UTF-8; **orden determinista de claves**; arrays **preservan orden semántico**;
+  - **fechas** en representación **explícita**; valores **monetarios/decimales** como **representación
+    exacta** (string/decimal), **nunca floats binarios**;
+  - `null`, boolean y strings **normalizados**;
+  - **`schema`/`version` incluidos** en lo que se hashea.
+- Se **conserva el snapshot canónico exacto** (para demostrar después qué contenido produjo el hash).
+- Los **campos sustantivos exactos** los definirá `companypurchasing` (Fase 2D); **no** se introducen
+  ahora en `companysignature`.
+
+### D5 — Domain-agnostic (estricto) — CONFIRMADO
+Prohibido dentro de `companysignature`: estados de compras · suppliers · cotizaciones · ítems de
+compra · presupuestos · montos específicos · referencias hardcodeadas a `companypurchasing`.
 
 ---
 
-## 13. Qué NO se hace en este PR
+## 13. Evidencia v1 (append-only) — campos mínimos
 
-- **No** se implementa lógica de `companysignature` (ni tablas, ni servicios, ni controladores).
-- **No** se implementa `companypurchasing` (Fase 2D).
-- **No** se implementa proveedor de firma digital certificada (sólo el puerto, cuando se codifique v1).
-- Este PR entrega **sólo** este gate + la corrección del estado de fases en `README.md`.
+```
+evidence_id · verification_token · workflow_instance_id · workflow_history/event_id ·
+subject_type · subject_id · entity_id · document_version_id · content_sha256 ·
+actor_user_id · actor_role/context · decision · timestamp UTC · timezone(presentación) ·
+comentario · event_type
+```
+- `verification_token`: **opaco, aleatorio, no secuencial y NO derivado del hash**.
+- **Append-only**: una invalidación **produce otro registro** (no `UPDATE` destructivo):
+  ```
+  APPROVAL → INVALIDATION (references evidence_id) → nueva versión → nueva APPROVAL
+  ```
+
+### Idempotencia del listener (workflow → evidencia)
+El listener de `companyworkflow:transitioned` y `:approval_invalidated` tolera **retry · evento
+duplicado · restart · doble entrega**. Se añade una **UNIQUE/idempotency key** = identidad estable
+del evento de workflow **+** versión documental **+** tipo de evidencia. Un **replay nunca** produce
+dos evidencias para la misma decisión.
+
+### Verificación v1 (sólo interna autenticada)
+`GET /plugins/companysignature/verify/{opaque_token}` con: **login · ACL · multi-entidad · no
+revelar datos de otra entidad · token no enumerable · auditoría de verificación**. **No** hay
+verificador anónimo/público en v1.
+
+### Firma digital certificada
+Sólo `CertifiedSignerInterface` + `NullSigner` (vacío). **Sin proveedor.** Una **imagen/dibujo de
+firma NUNCA** se clasifica como firma digital certificada.
 
 ---
 
-## 14. Siguiente paso
+## 14. Tests obligatorios (además del gate)
 
-Aprobación humana de este gate (y de D1–D5). Recién entonces se implementa `companysignature` v1
-siguiendo la **Definition of Done** (código · migración reversible · ACL · i18n ES/EN · auditoría
-append-only · métricas/logs · tests Unit/Integration/E2E · documentación · changelog · **core
-intacto**), en su rama, con PR Draft y CI verde para tu revisión.
+Unit/Integration/E2E deben cubrir, como mínimo:
+- misma representación lógica → **mismo hash**; cambio sustantivo → **hash diferente**;
+- **orden de claves** no cambia el hash; **schema/version** **sí** participa del hash;
+- **evento duplicado → una sola evidencia** (idempotencia);
+- **PDF falla tras aprobación → evidencia permanece** y el PDF **puede reintentarse**;
+- **invalidación conserva** la evidencia anterior; **invalidación repetida es idempotente**;
+- **entidad A no verifica** evidencia de entidad B;
+- **token inválido/inexistente no filtra** información;
+- **versión nueva no modifica** snapshot/versión anterior;
+- `CertifiedSignerInterface` **no se confunde** con evidencia interna.
+
+---
+
+## 15. Proceso (aprobado)
+
+1. **Este PR (#9, docs-only):** registra el gate + estas decisiones D1–D5 en el propio gate y en la
+   **adenda de ADR-0014**; corrige el estado de fases en `README`. **No** mezcla implementación.
+2. Revalidar CI verde → **Ready for review → Squash & Merge** de PR #9.
+3. Desde el nuevo `main`: rama **`claude/companysignature-impl`**. Implementar allí
+   (`companysignature` v1 + la extensión genérica `invalidateApprovals()` de `companyworkflow`),
+   con **Unit + Integration + E2E**, siguiendo la **Definition of Done** (código · migración
+   reversible · ACL · i18n ES/EN · auditoría append-only · métricas/logs · tests · documentación ·
+   changelog · **core intacto**).
+4. **PR Draft independiente** para el código. **Sin auto-merge.** **Sin `companypurchasing`.**
+   Detenerse con **CI verde** para revisión humana.
