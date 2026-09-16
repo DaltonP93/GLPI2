@@ -314,8 +314,9 @@ final class SelftestCommand extends Command
         $this->check('[VERIFY] 🔒 sin RIGHT_VERIFY → denied', $resD['status'] === VerificationService::STATUS_DENIED);
 
         // (d) INVALIDACIÓN vía companyworkflow (append-only) + idempotente + verify refleja invalidated.
-        $sigApi->recordDocumentVersion($this->snap($c, 2, 'Y'), true); // cambio sustantivo (v2)
+        // Restaurar permisos plenos ANTES de registrar la v2 (la prueba anterior dejó sólo READ).
         $this->applySession($this->user, [$this->entityA], ['plugin_companyworkflow' => READ, 'plugin_companysignature' => ALLSTANDARDRIGHT]);
+        $sigApi->recordDocumentVersion($this->snap($c, 2, 'Y'), true); // cambio sustantivo (v2)
         $wfRes = $wfApi->invalidateApprovals($instanceId, 'contenido cambió', ['idempotency_key' => 'sig-inv-' . $this->suffix, 'subject_type' => 'Computer', 'subject_id' => $c]);
         $this->check('[INVALIDATE] companyworkflow reabrió (OK)', $wfRes->success);
         // El hook debió registrar la invalidación; reforzamos idempotencia con una llamada directa.
