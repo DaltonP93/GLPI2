@@ -42,10 +42,15 @@ Los plugins de GLPI se distribuyen bajo **GPL-3.0-or-later** (compatible con GLP
 Ver el encabezado de licencia declarado en cada `plugins/*/setup.php`.
 
 ---
-Estado del proyecto: **Fase 1 — `companyqr` implementado y validado**
-(QR por activo, ficha segura por ACL, reporte→ticket, etiqueta 70,75×24 mm; sin tocar
-el core). **Siguiente fase:** compras / workflows / firma.
+Estado del proyecto: **Fase 2 en curso** — motor de workflow e integración de activos
+implementados; firma electrónica interna es lo siguiente.
 
-- Fase 0 — Fundaciones: ✅
-- Fase 1 — QR / Activos (`companyqr`): ✅
-- Fase 2 — Compras + Workflow + Firma: siguiente.
+```
+Fase 0  — Fundaciones .................... ✅
+Fase 1  — companyqr ..................... ✅
+Fase 2  — Arquitectura .................. ✅
+Fase 2A — companyworkflow ............... ✅
+Fase 2B — SI-1 / Snipe integration ...... ✅
+Fase 2C — companysignature .............. ⏭️ siguiente
+Fase 2D — companypurchasing ............. pendiente
+```
