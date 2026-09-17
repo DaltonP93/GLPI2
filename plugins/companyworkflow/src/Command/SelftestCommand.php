@@ -568,6 +568,10 @@ final class SelftestCommand extends Command
 
         // (b) Recovery-safe DUPLICATE: voto aprobado ya persistido + quórum + estado sin avanzar
         //     → un reintento AVANZA (no devuelve DUPLICATE ni queda bloqueado).
+        // El `submit` es acción de REQUESTER (exige READ, no RIGHT_ACT): hay que fijar la sesión del
+        // requester ANTES de crear/enviar. Sin esto correría con la sesión de aprobador heredada
+        // (uA3, RIGHT_ACT=2 sin el bit READ=1) → submit DENIED_ACL y la instancia quedaría en DRAFT.
+        $this->applySession($this->requester, [$this->entityB], ['plugin_companyworkflow' => READ]);
         $inst2 = $normal->startInstance($this->def, 'Computer', $this->makeComputer(), $this->entityB, 0);
         $normal->transition($inst2, 'submit', []);
         $this->applySession($this->uA1, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
