@@ -68,20 +68,29 @@ final class VerificationService
             return ['status' => self::STATUS_NOT_FOUND, 'evidence' => null];
         }
 
-        // Integridad: recomputar el hash del snapshot canónico exacto almacenado en la versión.
+        // Integridad FAIL-CLOSED (§2): SIN versión/snapshot/hash válido, el estado NUNCA puede ser
+        // `valid`. Se recomputa el hash del snapshot canónico exacto y debe coincidir con el
+        // almacenado en la versión Y con el fijado en la evidencia.
         $status = self::STATUS_VALID;
         $version = new DocumentVersion();
-        $verId = (int) ($evidence->fields['document_versions_id'] ?? 0);
-        if ($verId > 0 && $version->getFromDB($verId)) {
-            $recomputed = $this->hasher->sha256((string) ($version->fields['canonical_snapshot'] ?? ''));
-            $stored     = (string) ($version->fields['content_sha256'] ?? '');
-            $evStored   = (string) ($evidence->fields['content_sha256'] ?? '');
-            if (!hash_equals($stored, $recomputed) || ($evStored !== '' && !hash_equals($evStored, $recomputed))) {
-                $status = self::STATUS_TAMPERED;
+        $verId   = (int) ($evidence->fields['document_versions_id'] ?? 0);
+        $evStored = (string) ($evidence->fields['content_sha256'] ?? '');
+        if ($verId <= 0 || !$version->getFromDB($verId)) {
+            $status = self::STATUS_TAMPERED; // falta la versión referida
+        } else {
+            $canonical = (string) ($version->fields['canonical_snapshot'] ?? '');
+            $stored    = (string) ($version->fields['content_sha256'] ?? '');
+            if ($canonical === '' || !$this->isValidHash($stored) || !$this->isValidHash($evStored)) {
+                $status = self::STATUS_TAMPERED; // snapshot/hash ausente o malformado
+            } else {
+                $recomputed = $this->hasher->sha256($canonical);
+                if (!hash_equals($stored, $recomputed) || !hash_equals($evStored, $recomputed)) {
+                    $status = self::STATUS_TAMPERED; // el contenido no reproduce el hash
+                }
             }
         }
 
-        // Refleja invalidación posterior (reapertura por cambio sustantivo).
+        // Refleja invalidación EXACTA (§5): sólo si ESTA evidencia fue referenciada por una invalidación.
         if ($status === self::STATUS_VALID && $this->isSuperseded($evidence)) {
             $status = self::STATUS_INVALIDATED;
         }
@@ -94,7 +103,11 @@ final class VerificationService
         ];
     }
 
-    /** ¿Existe una invalidación posterior para el mismo sujeto que supersede a esta evidencia? */
+    /**
+     * ¿Esta evidencia fue invalidada? EXACTO (§5): existe una evidencia de invalidación cuyo
+     * `references_evidences_id` apunta precisamente a ESTA evidencia. Una invalidación del workflow A
+     * NO supersede una aprobación del workflow B, aunque compartan sujeto.
+     */
     private function isSuperseded(ApprovalEvidence $evidence): bool
     {
         if ((string) $evidence->fields['event_type'] === ApprovalEvidence::EVENT_INVALIDATION) {
@@ -105,16 +118,16 @@ final class VerificationService
         foreach ($DB->request([
             'COUNT' => 'c',
             'FROM'  => ApprovalEvidence::getTable(),
-            'WHERE' => [
-                'subject_itemtype' => (string) $evidence->fields['subject_itemtype'],
-                'subject_items_id' => (int) $evidence->fields['subject_items_id'],
-                'event_type'       => ApprovalEvidence::EVENT_INVALIDATION,
-                ['id' => ['>', (int) $evidence->getID()]],
-            ],
+            'WHERE' => ['event_type' => ApprovalEvidence::EVENT_INVALIDATION, 'references_evidences_id' => (int) $evidence->getID()],
         ]) as $row) {
             return ((int) $row['c']) > 0;
         }
         return false;
+    }
+
+    private function isValidHash(string $hash): bool
+    {
+        return preg_match('/^[0-9a-f]{64}$/', $hash) === 1;
     }
 
     /**

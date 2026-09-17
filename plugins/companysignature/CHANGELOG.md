@@ -3,6 +3,39 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.3.0] — Fase 2C (hardening probatorio)
+### Added
+- **Entrega DURABLE + reconciliador (§1):** `Service/Materializer` es la única vía de creación de
+  evidencia desde el ledger de `companyworkflow`; `Command/ReconcileCommand`
+  (`plugins:companysignature:reconcile`) materializa lo pendiente de forma **idempotente** y
+  recupera `commit → caída → restart → reconcile → evidencia creada una sola vez`. Sin dependencia
+  DB-a-DB externa (lee el ledger por la API de workflow) ni cambios de core.
+- **Evidencia por aprobador (§4):** escucha `companyworkflow:decision_recorded` y crea una evidencia
+  por CADA decisión individual; la **transición** de estado se registra como evidencia **separada**
+  (`event_type=transition`). Un quórum 3/3 produce 3 evidencias `APPROVED` + 1 transición.
+### Changed
+- **Identidad real de eventos (§3):** la `idempotency_key` se basa en `workflow_history_id` +
+  `document_version` + `evidence_type` (columna nueva `evidences.workflow_history_id` + índice).
+  Un replay del mismo evento → misma evidencia; dos eventos históricos distintos (aunque compartan
+  `from/to/action`) → evidencias distintas.
+- **Prohibida la evidencia sin snapshot (§2):** el listener/reconciliador **nunca** crea evidencia
+  válida sin versión documental vigente con `content_sha256` válido; si aún no hay snapshot, el
+  evento queda **pendiente**. `VerificationService` es **fail-closed**: sin versión/snapshot/hash el
+  estado nunca es `valid` (→ `tampered`). La versión se ata a la **vigente en el instante** del evento.
+- **Invalidación EXACTA (§5):** se invalidan sólo las aprobaciones VIGENTES de la **instancia** dada,
+  y cada evidencia `INVALIDATION` referencia explícitamente (`references_evidences_id`) la aprobación
+  afectada. `VerificationService::isSuperseded()` usa esa referencia exacta: invalidar el workflow A
+  no toca la evidencia del workflow B aunque compartan sujeto; `v1` invalidada / `v2` válida.
+- **PDF crash-safe (§7):** `ApprovedPdfComposer` busca/relinкea el `Document` por un **marcador
+  técnico estable** antes de crear; una caída entre crear el `Document` y `markPdfReady` no duplica
+  al reintentar (no depende sólo de `documents_id`). El `Document_Item` se reconecta idempotente.
+- **`invalidateApprovals()`** ahora se invoca con `RIGHT_ACT` (endurecido en `companyworkflow` 0.4.0).
+### Tests
+- Integración/E2E ampliados: por-aprobador y quórum 3/3; reconciliación tras listener perdido
+  (idempotente); fail-closed sin snapshot; verificación fail-closed; invalidación exacta
+  (dos instancias mismo sujeto; v1→v2); PDF crash-recovery. Unit: clave por `workflow_history_id`
+  (replay vs. dos eventos distintos).
+
 ## [0.2.0] — Fase 2C
 ### Added
 - **Evidencia de aprobación electrónica interna (ADR-0014 + gate D1–D5):** identidad autenticada +

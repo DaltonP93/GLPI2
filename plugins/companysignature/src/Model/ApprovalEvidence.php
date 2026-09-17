@@ -38,10 +38,12 @@ class ApprovalEvidence extends CommonDBTM
     public const DECISION_REJECTED    = 'rejected';
     public const DECISION_RETURNED    = 'returned';
     public const DECISION_INVALIDATED = 'invalidated';
+    public const DECISION_TRANSITION  = 'transition';
 
     /** Tipo de evento de evidencia. */
-    public const EVENT_DECISION     = 'decision';
-    public const EVENT_INVALIDATION = 'invalidation';
+    public const EVENT_DECISION     = 'decision';     // decisión de un actor (approve/reject/return)
+    public const EVENT_TRANSITION   = 'transition';   // avance de estado del workflow (separado)
+    public const EVENT_INVALIDATION = 'invalidation'; // invalidación (append-only, referencia exacta)
 
     public static function getTable($classname = null)
     {

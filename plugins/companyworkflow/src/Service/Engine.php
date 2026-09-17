@@ -39,6 +39,14 @@ class Engine
     private AuditBridge $audit;
     private NotificationBridge $notifications;
 
+    /**
+     * Eventos de dominio a emitir DESPUÉS del commit (best-effort). Se acumulan durante la
+     * transacción y se disparan tras confirmar, de modo que la fila de historial (ledger) queda
+     * comprometida atómicamente y un consumidor caído se recupera por reconciliación.
+     * @var array<int,array{name:string, payload:array<string,mixed>}>
+     */
+    private array $pendingEmits = [];
+
     public function __construct()
     {
         $this->conditions    = new ConditionEvaluator();
@@ -153,8 +161,10 @@ class Engine
         if (!Session::haveAccessToEntity($ent, (bool) $rec)) {
             return TransitionResult::fail(TransitionResult::DENIED_ENTITY, 'Sin acceso a la entidad de la instancia.');
         }
-        if (!Session::haveRight(WorkflowDef::$rightname, READ)) {
-            return TransitionResult::fail(TransitionResult::DENIED_ACL, 'Sin derecho sobre el workflow.');
+        // Invalidar aprobaciones es una acción de decisión (reabre etapas): exige RIGHT_ACT,
+        // no basta READ. Fail-closed.
+        if (!Session::haveRight(WorkflowDef::$rightname, WorkflowDef::RIGHT_ACT)) {
+            return TransitionResult::fail(TransitionResult::DENIED_ACL, 'Sin derecho (RIGHT_ACT) para invalidar aprobaciones.');
         }
 
         $idemKey = trim((string) ($context['idempotency_key'] ?? ''));
@@ -227,7 +237,7 @@ class Engine
                     $meta[$k] = is_int($context[$k]) ? (int) $context[$k] : (string) $context[$k];
                 }
             }
-            $this->audit->record($instanceId, HistoryEvent::EVENT_APPROVAL_INVALIDATED, $fromCode, $toCode, $reason, true, $meta);
+            $invHid = $this->audit->record($instanceId, HistoryEvent::EVENT_APPROVAL_INVALIDATED, $fromCode, $toCode, $reason, true, $meta);
 
             $DB->commit();
         } catch (\Throwable $e) {
@@ -236,14 +246,17 @@ class Engine
         }
 
         // Post-commit best-effort: evento de dominio (companysignature/webhooks reaccionan).
+        // Lleva el id de historial DURABLE de esta invalidación (identidad estable para reconciliar).
         $this->emitHook('companyworkflow:approval_invalidated', [
-            'instances_id'    => $instanceId,
-            'reason'          => $reason,
-            'from'            => $fromCode,
-            'to'              => $toCode,
-            'idempotency_key' => $idemKey,
-            'actor'           => (int) (Session::getLoginUserID() ?: 0),
-            'context'         => $context,
+            'instances_id'        => $instanceId,
+            'workflow_history_id' => (int) $invHid,
+            'reason'              => $reason,
+            'from'                => $fromCode,
+            'to'                  => $toCode,
+            'idempotency_key'     => $idemKey,
+            'document_version'    => isset($context['document_version']) ? (int) $context['document_version'] : 0,
+            'actor'               => (int) (Session::getLoginUserID() ?: 0),
+            'context'             => $context,
         ]);
 
         return TransitionResult::ok(TransitionResult::OK, 'Aprobaciones invalidadas; etapa reabierta.', [
@@ -269,6 +282,7 @@ class Engine
         global $DB;
         $instanceId = (int) $instance->getID();
 
+        $this->pendingEmits = [];
         $DB->beginTransaction();
         try {
             // Serialización por instancia (evita carreras de conteo/doble avance).
@@ -312,18 +326,22 @@ class Engine
             return TransitionResult::fail(TransitionResult::ERROR, 'Error en la transición: ' . $e->getMessage());
         }
 
-        // Post-commit best-effort (una notificación no revierte lo confirmado).
+        // Post-commit best-effort (nada de esto revierte lo confirmado).
+        // 1) Eventos de decisión DURABLES (uno por aprobador) — evidencia externa idempotente.
+        $this->flushEmits();
+        // 2) Evento de transición (+ destinatarios). Lleva el id de historial de la transición.
         $instance->getFromDB($instanceId);
         if ($result->success && ($result->data['advanced'] ?? false)) {
             $recipients = $this->nextRecipients($instance, (int) $result->data['to_state_id'], $ctx);
             $result->data['recipients'] = $recipients;
             $this->notifications->notifyTransition([
-                'instances_id' => $instanceId,
-                'from'         => $result->data['from'] ?? '',
-                'to'           => $result->data['to'] ?? '',
-                'action'       => $action,
-                'actor'        => $actor,
-                'recipients'   => $recipients,
+                'instances_id'        => $instanceId,
+                'from'                => $result->data['from'] ?? '',
+                'to'                  => $result->data['to'] ?? '',
+                'action'              => $action,
+                'actor'               => $actor,
+                'recipients'          => $recipients,
+                'workflow_history_id' => (int) ($result->data['transition_history_id'] ?? 0),
             ]);
         }
         return $result;
@@ -345,9 +363,22 @@ class Engine
             return TransitionResult::fail(TransitionResult::ERROR, 'No se pudo registrar el voto.');
         }
         if ($ballotState === 'new') {
-            $this->audit->record($instanceId, HistoryEvent::EVENT_BALLOT_RECORDED,
-                $this->stateCode($fromStateId), $this->stateCode($fromStateId), $comment, false,
-                ['decision' => Assignment::DECISION_APPROVED]);
+            // Decisión DURABLE por aprobador (ledger). Cada voto individual queda registrado con su
+            // propio id de historial → evidencia por aprobador (no sólo del que alcanza el quórum).
+            $code = $this->stateCode($fromStateId);
+            $hid = $this->audit->record($instanceId, HistoryEvent::EVENT_DECISION_RECORDED,
+                $code, $code, $comment, false,
+                ['decision' => Assignment::DECISION_APPROVED, 'actor' => $actor, 'statedefs_id' => $fromStateId, 'steps_id' => (int) ($step['id'] ?? 0)]);
+            $this->queueEmit('companyworkflow:decision_recorded', [
+                'instances_id'        => $instanceId,
+                'workflow_history_id' => (int) $hid,
+                'decision'            => Assignment::DECISION_APPROVED,
+                'actor'               => $actor,
+                'statedefs_id'        => $fromStateId,
+                'state'               => $code,
+                'steps_id'            => (int) ($step['id'] ?? 0),
+                'comment'             => $comment,
+            ]);
         }
 
         // Conteo bajo lock → ve todos los votos confirmados.
@@ -379,7 +410,8 @@ class Engine
         // Punto de inyección de fallo para tests de recuperación (no-op en producción).
         $this->afterQuorumBeforeAdvance();
 
-        return $this->applyStateChange($fresh, $t, $fromStateId, $actor, 'approve', $comment);
+        // Quórum: las decisiones ya se registraron por aprobador (arriba); aquí sólo la transición.
+        return $this->applyStateChange($fresh, $t, $fromStateId, $actor, 'approve', $comment, null);
     }
 
     /**
@@ -387,15 +419,24 @@ class Engine
      */
     private function applySingleActor(array $fresh, array $t, int $fromStateId, int $actor, string $action, string $comment, array $ctx): TransitionResult
     {
-        return $this->applyStateChange($fresh, $t, $fromStateId, $actor, $action, $comment);
+        // Sin quórum: la acción del actor ES la decisión → registrarla como decisión durable.
+        $decision = match ($action) {
+            'approve' => Assignment::DECISION_APPROVED,
+            'reject'  => 'rejected',
+            'return'  => 'returned',
+            default   => null, // cancel u otras: transición sin decisión de evidencia
+        };
+        return $this->applyStateChange($fresh, $t, $fromStateId, $actor, $action, $comment, $decision);
     }
 
     /**
      * Cambio de estado condicionado por lock_version + auditoría, dentro de la transacción.
      * Como se sostiene el FOR UPDATE y se verificó el estado, el UPDATE siempre aplica.
+     * `$actorDecision` (approved/rejected/returned|null): si no es null, registra ADEMÁS una decisión
+     * durable del actor único (caso sin quórum); en quórum es null (las decisiones fueron los votos).
      * @param array<string,mixed> $fresh @param array<string,mixed> $t
      */
-    private function applyStateChange(array $fresh, array $t, int $fromStateId, int $actor, string $action, string $comment): TransitionResult
+    private function applyStateChange(array $fresh, array $t, int $fromStateId, int $actor, string $action, string $comment, ?string $actorDecision = null): TransitionResult
     {
         /** @var \DBmysql $DB */
         global $DB;
@@ -435,8 +476,9 @@ class Engine
             return TransitionResult::fail(TransitionResult::CONFLICT_VERSION, 'Cambio de estado en conflicto (concurrencia/replay).');
         }
 
-        // Auditoría append-only.
-        $this->audit->record($instanceId, HistoryEvent::EVENT_TRANSITIONED, $fromCode, $toCode, $comment, false, ['action' => $action]);
+        // Auditoría append-only. El id de la fila TRANSITIONED es la identidad durable de la
+        // transición (ledger para la evidencia de "transición" en companysignature).
+        $transHid = $this->audit->record($instanceId, HistoryEvent::EVENT_TRANSITIONED, $fromCode, $toCode, $comment, false, ['action' => $action]);
         if ($action === 'reject') {
             $this->audit->record($instanceId, HistoryEvent::EVENT_REJECTED, $fromCode, $toCode, $comment, false);
         } elseif ($action === 'return') {
@@ -448,13 +490,30 @@ class Engine
             $this->audit->record($instanceId, HistoryEvent::EVENT_CANCELLED, $fromCode, $toCode, $comment, false);
         }
 
+        // Decisión durable del actor único (sin quórum) → una fila DECISION_RECORDED + evento.
+        if ($actorDecision !== null) {
+            $decHid = $this->audit->record($instanceId, HistoryEvent::EVENT_DECISION_RECORDED, $fromCode, $toCode, $comment, false,
+                ['decision' => $actorDecision, 'actor' => $actor, 'statedefs_id' => $fromStateId]);
+            $this->queueEmit('companyworkflow:decision_recorded', [
+                'instances_id'        => $instanceId,
+                'workflow_history_id' => (int) $decHid,
+                'decision'            => $actorDecision,
+                'actor'               => $actor,
+                'statedefs_id'        => $fromStateId,
+                'state'               => $fromCode,
+                'steps_id'            => 0,
+                'comment'             => $comment,
+            ]);
+        }
+
         return TransitionResult::ok(TransitionResult::OK, 'Transición aplicada.', [
-            'from'         => $fromCode,
-            'to'           => $toCode,
-            'to_state_id'  => $toStateId,
-            'status'       => $newStatus,
-            'lock_version' => $expectedLock + 1,
-            'advanced'     => true,
+            'from'                  => $fromCode,
+            'to'                    => $toCode,
+            'to_state_id'           => $toStateId,
+            'status'                => $newStatus,
+            'lock_version'          => $expectedLock + 1,
+            'advanced'              => true,
+            'transition_history_id' => (int) $transHid,
         ]);
     }
 
@@ -674,6 +733,25 @@ class Engine
             }
         }
         return false;
+    }
+
+    /**
+     * Acumula un evento de dominio para emitirlo TRAS el commit (no dentro de la transacción).
+     * @param array<string,mixed> $payload
+     */
+    private function queueEmit(string $name, array $payload): void
+    {
+        $this->pendingEmits[] = ['name' => $name, 'payload' => $payload];
+    }
+
+    /** Dispara (best-effort) los eventos acumulados y vacía la cola. */
+    private function flushEmits(): void
+    {
+        $emits = $this->pendingEmits;
+        $this->pendingEmits = [];
+        foreach ($emits as $e) {
+            $this->emitHook($e['name'], $e['payload']);
+        }
     }
 
     /**

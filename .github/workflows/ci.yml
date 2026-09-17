@@ -166,6 +166,12 @@ jobs:
               echo "== ${p}: sin selftest en esta rama (omitido) =="
             fi
           done
+          # Reconciliador durable de companysignature: debe correr limpio e IDEMPOTENTE (no-op)
+          # tras los selftests (recupera evidencia si un listener se pierde). Guardado por existencia.
+          if docker compose exec -T -u www-data glpi php bin/console list 2>/dev/null | grep -q "plugins:companysignature:reconcile"; then
+            echo "== reconcile companysignature (idempotente) =="
+            docker compose exec -T -u www-data glpi php bin/console plugins:companysignature:reconcile
+          fi
 
       - name: Autotest de integración companyqr (ACL multi-entidad, no-fuga, ciclo, etiqueta) — FAIL-CLOSED
         working-directory: infra/docker

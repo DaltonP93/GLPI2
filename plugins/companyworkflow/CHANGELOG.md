@@ -3,6 +3,33 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.4.0]
+### Added
+- **Ledger durable + identidad real de eventos (hardening §1/§3/§4):**
+  - `HistoryEvent::EVENT_DECISION_RECORDED`: una fila DURABLE por **decisión individual** de actor
+    (en quórum, una por aprobador), que actúa de **ledger** para materializar evidencia externa
+    idempotente y recuperable.
+  - Los eventos de dominio ahora llevan `workflow_history_id` (id de la fila de historial, devuelto
+    por `AuditBridge::record()`): `companyworkflow:decision_recorded`, `:transitioned` (id de la
+    transición) y `:approval_invalidated` (id de la invalidación). Identidad **estable** para
+    idempotencia y reconciliación (ya no `from->to:action`).
+  - Emisión **post-commit** acumulada (`queueEmit`/`flushEmits`): el historial se compromete
+    atómicamente con la transición y los eventos se disparan tras confirmar; un consumidor caído se
+    recupera por reconciliación.
+  - `WorkflowApi::history()` / `historyById()`: lectura del ledger como **API** (para reconciliadores
+    externos como `companysignature`, sin acoplar a la tabla).
+  - Evidencia **por aprobador**: cada voto de quórum emite su propia decisión durable; la transición
+    de estado se mantiene como evento **separado**.
+- **`NotificationBridge`**: el evento `:transitioned` se emite **siempre** (los consumidores de
+  evidencia dependen de él); `notifications_enabled` sólo gobierna el envío de notificaciones.
+
+### Changed
+- **`invalidateApprovals()` ACL endurecida (§6):** exige `WorkflowDef::RIGHT_ACT` (no basta `READ`),
+  además del acceso a entidad. Mantiene idempotencia, `lock_version`/`expectedVersion` y fail-closed.
+  El evento emitido incluye `workflow_history_id` y `document_version`.
+- **Tests:** el escenario `[INVALIDATE]` del selftest verifica ahora `RIGHT_ACT` (READ→`DENIED_ACL`;
+  `RIGHT_ACT`+entidad→permitido) y la presencia de `decision_recorded` en el ledger tras un voto.
+
 ## [0.3.0]
 ### Added
 - **Extensión genérica `invalidateApprovals()` (D2, para Fase 2C `companysignature`):**

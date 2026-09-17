@@ -164,4 +164,53 @@ final class WorkflowApi
     {
         return $this->builder;
     }
+
+    /**
+     * Lectura del LEDGER de historial (append-only) para RECONCILIACIÓN externa idempotente.
+     * Expone el historial como API (sin acoplar a la tabla) para consumidores como companysignature.
+     *
+     * @param array{events?:array<int,string>, since_id?:int, instances_id?:int, limit?:int} $filter
+     * @return array<int,array<string,mixed>>  filas ordenadas por id ascendente (orden causal)
+     */
+    public function history(array $filter = []): array
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $where = [];
+        if (!empty($filter['events'])) {
+            $where['event'] = array_values($filter['events']);
+        }
+        if (!empty($filter['instances_id'])) {
+            $where['instances_id'] = (int) $filter['instances_id'];
+        }
+        if (!empty($filter['since_id'])) {
+            $where[] = ['id' => ['>', (int) $filter['since_id']]];
+        }
+        $q = ['FROM' => HistoryEvent::getTable(), 'ORDER' => 'id ASC'];
+        if ($where !== []) {
+            $q['WHERE'] = $where;
+        }
+        if (!empty($filter['limit'])) {
+            $q['LIMIT'] = (int) $filter['limit'];
+        }
+        $out = [];
+        foreach ($DB->request($q) as $row) {
+            $out[] = $row;
+        }
+        return $out;
+    }
+
+    /** Una fila del ledger por id (o null). @return array<string,mixed>|null */
+    public function historyById(int $id): ?array
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        if ($id <= 0) {
+            return null;
+        }
+        foreach ($DB->request(['FROM' => HistoryEvent::getTable(), 'WHERE' => ['id' => $id], 'LIMIT' => 1]) as $row) {
+            return $row;
+        }
+        return null;
+    }
 }

@@ -14,7 +14,7 @@
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYSIGNATURE_VERSION', '0.2.0');
+define('PLUGIN_COMPANYSIGNATURE_VERSION', '0.3.0');
 
 // Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
 // max='12.0' => GLPI 11.x soportado; 12.x NO hasta pasar la suite de regresion.
@@ -39,7 +39,9 @@ function plugin_init_companysignature() {
     }
 
     // Escuchar los eventos de dominio de companyworkflow (hooks soportados; nunca editan core).
-    // La evidencia se registra de forma IDEMPOTENTE ante retry/duplicado/restart.
+    // La evidencia se registra de forma IDEMPOTENTE ante retry/duplicado/restart y, si el listener
+    // se pierde (proceso caído tras el COMMIT), se recupera con `plugins:companysignature:reconcile`.
+    $PLUGIN_HOOKS['companyworkflow:decision_recorded']['companysignature']    = 'plugin_companysignature_on_decision_recorded';
     $PLUGIN_HOOKS['companyworkflow:transitioned']['companysignature']         = 'plugin_companysignature_on_transitioned';
     $PLUGIN_HOOKS['companyworkflow:approval_invalidated']['companysignature'] = 'plugin_companysignature_on_approval_invalidated';
 }

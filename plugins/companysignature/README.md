@@ -24,9 +24,19 @@ Plugin propio de la **Plataforma GLPI Modular**.
 | `Service/CertifiedSignerInterface` + `NullSigner` | Puerto de firma certificada (**sin proveedor** en Fase 2). |
 | `Api/SignatureApi` | Fachada para el dominio (companypurchasing y futuros). Domain-agnostic (**D5**). |
 
+## Hardening probatorio (§1–§7)
+| Pieza | Rol |
+|------|-----|
+| `Service/Materializer` | Única vía de creación de evidencia desde el **ledger** de `companyworkflow`. Idempotente por `workflow_history_id`, **fail-closed** de snapshot, vincula a la versión vigente en el instante del evento, invalidación **exacta** por referencia. |
+| `Command/ReconcileCommand` | `plugins:companysignature:reconcile`: recupera evidencia perdida si un listener cae tras el COMMIT (`commit → caída → reconcile → una sola vez`). Idempotente. |
+| Evidencia por aprobador | Escucha `companyworkflow:decision_recorded` (una por voto de quórum); la **transición** es evidencia separada. |
+| Verificación fail-closed | Sin versión/snapshot/hash válido → nunca `valid`. Invalidación reflejada por referencia exacta (`references_evidences_id`). |
+| PDF crash-safe | Búsqueda/relink del `Document` por marcador técnico estable antes de crear (sin duplicar en reintento). |
+
 ## Tests
 - Unit puro: `php plugins/companysignature/tests/unit/run.php`
 - Integración + E2E (en GLPI): `php bin/console plugins:companysignature:selftest`
+- Reconciliación durable: `php bin/console plugins:companysignature:reconcile`
 
 ## Regla 0
 Este plugin **no modifica el core de GLPI**. Solo usa hooks/API oficiales.

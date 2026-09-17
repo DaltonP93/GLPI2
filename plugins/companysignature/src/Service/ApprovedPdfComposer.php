@@ -123,38 +123,51 @@ final class ApprovedPdfComposer
         return (string) $pdf->Output('approved.pdf', 'S');
     }
 
-    /** Persiste bytes como `Document` nativo enlazado al sujeto. Devuelve documents_id o 0. */
+    /**
+     * Persiste bytes como `Document` nativo enlazado al sujeto, CRASH-SAFE e IDEMPOTENTE (§7).
+     *
+     * Antes de crear busca un `Document` con el MARCADOR TÉCNICO estable de esta versión (nombre
+     * único por `document_versions_id`). Así, si un intento anterior creó el `Document` pero cayó
+     * ANTES de `markPdfReady` (y por tanto `documents_id` en nuestra tabla sigue 0), el reintento
+     * REUTILIZA/RELINKEA ese mismo `Document` en lugar de crear uno segundo. La reconexión del
+     * `Document_Item` también es idempotente y reintentable.
+     */
     private function storeAsDocument(DocumentVersion $version, string $bytes, string $pdfSha): int
     {
-        $dir = defined('GLPI_TMP_DIR') ? GLPI_TMP_DIR : sys_get_temp_dir();
-        $fname = 'csig_v' . (int) $version->fields['version'] . '_' . substr($pdfSha, 0, 10) . '.pdf';
-        $full = rtrim((string) $dir, '/') . '/' . $fname;
-        if (@file_put_contents($full, $bytes) === false) {
-            return 0;
-        }
-
-        $entityId = (int) $version->fields['entities_id'];
-        $rec      = (int) $version->fields['is_recursive'];
+        $entityId    = (int) $version->fields['entities_id'];
+        $rec         = (int) $version->fields['is_recursive'];
         $subjectType = (string) $version->fields['subject_itemtype'];
         $subjectId   = (int) $version->fields['subject_items_id'];
+        $marker      = $this->stableMarker($version);
 
-        $doc = new Document();
-        $docId = (int) $doc->add([
-            'name'                    => sprintf('Signature %s#%d v%d', $subjectType, $subjectId, (int) $version->fields['version']),
-            'entities_id'             => $entityId,
-            'is_recursive'            => $rec,
-            '_only_if_upload_succeed' => 1,
-            '_filename'               => [$fname],
-            '_prefix_filename'        => [''],
-        ]);
-        if (@file_exists($full)) {
-            @unlink($full); // GLPI ya movió el archivo si tuvo éxito; limpiar si quedó.
-        }
+        // Recuperación determinista: ¿ya existe el Document de esta versión (por marcador)?
+        $docId = $this->findDocumentByMarker($marker);
+
         if ($docId <= 0) {
-            return 0;
+            $dir = defined('GLPI_TMP_DIR') ? GLPI_TMP_DIR : sys_get_temp_dir();
+            $fname = 'csig_v' . (int) $version->fields['version'] . '_' . substr($pdfSha, 0, 10) . '.pdf';
+            $full = rtrim((string) $dir, '/') . '/' . $fname;
+            if (@file_put_contents($full, $bytes) === false) {
+                return 0;
+            }
+            $doc = new Document();
+            $docId = (int) $doc->add([
+                'name'                    => $marker, // marcador técnico estable (clave de recuperación)
+                'entities_id'             => $entityId,
+                'is_recursive'            => $rec,
+                '_only_if_upload_succeed' => 1,
+                '_filename'               => [$fname],
+                '_prefix_filename'        => [''],
+            ]);
+            if (@file_exists($full)) {
+                @unlink($full); // GLPI ya movió el archivo si tuvo éxito; limpiar si quedó.
+            }
+            if ($docId <= 0) {
+                return 0;
+            }
         }
 
-        // Enlazar al sujeto (idempotente: no duplicar el vínculo).
+        // Enlazar al sujeto (idempotente y reintentable: no duplica el vínculo).
         if (class_exists('Document_Item') && class_exists($subjectType)) {
             $link = new Document_Item();
             if (!$link->getFromDBByCrit([
@@ -172,6 +185,35 @@ final class ApprovedPdfComposer
             }
         }
         return $docId;
+    }
+
+    /** Marcador técnico estable por versión documental (único ⇒ recuperación determinista). */
+    private function stableMarker(DocumentVersion $version): string
+    {
+        return sprintf(
+            '[companysignature] %s#%d v%d (dv:%d)',
+            (string) $version->fields['subject_itemtype'],
+            (int) $version->fields['subject_items_id'],
+            (int) $version->fields['version'],
+            (int) $version->getID()
+        );
+    }
+
+    /** Busca un `Document` por su marcador técnico (nombre exacto). Devuelve id o 0. */
+    private function findDocumentByMarker(string $marker): int
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        foreach ($DB->request([
+            'SELECT' => 'id',
+            'FROM'   => Document::getTable(),
+            'WHERE'  => ['name' => $marker],
+            'ORDER'  => 'id ASC',
+            'LIMIT'  => 1,
+        ]) as $row) {
+            return (int) $row['id'];
+        }
+        return 0;
     }
 
     /** Token de la evidencia de APROBACIÓN de esta versión (para el QR), o '' si no hay. */

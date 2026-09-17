@@ -100,16 +100,17 @@ $hash = $h->contentHash(snap(['a' => 1]));
 ok('sha256 hex (64 chars)', strlen($hash) === 64 && preg_match('/^[0-9a-f]+$/', $hash) === 1);
 ok('null/bool/string normalizados sin romper', is_string($c->canonical(snap(['n' => null, 't' => true, 'f' => false, 's' => 'x']))));
 
-echo "== IdempotencyKey (§13) ==\n";
+echo "== IdempotencyKey (§3/§13: identidad por id de historial DURABLE) ==\n";
 $k = new IdempotencyKey();
-$base = $k->forDecision(10, 'PENDING_L2->DONE:approve', 1, 'approved');
-ok('clave determinista (misma entrada → misma clave)', $base === $k->forDecision(10, 'PENDING_L2->DONE:approve', 1, 'approved'));
-ok('distinta document_version → distinta clave', $base !== $k->forDecision(10, 'PENDING_L2->DONE:approve', 2, 'approved'));
-ok('distinto tipo de evidencia → distinta clave', $base !== $k->forDecision(10, 'PENDING_L2->DONE:approve', 1, 'rejected'));
-ok('distinta instancia → distinta clave', $base !== $k->forDecision(11, 'PENDING_L2->DONE:approve', 1, 'approved'));
-ok('clave es hash acotado (64 chars)', strlen($base) === 64);
-$inv = $k->forInvalidation(10, 'wfkey-abc', 2);
-ok('invalidación: determinista', $inv === $k->forInvalidation(10, 'wfkey-abc', 2));
+$base = $k->forHistoryEvent(1001, 1, 'approved');
+ok('replay del MISMO evento histórico → misma clave', $base === $k->forHistoryEvent(1001, 1, 'approved'));
+ok('DOS eventos históricos distintos (mismo tipo/versión) → claves distintas', $base !== $k->forHistoryEvent(1002, 1, 'approved'));
+ok('distinta document_version → distinta clave', $base !== $k->forHistoryEvent(1001, 2, 'approved'));
+ok('distinto tipo/decisión → distinta clave', $base !== $k->forHistoryEvent(1001, 1, 'rejected'));
+ok('clave es hash acotado (64 chars)', strlen($base) === 64 && preg_match('/^[0-9a-f]+$/', $base) === 1);
+$inv = $k->forInvalidation(2001, 1, 55);
+ok('invalidación: determinista (misma evidencia afectada)', $inv === $k->forInvalidation(2001, 1, 55));
+ok('invalidación: distinta evidencia afectada → distinta clave', $inv !== $k->forInvalidation(2001, 1, 56));
 ok('invalidación difiere de la aprobación', $inv !== $base);
 
 echo "== TokenGenerator (§13) ==\n";

@@ -22,6 +22,12 @@ class HistoryEvent extends CommonDBTM
     public const EVENT_STARTED             = 'started';
     public const EVENT_TRANSITIONED        = 'transitioned';
     public const EVENT_BALLOT_RECORDED     = 'ballot_recorded';
+    /**
+     * Decisión DURABLE de un actor (aprobar/rechazar/devolver). Una fila por decisión individual
+     * (en quórum, una por aprobador). Sirve de LEDGER para materializar evidencia externa
+     * (companysignature) de forma idempotente y recuperable, keyed por el `id` de esta fila.
+     */
+    public const EVENT_DECISION_RECORDED   = 'decision_recorded';
     public const EVENT_QUORUM_REACHED      = 'quorum_reached';
     public const EVENT_RETURNED            = 'returned';
     public const EVENT_REJECTED            = 'rejected';

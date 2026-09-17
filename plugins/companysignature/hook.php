@@ -61,6 +61,7 @@ function plugin_companysignature_install() {
             `verification_token` VARCHAR(64) NOT NULL,
             `idempotency_key` CHAR(64) NOT NULL,
             `workflow_instances_id` INT UNSIGNED NOT NULL DEFAULT 0,
+            `workflow_history_id` INT UNSIGNED NOT NULL DEFAULT 0,
             `workflow_event_ref` VARCHAR(190) NOT NULL DEFAULT '',
             `subject_itemtype` VARCHAR(100) NOT NULL,
             `subject_items_id` INT UNSIGNED NOT NULL DEFAULT 0,
@@ -85,6 +86,7 @@ function plugin_companysignature_install() {
             KEY `entities_id` (`entities_id`),
             KEY `subject` (`subject_itemtype`,`subject_items_id`),
             KEY `workflow_instances_id` (`workflow_instances_id`),
+            KEY `workflow_history_id` (`workflow_history_id`),
             KEY `references_evidences_id` (`references_evidences_id`)
         ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;";
         $DB->doQuery($sql);
@@ -148,6 +150,19 @@ function plugin_companysignature_on_transitioned($payload) {
         (new WorkflowEventListener())->onTransitioned($payload);
     } catch (\Throwable) {
         // best-effort: registrar evidencia no debe tumbar la transición ya confirmada.
+    }
+    return $payload;
+}
+
+/** `companyworkflow:decision_recorded` → registrar evidencia de la DECISIÓN por aprobador (idempotente). */
+function plugin_companysignature_on_decision_recorded($payload) {
+    if (!is_array($payload)) {
+        return $payload;
+    }
+    try {
+        (new WorkflowEventListener())->onDecisionRecorded($payload);
+    } catch (\Throwable) {
+        // best-effort: recuperable por reconciliación (plugins:companysignature:reconcile).
     }
     return $payload;
 }

@@ -111,6 +111,39 @@ final class VersionStore
         return null;
     }
 
+    /**
+     * Versión documental EN VIGOR en un instante dado: la de mayor `version` cuya `date_creation`
+     * es ≤ `$atDatetime`. Regla determinista compartida por el listener en vivo y el reconciliador,
+     * de modo que una decisión se vincula a la versión que existía cuando ocurrió (no a una posterior).
+     *
+     * @param string $atDatetime  'Y-m-d H:i:s' (hora del evento de historial)
+     */
+    public function versionInEffectAt(string $subjectType, int $subjectId, string $atDatetime): ?DocumentVersion
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        if ($subjectType === '' || $subjectId <= 0 || $atDatetime === '') {
+            return null;
+        }
+        foreach ($DB->request([
+            'SELECT' => 'id',
+            'FROM'   => DocumentVersion::getTable(),
+            'WHERE'  => [
+                'subject_itemtype' => $subjectType,
+                'subject_items_id' => $subjectId,
+                ['date_creation'   => ['<=', $atDatetime]],
+            ],
+            'ORDER'  => 'version DESC',
+            'LIMIT'  => 1,
+        ]) as $row) {
+            $m = new DocumentVersion();
+            if ($m->getFromDB((int) $row['id'])) {
+                return $m;
+            }
+        }
+        return null;
+    }
+
     /** Última versión (mayor `version`) del sujeto, o null si aún no hay ninguna. */
     public function latest(string $subjectType, int $subjectId): ?DocumentVersion
     {

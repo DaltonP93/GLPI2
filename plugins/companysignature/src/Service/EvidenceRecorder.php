@@ -33,7 +33,7 @@ final class EvidenceRecorder
      *
      * @param array{
      *   idempotency_key:string, subject_itemtype:string, subject_items_id:int, entities_id:int,
-     *   is_recursive?:int, workflow_instances_id?:int, workflow_event_ref?:string,
+     *   is_recursive?:int, workflow_instances_id?:int, workflow_history_id?:int, workflow_event_ref?:string,
      *   document_versions_id?:int, document_version?:int, content_sha256?:string,
      *   actor_users_id?:int, actor_role?:string, actor_context?:array<string,mixed>,
      *   decision:string, event_type:string, comment?:string, references_evidences_id?:int
@@ -71,6 +71,7 @@ final class EvidenceRecorder
                     'verification_token'      => $token,
                     'idempotency_key'         => $idem,
                     'workflow_instances_id'   => (int) ($p['workflow_instances_id'] ?? 0),
+                    'workflow_history_id'     => (int) ($p['workflow_history_id'] ?? 0),
                     'workflow_event_ref'      => (string) ($p['workflow_event_ref'] ?? ''),
                     'subject_itemtype'        => (string) $p['subject_itemtype'],
                     'subject_items_id'        => (int) $p['subject_items_id'],
