@@ -31,7 +31,7 @@ Plugin propio de la **Plataforma GLPI Modular**.
 | `Service/ReconcileService` + `Model/ReconcileTask` | Reconciliación DURABLE: **CronTask nativa** `reconcile` + cola propia (`UNIQUE(workflow_history_id)`, estados/reintentos/backoff) + high-watermark. Un pendiente no bloquea a los posteriores ni se pierde; sobrevive a reinicios. |
 | `Command/ReconcileCommand` | `plugins:companysignature:reconcile` (misma lógica harvest+worker, on-demand). |
 | Verificación fail-closed | Sin versión/snapshot/hash válido → nunca `valid`. Invalidación reflejada por referencia exacta (`references_evidences_id`). |
-| PDF crash + concurrency safe | `SELECT … FOR UPDATE` por `document_versions_id` + marcador técnico estable (relink) + `Document_Item` idempotente: ni carrera ni duplicado en reintento. |
+| PDF crash + concurrency safe | Lock con nombre de MySQL (`GET_LOCK`/`RELEASE_LOCK`) por `document_versions_id` —sin envolver `Document::add()` en transacción propia— + marcador técnico estable (relink) + `Document_Item` idempotente: ni carrera ni duplicado en reintento. |
 
 Cada evidencia guarda `event_date` (momento original de la decisión, del ledger) y `materialized_at`
 (cuándo companysignature la creó/reconcilió). La `idempotency_key` de invalidación es obligatoria y

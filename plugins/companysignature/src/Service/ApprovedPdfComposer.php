@@ -53,29 +53,27 @@ final class ApprovedPdfComposer
             throw new \InvalidArgumentException('versión documental inexistente');
         }
 
-        // CONCURRENCY-SAFE (§6): serializar la materialización del PDF por `document_versions_id`
-        // con SELECT ... FOR UPDATE. Dos workers concurrentes no crean dos Documents: el segundo
-        // espera, re-lee `documents_id` y encuentra el ya creado. Se mantiene el recovery por
-        // marcador para el caso Document creado → caída antes de markPdfReady.
         $table = DocumentVersion::getTable();
-        $now = $_SESSION['glpi_currenttime'] ?? gmdate('Y-m-d H:i:s');
-        $DB->beginTransaction();
-        try {
-            $res = $DB->doQuery("SELECT `documents_id`, `pdf_status` FROM `{$table}` WHERE `id` = " . $versionId . " FOR UPDATE");
-            $locked = ($res !== false) ? $DB->fetchAssoc($res) : null;
-            if ($locked === null) {
-                $this->safeRollback($DB);
-                throw new \InvalidArgumentException('versión documental inexistente (lock)');
-            }
+        $now   = $_SESSION['glpi_currenttime'] ?? gmdate('Y-m-d H:i:s');
 
-            // Idempotencia BAJO LOCK: si ya hay un Document válido → no regenerar (ni duplicar).
-            $existingDocId = (int) ($locked['documents_id'] ?? 0);
+        // CONCURRENCY-SAFE (§6): serializar la materialización del PDF por `document_versions_id` con
+        // un LOCK CON NOMBRE de MySQL (GET_LOCK), INDEPENDIENTE de transacciones. No se puede envolver
+        // `Document::add()` en un `beginTransaction()` + `FOR UPDATE` propio: el `Document` nativo
+        // gestiona SUS PROPIAS transacciones/commits y hace E/S de fichero, por lo que anidar rompería
+        // nuestro commit y dejaría `pdf_status=error`. El lock advisory serializa a dos workers sin
+        // acoplarse a la gestión de transacciones del core: el segundo espera, re-lee `documents_id` y
+        // reutiliza el Document ya creado. Se conserva el recovery por marcador (Document creado →
+        // caída antes de marcar READY) y el relink idempotente del `Document_Item`.
+        $lock = $this->lockName($versionId);
+        $held = $this->acquireLock($lock, 10);
+        try {
+            // Re-lectura BAJO LOCK: otro worker pudo haber materializado ya la versión.
+            $version->getFromDB($versionId);
+            $existingDocId = (int) ($version->fields['documents_id'] ?? 0);
             if ($existingDocId > 0
-                && (string) ($locked['pdf_status'] ?? '') === DocumentVersion::PDF_READY
+                && (string) ($version->fields['pdf_status'] ?? '') === DocumentVersion::PDF_READY
                 && (new Document())->getFromDB($existingDocId)) {
-                $DB->commit();
-                $version->getFromDB($versionId);
-                return $version;
+                return $version; // idempotente: ya materializado y válido
             }
 
             $bytes  = $this->renderPdf($version);
@@ -86,14 +84,16 @@ final class ApprovedPdfComposer
             } else {
                 $DB->update($table, ['documents_id' => $docId, 'pdf_sha256' => $pdfSha, 'pdf_status' => DocumentVersion::PDF_READY, 'date_mod' => $now], ['id' => $versionId]);
             }
-            $DB->commit();
         } catch (\Throwable $e) {
-            $this->safeRollback($DB);
-            // Nunca compromete la evidencia: marca error (fuera del lock) y permite reintento.
+            // Nunca compromete la evidencia ya registrada: marca error y permite reintento.
             try {
                 $DB->update($table, ['pdf_status' => DocumentVersion::PDF_ERROR], ['id' => $versionId]);
             } catch (\Throwable) {
                 // best-effort
+            }
+        } finally {
+            if ($held) {
+                $this->releaseLock($lock);
             }
         }
 
@@ -101,12 +101,43 @@ final class ApprovedPdfComposer
         return $version;
     }
 
-    private function safeRollback(\DBmysql $DB): void
+    /** Nombre del lock advisory por versión: sólo `[A-Za-z0-9_]`, `<=64`, namespaced por BD. */
+    private function lockName(int $versionId): string
     {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $db = preg_replace('/[^A-Za-z0-9_]/', '_', (string) ($DB->dbdefault ?? 'glpi'));
+        return substr('csig_pdf_' . $db . '_' . $versionId, 0, 64);
+    }
+
+    /**
+     * Adquiere el lock con nombre (`GET_LOCK`). BEST-EFFORT: si no se obtiene (timeout/error) NO se
+     * bloquea el PDF (el PDF nunca debe bloquear la evidencia); el marcador estable sigue evitando
+     * duplicados. El nombre se compone sólo de caracteres seguros ⇒ literal SQL sin inyección.
+     */
+    private function acquireLock(string $name, int $timeoutSeconds): bool
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
         try {
-            if (!method_exists($DB, 'inTransaction') || $DB->inTransaction()) {
-                $DB->rollBack();
+            $res = $DB->doQuery("SELECT GET_LOCK('" . $name . "', " . max(0, $timeoutSeconds) . ") AS l");
+            if ($res === false) {
+                return false;
             }
+            $row = $DB->fetchAssoc($res);
+            return isset($row['l']) && (int) $row['l'] === 1;
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    /** Libera el lock con nombre (`RELEASE_LOCK`). Best-effort. */
+    private function releaseLock(string $name): void
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        try {
+            $DB->doQuery("SELECT RELEASE_LOCK('" . $name . "')");
         } catch (\Throwable) {
             // best-effort
         }

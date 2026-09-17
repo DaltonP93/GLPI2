@@ -23,9 +23,12 @@ y versionado [SemVer](https://semver.org/lang/es/).
 - **Contexto histórico del aprobador (§5):** el `Materializer` copia `statedefs_id`/`steps_id`/
   `approver_kind`/`approver_ref`/`delegated_from` del ledger a `actor_role`/`actor_context`.
 - **PDF concurrency-safe (§6):** `ApprovedPdfComposer` serializa la materialización por
-  `document_versions_id` con `SELECT … FOR UPDATE` (dos workers no crean dos `Document`), conservando
-  el recovery por marcador (Document creado → caída antes de `markPdfReady`) y el relink idempotente
-  de `Document_Item`.
+  `document_versions_id` con un **lock con nombre de MySQL** (`GET_LOCK`/`RELEASE_LOCK`), INDEPENDIENTE
+  de transacciones (dos workers no crean dos `Document`). No se envuelve `Document::add()` en un
+  `beginTransaction()`/`FOR UPDATE` propio porque el `Document` nativo gestiona SUS PROPIAS
+  transacciones y hace E/S de fichero: anidar rompería el commit. Se conserva el recovery por marcador
+  (Document creado → caída antes de marcar `READY`) y el relink idempotente de `Document_Item`. El lock
+  es best-effort: si no se obtiene, el PDF no se bloquea (el marcador sigue evitando duplicados).
 - **Invalidación:** se materializa con `idempotency_key` obligatoria y **actor DURABLE** reconstruido
   desde el ledger (aunque el listener en vivo nunca corra).
 ### Tests
