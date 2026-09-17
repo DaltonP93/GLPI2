@@ -357,12 +357,9 @@ final class SelftestCommand extends Command
             $this->check('[RETURN] instancia', false);
             return;
         }
-        $rSubmit = $api->transition($inst, 'submit', []);
-        $this->diagTransition('RETURN-submit', 'submit', (int) $inst->getID(), $this->requester, 'DRAFT', 0, $rSubmit);
+        $api->transition($inst, 'submit', []);
         $this->applySession($this->uA1, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
-        $approvalsBefore = $this->approvalsCount((int) $inst->getID());
-        $rApprove = $api->transition($inst, 'approve', ['comment' => 'ok a1']);
-        $this->diagTransition('RETURN', 'approve', (int) $inst->getID(), $this->uA1, 'PENDING_L1', $approvalsBefore, $rApprove);
+        $api->transition($inst, 'approve', ['comment' => 'ok a1']);
         $this->check('[RETURN] 1 voto antes de devolver', $this->approvalsCount($inst->getID()) === 1);
         $r = $api->transition($inst, 'return', ['comment' => 'corregir']);
         $this->check('[RETURN] return → RETURNED', $r->success && ($r->data['to'] ?? '') === 'RETURNED');
@@ -393,9 +390,7 @@ final class SelftestCommand extends Command
         }
         $api->transition($inst, 'submit', []);
         $this->applySession($this->uA1, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
-        $approvalsBefore = $this->approvalsCount((int) $inst->getID());
-        $rApprove = $api->transition($inst, 'approve', ['comment' => 'a1']);
-        $this->diagTransition('INVALIDATE', 'approve', (int) $inst->getID(), $this->uA1, 'PENDING_L1', $approvalsBefore, $rApprove);
+        $api->transition($inst, 'approve', ['comment' => 'a1']);
         $this->check('[INVALIDATE] preludio: 1 voto en PENDING_L1', $this->approvalsCount((int) $inst->getID()) === 1 && $this->stateCodeOf($inst) === 'PENDING_L1');
         // El voto individual dejó una decisión DURABLE en el ledger (evidencia por aprobador).
         $this->check('[INVALIDATE] decision_recorded en historial tras el voto', $this->hasHistoryEvent((int) $inst->getID(), HistoryEvent::EVENT_DECISION_RECORDED));
@@ -543,9 +538,7 @@ final class SelftestCommand extends Command
         }
         $normal->transition($inst, 'submit', []);
         $this->applySession($this->uA1, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
-        $approvalsBefore = $this->approvalsCount((int) $inst->getID());
-        $rApprove = $normal->transition($inst, 'approve', ['comment' => 'a1']); // 1 voto, RECORDED
-        $this->diagTransition('RECOVERY', 'approve', (int) $inst->getID(), $this->uA1, 'PENDING_L1', $approvalsBefore, $rApprove);
+        $normal->transition($inst, 'approve', ['comment' => 'a1']); // 1 voto, RECORDED
 
         // Motor que revienta justo antes de aplicar el avance (tras alcanzar quórum).
         $faultyEngine = new class extends Engine {
@@ -808,64 +801,6 @@ final class SelftestCommand extends Command
             $n = (int) $row['c'];
         }
         return $n;
-    }
-
-    /**
-     * Diagnóstico DETERMINISTA de una transición (sin secretos): explica por qué `approve()` no dejó
-     * el estado esperado (p. ej. 0 votos). Imprime el TransitionResult REAL (code/message) más el
-     * contexto necesario para clasificar la causa (ACL/entidad, aprobador/grupo, versión, rollback).
-     */
-    private function diagTransition(string $scenario, string $action, int $instanceId, int $actor, string $stateBefore, int $approvalsBefore, TransitionResult $r): void
-    {
-        $inst = new Instance();
-        $entity = -1;
-        $lockVersion = -1;
-        $stateAfter = '?';
-        if ($inst->getFromDB($instanceId)) {
-            $entity      = (int) ($inst->fields['entities_id'] ?? -1);
-            $lockVersion = (int) ($inst->fields['lock_version'] ?? -1);
-            $stateAfter  = $this->stateCodeOf($inst);
-        }
-        $this->out->writeln(sprintf(
-            '    [DIAG] scenario=%s action=%s instance=%d entity=%d actor=%d state_before=%s '
-            . 'code=%s success=%d msg="%s" approvals_before=%d approvals_after=%d state_after=%s '
-            . 'lock_version=%d actor_in_g1=%d g1_members=%d',
-            $scenario,
-            $action,
-            $instanceId,
-            $entity,
-            $actor,
-            $stateBefore,
-            $r->code,
-            $r->success ? 1 : 0,
-            str_replace('"', "'", $r->message),
-            $approvalsBefore,
-            $this->approvalsCount($instanceId),
-            $stateAfter,
-            $lockVersion,
-            $this->userInGroup($actor, $this->g1) ? 1 : 0,
-            $this->groupMemberCount($this->g1)
-        ));
-    }
-
-    private function userInGroup(int $userId, int $groupId): bool
-    {
-        /** @var \DBmysql $DB */
-        global $DB;
-        foreach ($DB->request(['COUNT' => 'c', 'FROM' => 'glpi_groups_users', 'WHERE' => ['groups_id' => $groupId, 'users_id' => $userId]]) as $row) {
-            return ((int) $row['c']) > 0;
-        }
-        return false;
-    }
-
-    private function groupMemberCount(int $groupId): int
-    {
-        /** @var \DBmysql $DB */
-        global $DB;
-        foreach ($DB->request(['COUNT' => 'c', 'FROM' => 'glpi_groups_users', 'WHERE' => ['groups_id' => $groupId]]) as $row) {
-            return (int) $row['c'];
-        }
-        return 0;
     }
 
     private function maxVersion(string $code): int

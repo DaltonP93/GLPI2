@@ -4,6 +4,16 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
 ## [0.4.0] — Fase 2C (integridad probatoria)
+### Fixed
+- **PDF: persistencia por el MODELO.** Al introducir el lock advisory, `ApprovedPdfComposer::compose()`
+  guardaba la versión con un `UPDATE` crudo que incluía `date_mod`, columna **inexistente** en
+  `document_versions` (`Unknown column 'date_mod'`) → `pdf_status=error`. Se vuelve a
+  `VersionStore::markPdfReady()/markPdfError()` (CommonDBTM), que no referencian `date_mod`. Se
+  conservan el lock advisory (§6), el recovery por marcador y el relink idempotente.
+- **Diagnóstico probatorio:** `ApprovedPdfComposer::$lastError` conserva la excepción REAL (clase +
+  mensaje, **sin secretos**) en vez de esconderla sólo como `pdf_status=error` (el PDF nunca bloquea
+  la evidencia, pero el motivo queda disponible).
+
 ### Added
 - **Reconciliación DURABLE automática (§3):** tabla propia `reconcile_queue`
   (`UNIQUE(workflow_history_id)`, `status`/`attempts`/`last_error`/`next_retry_at`) + high-watermark

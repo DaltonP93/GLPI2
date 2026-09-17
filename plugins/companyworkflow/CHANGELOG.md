@@ -4,6 +4,19 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
 ## [0.5.0]
+### Fixed — selftest / CI (corrección de "falso verde")
+- **CI ejecuta de verdad los selftests Fase 2:** se descubrió que el paso de integración los
+  descubría con `bin/console list | grep -q ...` bajo `set -o pipefail`; `grep -q` cierra el pipe al
+  primer match y `bin/console list` recibe **SIGPIPE (exit 141)**, que pipefail propagaba como fallo
+  del `if` → rama "omitido". Resultado: un CI verde que **nunca** corría estos selftests. Ahora se
+  ejecutan DIRECTAMENTE (obligatorios) y hay una regresión estática (`tests/ci/verify-selftests-mandatory.sh`).
+- **Correcciones de sesión del propio selftest** (el motor no cambió; deniega bien cuando falta el
+  derecho): `makeComputer()` ya no **contamina** la sesión del llamador (aísla su
+  `applySession(computer)` con snapshot/restore); `[RECOVERY](b)` fija la sesión de **requester
+  (READ)** antes del `submit` (era acción de requester corriendo bajo un aprobador `RIGHT_ACT=2`, que
+  no incluye el bit `READ=1` → `DENIED_ACL`); `hasHistoryEvent()` usa `COUNT` en vez de
+  `getFromDBByCrit` (que lanza excepción con >1 fila; el ciclo feliz produce 2 `quorum_reached`).
+
 ### Changed
 - **Referencia probatoria EXPLÍCITA en el ledger (§2):** las transiciones/decisiones propagan una
   `evidence_ref` OPACA aportada por el dominio (`{document_versions_id, document_version,

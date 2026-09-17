@@ -346,18 +346,7 @@ final class SelftestCommand extends Command
         // PDF concurrency-safe + idempotente.
         $docsBefore = $this->countDocuments($c);
         $dv1 = $sig->composePdf((int) $dv1->getID());
-        $pdfReady = (string) $dv1->fields['pdf_status'] === DocumentVersion::PDF_READY && (int) $dv1->fields['documents_id'] > 0 && strlen((string) $dv1->fields['pdf_sha256']) === 64;
-        if (!$pdfReady) {
-            // Motivo REAL (no sólo pdf_status=error): clase + mensaje de la excepción capturada, sin secretos.
-            $this->out->writeln(sprintf(
-                '    [DIAG PDF] pdf_status=%s documents_id=%d pdf_sha256_len=%d lastError="%s"',
-                (string) $dv1->fields['pdf_status'],
-                (int) $dv1->fields['documents_id'],
-                strlen((string) $dv1->fields['pdf_sha256']),
-                str_replace('"', "'", (string) (\GlpiPlugin\Companysignature\Service\ApprovedPdfComposer::$lastError ?? '(sin excepción capturada)'))
-            ));
-        }
-        $this->check('[PDF] ready + Document nativo + pdf_sha256', $pdfReady);
+        $this->check('[PDF] ready + Document nativo + pdf_sha256', (string) $dv1->fields['pdf_status'] === DocumentVersion::PDF_READY && (int) $dv1->fields['documents_id'] > 0 && strlen((string) $dv1->fields['pdf_sha256']) === 64);
         $docId = (int) $dv1->fields['documents_id'];
         $sig->composePdf((int) $dv1->getID());
         $this->check('[PDF] idempotente (no duplica Document)', $this->countDocuments($c) === $docsBefore + 1);
