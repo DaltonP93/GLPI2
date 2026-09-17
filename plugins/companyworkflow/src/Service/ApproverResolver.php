@@ -55,6 +55,47 @@ final class ApproverResolver
         return $effective;
     }
 
+    /**
+     * Contexto HISTÓRICO del aprobador para una etapa (para evidencia durable §5): la regla bajo la
+     * que se aprobó y, si aplica, de quién proviene la delegación. Se captura EN EL MOMENTO de la
+     * decisión (no se infiere después, porque grupos/delegaciones pueden cambiar).
+     *
+     * @param array<string,mixed> $step
+     * @return array{approver_kind:string, approver_ref:int, delegated_from:?int, is_delegate:bool}
+     */
+    public function approverContext(array $step, int $workflowdefsId, int $entitiesId, int $actor): array
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $kind = (string) ($step['approver_kind'] ?? '');
+        $ref  = (int) ($step['approver_ref'] ?? 0);
+        $base = $this->resolveBase($kind, $ref, $entitiesId);
+
+        $delegatedFrom = null;
+        if ($actor > 0 && $base !== [] && !in_array($actor, $base, true) && isset($DB)) {
+            $rows = [];
+            foreach ($DB->request([
+                'FROM'  => 'glpi_plugin_companyworkflow_delegations',
+                'WHERE' => ['is_active' => 1, 'users_id_from' => $base],
+            ]) as $row) {
+                $rows[] = $row;
+            }
+            foreach ($base as $b) {
+                if (in_array($actor, $this->delegations->effectiveDelegates($rows, (int) $b, $workflowdefsId, $entitiesId), true)) {
+                    $delegatedFrom = (int) $b;
+                    break;
+                }
+            }
+        }
+
+        return [
+            'approver_kind'  => $kind,
+            'approver_ref'   => $ref,
+            'delegated_from' => $delegatedFrom,
+            'is_delegate'    => $delegatedFrom !== null,
+        ];
+    }
+
     /** @return array<int,int> */
     private function resolveBase(string $kind, int $ref, int $entitiesId): array
     {

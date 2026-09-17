@@ -39,6 +39,14 @@ class Engine
     private AuditBridge $audit;
     private NotificationBridge $notifications;
 
+    /**
+     * Eventos de dominio a emitir DESPUÉS del commit (best-effort). Se acumulan durante la
+     * transacción y se disparan tras confirmar, de modo que la fila de historial (ledger) queda
+     * comprometida atómicamente y un consumidor caído se recupera por reconciliación.
+     * @var array<int,array{name:string, payload:array<string,mixed>}>
+     */
+    private array $pendingEmits = [];
+
     public function __construct()
     {
         $this->conditions    = new ConditionEvaluator();
@@ -124,6 +132,158 @@ class Engine
         return $this->resolver->actionsFrom($transitions, (int) $instance->fields['current_statedefs_id']);
     }
 
+    /**
+     * Invalidación GENÉRICA de aprobaciones de una instancia (extensión para plugins de dominio,
+     * p. ej. `companysignature` al detectar un cambio SUSTANTIVO del contenido aprobado).
+     *
+     * Domain-agnostic · fail-closed · concurrencia (`expectedVersion`/`lock_version` + FOR UPDATE) ·
+     * IDEMPOTENTE (misma `idempotency_key` ⇒ no duplica) · auditoría append-only ·
+     * emite `companyworkflow:approval_invalidated`. NUNCA borra historial.
+     *
+     * Política v1: se limpian los votos (ballots) y la instancia se REABRE al checkpoint configurado
+     * (`context['reopen_to_code']`) o, por defecto, al estado inicial de la definición.
+     *
+     * @param array<string,mixed> $context  idempotency_key (recomendado), reopen_to_code (opcional),
+     *                                      subject_type/subject_id/document_version (trazabilidad)
+     */
+    public function invalidateApprovals(int $instanceId, string $reason, array $context = [], ?int $expectedVersion = null): TransitionResult
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+
+        $instance = new Instance();
+        if ($instanceId <= 0 || !$instance->getFromDB($instanceId)) {
+            return TransitionResult::fail(TransitionResult::ERROR, 'Instancia inexistente.');
+        }
+        // Multi-entidad ESTRICTA + ACL mínima (evita invocación no autorizada).
+        $ent = (int) ($instance->fields['entities_id'] ?? 0);
+        $rec = (int) ($instance->fields['is_recursive'] ?? 0);
+        if (!Session::haveAccessToEntity($ent, (bool) $rec)) {
+            return TransitionResult::fail(TransitionResult::DENIED_ENTITY, 'Sin acceso a la entidad de la instancia.');
+        }
+        // Invalidar aprobaciones es una acción de decisión (reabre etapas): exige RIGHT_ACT,
+        // no basta READ. Fail-closed.
+        if (!Session::haveRight(WorkflowDef::$rightname, WorkflowDef::RIGHT_ACT)) {
+            return TransitionResult::fail(TransitionResult::DENIED_ACL, 'Sin derecho (RIGHT_ACT) para invalidar aprobaciones.');
+        }
+
+        // La idempotency_key es OBLIGATORIA (§4): sin ella no hay garantía de "exactamente una vez".
+        // Fail-closed ANTES de mutar votos/estado. Formato acotado y no vacío.
+        $idemKey = trim((string) ($context['idempotency_key'] ?? ''));
+        if ($idemKey === '' || strlen($idemKey) < 8 || strlen($idemKey) > 190 || preg_match('/^[A-Za-z0-9._:\-]+$/', $idemKey) !== 1) {
+            return TransitionResult::fail(TransitionResult::ERROR, 'idempotency_key obligatoria y con formato válido (8–190, [A-Za-z0-9._:-]).');
+        }
+        // Actor DURABLE de la invalidación: se conserva aunque el listener en vivo nunca corra.
+        $invActor = (int) (Session::getLoginUserID() ?: 0);
+        $defId   = (int) $instance->fields['workflowdefs_id'];
+
+        // Checkpoint de reapertura: por código configurado, o estado inicial de la definición.
+        $reopenCode    = trim((string) ($context['reopen_to_code'] ?? ''));
+        $reopenStateId = $reopenCode !== '' ? $this->stateIdByCode($defId, $reopenCode) : $this->initialStateId($defId);
+        if ($reopenStateId <= 0) {
+            return TransitionResult::fail(TransitionResult::ERROR, 'No se pudo resolver el checkpoint de reapertura.');
+        }
+
+        $fromCode = '';
+        $toCode   = '';
+        $newLock  = 0;
+        $DB->beginTransaction();
+        try {
+            $fresh = $this->lockAndLoad($instanceId);
+            if ($fresh === null) {
+                $this->safeRollback($DB);
+                return TransitionResult::fail(TransitionResult::ERROR, 'Instancia inexistente.');
+            }
+            // Idempotencia bajo lock: si ya hay una invalidación con esta clave → no-op OK (sin re-emitir).
+            if ($idemKey !== '' && $this->hasInvalidationWithKey($instanceId, $idemKey)) {
+                $DB->commit();
+                return TransitionResult::ok(TransitionResult::OK, 'Invalidación ya aplicada (idempotente).', [
+                    'idempotent' => true,
+                    'advanced'   => false,
+                ]);
+            }
+            if ((string) $fresh['status'] !== Instance::STATUS_OPEN) {
+                $this->safeRollback($DB);
+                return TransitionResult::fail(TransitionResult::CLOSED, 'La instancia no está abierta.');
+            }
+            $expectedLock = (int) $fresh['lock_version'];
+            if ($expectedVersion !== null && $expectedVersion !== $expectedLock) {
+                $this->safeRollback($DB);
+                return TransitionResult::fail(TransitionResult::CONFLICT_VERSION, 'La instancia cambió (lock_version).');
+            }
+
+            $fromStateId = (int) $fresh['current_statedefs_id'];
+            $fromCode    = $this->stateCode($fromStateId);
+            $toCode      = $this->stateCode($reopenStateId);
+            $newLock     = $expectedLock + 1;
+
+            // Limpia votos (reabre etapas). NO borra historial.
+            $DB->delete(Assignment::getTable(), ['instances_id' => $instanceId]);
+
+            // Reabre al checkpoint (UPDATE condicionado por lock_version + status OPEN).
+            $now = $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s');
+            $DB->update(
+                Instance::getTable(),
+                [
+                    'current_statedefs_id' => $reopenStateId,
+                    'status'               => Instance::STATUS_OPEN,
+                    'lock_version'         => $newLock,
+                    'date_mod'             => $now,
+                ],
+                ['id' => $instanceId, 'lock_version' => $expectedLock, 'status' => Instance::STATUS_OPEN]
+            );
+            if (!$this->changeApplied($instanceId, $newLock, $reopenStateId)) {
+                $this->safeRollback($DB);
+                return TransitionResult::fail(TransitionResult::CONFLICT_VERSION, 'Invalidación en conflicto (concurrencia/replay).');
+            }
+
+            // Auditoría append-only con la idempotency key (habilita el chequeo idempotente) y el
+            // ACTOR + contexto DURABLES (§4): el reconciliador reconstruye la misma invalidación.
+            $meta = [
+                'reason'           => $reason,
+                'idempotency_key'  => $idemKey,
+                'actor'            => $invActor,
+                'reopen_to_code'   => $toCode,
+                'reopen_to_state'  => $reopenStateId,
+            ];
+            foreach (['subject_type', 'subject_id', 'document_version'] as $k) {
+                if (isset($context[$k])) {
+                    $meta[$k] = is_int($context[$k]) ? (int) $context[$k] : (string) $context[$k];
+                }
+            }
+            // is_system sólo si NO hay usuario autenticado (actor 0); si hay, se conserva el actor.
+            $invHid = $this->audit->record($instanceId, HistoryEvent::EVENT_APPROVAL_INVALIDATED, $fromCode, $toCode, $reason, $invActor === 0, $meta);
+
+            $DB->commit();
+        } catch (\Throwable $e) {
+            $this->safeRollback($DB);
+            return TransitionResult::fail(TransitionResult::ERROR, 'Error al invalidar aprobaciones: ' . $e->getMessage());
+        }
+
+        // Post-commit best-effort: evento de dominio (companysignature/webhooks reaccionan).
+        // Lleva el id de historial DURABLE de esta invalidación (identidad estable para reconciliar).
+        $this->emitHook('companyworkflow:approval_invalidated', [
+            'instances_id'        => $instanceId,
+            'workflow_history_id' => (int) $invHid,
+            'reason'              => $reason,
+            'from'                => $fromCode,
+            'to'                  => $toCode,
+            'idempotency_key'     => $idemKey,
+            'document_version'    => isset($context['document_version']) ? (int) $context['document_version'] : 0,
+            'actor'               => (int) (Session::getLoginUserID() ?: 0),
+            'context'             => $context,
+        ]);
+
+        return TransitionResult::ok(TransitionResult::OK, 'Aprobaciones invalidadas; etapa reabierta.', [
+            'from'         => $fromCode,
+            'to'           => $toCode,
+            'to_state_id'  => $reopenStateId,
+            'lock_version' => $newLock,
+            'advanced'     => true,
+            'idempotent'   => false,
+        ]);
+    }
+
     // ------------------------------------------------------------------ mutación atómica
 
     /**
@@ -137,6 +297,7 @@ class Engine
         global $DB;
         $instanceId = (int) $instance->getID();
 
+        $this->pendingEmits = [];
         $DB->beginTransaction();
         try {
             // Serialización por instancia (evita carreras de conteo/doble avance).
@@ -180,18 +341,22 @@ class Engine
             return TransitionResult::fail(TransitionResult::ERROR, 'Error en la transición: ' . $e->getMessage());
         }
 
-        // Post-commit best-effort (una notificación no revierte lo confirmado).
+        // Post-commit best-effort (nada de esto revierte lo confirmado).
+        // 1) Eventos de decisión DURABLES (uno por aprobador) — evidencia externa idempotente.
+        $this->flushEmits();
+        // 2) Evento de transición (+ destinatarios). Lleva el id de historial de la transición.
         $instance->getFromDB($instanceId);
         if ($result->success && ($result->data['advanced'] ?? false)) {
             $recipients = $this->nextRecipients($instance, (int) $result->data['to_state_id'], $ctx);
             $result->data['recipients'] = $recipients;
             $this->notifications->notifyTransition([
-                'instances_id' => $instanceId,
-                'from'         => $result->data['from'] ?? '',
-                'to'           => $result->data['to'] ?? '',
-                'action'       => $action,
-                'actor'        => $actor,
-                'recipients'   => $recipients,
+                'instances_id'        => $instanceId,
+                'from'                => $result->data['from'] ?? '',
+                'to'                  => $result->data['to'] ?? '',
+                'action'              => $action,
+                'actor'               => $actor,
+                'recipients'          => $recipients,
+                'workflow_history_id' => (int) ($result->data['transition_history_id'] ?? 0),
             ]);
         }
         return $result;
@@ -207,15 +372,36 @@ class Engine
         $instanceId = (int) $fresh['id'];
         $step       = $stage['step'];
         $approvers  = $stage['approvers'];
+        // Referencia probatoria EXPLÍCITA (opaca para el motor): la aporta el dominio (§2).
+        $evidenceRef = (isset($ctx['evidence_ref']) && is_array($ctx['evidence_ref'])) ? $ctx['evidence_ref'] : null;
 
         $ballotState = $this->recordBallot($instanceId, $fromStateId, $step, $actor, $comment);
         if ($ballotState === 'error') {
             return TransitionResult::fail(TransitionResult::ERROR, 'No se pudo registrar el voto.');
         }
         if ($ballotState === 'new') {
-            $this->audit->record($instanceId, HistoryEvent::EVENT_BALLOT_RECORDED,
-                $this->stateCode($fromStateId), $this->stateCode($fromStateId), $comment, false,
-                ['decision' => Assignment::DECISION_APPROVED]);
+            // Decisión DURABLE por aprobador (ledger). Cada voto individual queda registrado con su
+            // propio id de historial → evidencia por aprobador (no sólo del que alcanza el quórum).
+            // Se conserva el CONTEXTO HISTÓRICO del aprobador (§5) y la evidence_ref opaca (§2).
+            $code = $this->stateCode($fromStateId);
+            $actorCtx = $this->approvers->approverContext($step, (int) $fresh['workflowdefs_id'], (int) $fresh['entities_id'], $actor);
+            $meta = [
+                'decision'       => Assignment::DECISION_APPROVED,
+                'actor'          => $actor,
+                'statedefs_id'   => $fromStateId,
+                'steps_id'       => (int) ($step['id'] ?? 0),
+                'approver_kind'  => $actorCtx['approver_kind'],
+                'approver_ref'   => $actorCtx['approver_ref'],
+                'delegated_from' => $actorCtx['delegated_from'],
+            ];
+            if ($evidenceRef !== null) {
+                $meta['evidence_ref'] = $evidenceRef;
+            }
+            $hid = $this->audit->record($instanceId, HistoryEvent::EVENT_DECISION_RECORDED, $code, $code, $comment, false, $meta);
+            $this->queueEmit('companyworkflow:decision_recorded', [
+                'instances_id'        => $instanceId,
+                'workflow_history_id' => (int) $hid,
+            ]);
         }
 
         // Conteo bajo lock → ve todos los votos confirmados.
@@ -247,7 +433,8 @@ class Engine
         // Punto de inyección de fallo para tests de recuperación (no-op en producción).
         $this->afterQuorumBeforeAdvance();
 
-        return $this->applyStateChange($fresh, $t, $fromStateId, $actor, 'approve', $comment);
+        // Quórum: las decisiones ya se registraron por aprobador (arriba); aquí sólo la transición.
+        return $this->applyStateChange($fresh, $t, $fromStateId, $actor, 'approve', $comment, null, $evidenceRef);
     }
 
     /**
@@ -255,15 +442,26 @@ class Engine
      */
     private function applySingleActor(array $fresh, array $t, int $fromStateId, int $actor, string $action, string $comment, array $ctx): TransitionResult
     {
-        return $this->applyStateChange($fresh, $t, $fromStateId, $actor, $action, $comment);
+        // Sin quórum: la acción del actor ES la decisión → registrarla como decisión durable.
+        $decision = match ($action) {
+            'approve' => Assignment::DECISION_APPROVED,
+            'reject'  => 'rejected',
+            'return'  => 'returned',
+            default   => null, // cancel u otras: transición sin decisión de evidencia
+        };
+        $evidenceRef = (isset($ctx['evidence_ref']) && is_array($ctx['evidence_ref'])) ? $ctx['evidence_ref'] : null;
+        return $this->applyStateChange($fresh, $t, $fromStateId, $actor, $action, $comment, $decision, $evidenceRef);
     }
 
     /**
      * Cambio de estado condicionado por lock_version + auditoría, dentro de la transacción.
      * Como se sostiene el FOR UPDATE y se verificó el estado, el UPDATE siempre aplica.
+     * `$actorDecision` (approved/rejected/returned|null): si no es null, registra ADEMÁS una decisión
+     * durable del actor único (caso sin quórum); en quórum es null (las decisiones fueron los votos).
      * @param array<string,mixed> $fresh @param array<string,mixed> $t
+     * @param array<string,mixed>|null $evidenceRef  referencia probatoria opaca aportada por el dominio (§2)
      */
-    private function applyStateChange(array $fresh, array $t, int $fromStateId, int $actor, string $action, string $comment): TransitionResult
+    private function applyStateChange(array $fresh, array $t, int $fromStateId, int $actor, string $action, string $comment, ?string $actorDecision = null, ?array $evidenceRef = null): TransitionResult
     {
         /** @var \DBmysql $DB */
         global $DB;
@@ -303,8 +501,14 @@ class Engine
             return TransitionResult::fail(TransitionResult::CONFLICT_VERSION, 'Cambio de estado en conflicto (concurrencia/replay).');
         }
 
-        // Auditoría append-only.
-        $this->audit->record($instanceId, HistoryEvent::EVENT_TRANSITIONED, $fromCode, $toCode, $comment, false, ['action' => $action]);
+        // Auditoría append-only. El id de la fila TRANSITIONED es la identidad durable de la
+        // transición (ledger para la evidencia de "transición" en companysignature). Lleva la
+        // evidence_ref opaca del dominio (§2) para materializar sin inferir por fecha.
+        $transMeta = ['action' => $action];
+        if ($evidenceRef !== null) {
+            $transMeta['evidence_ref'] = $evidenceRef;
+        }
+        $transHid = $this->audit->record($instanceId, HistoryEvent::EVENT_TRANSITIONED, $fromCode, $toCode, $comment, false, $transMeta);
         if ($action === 'reject') {
             $this->audit->record($instanceId, HistoryEvent::EVENT_REJECTED, $fromCode, $toCode, $comment, false);
         } elseif ($action === 'return') {
@@ -316,13 +520,27 @@ class Engine
             $this->audit->record($instanceId, HistoryEvent::EVENT_CANCELLED, $fromCode, $toCode, $comment, false);
         }
 
+        // Decisión durable del actor único (sin quórum) → una fila DECISION_RECORDED + evento.
+        if ($actorDecision !== null) {
+            $decMeta = ['decision' => $actorDecision, 'actor' => $actor, 'statedefs_id' => $fromStateId, 'steps_id' => 0];
+            if ($evidenceRef !== null) {
+                $decMeta['evidence_ref'] = $evidenceRef;
+            }
+            $decHid = $this->audit->record($instanceId, HistoryEvent::EVENT_DECISION_RECORDED, $fromCode, $toCode, $comment, false, $decMeta);
+            $this->queueEmit('companyworkflow:decision_recorded', [
+                'instances_id'        => $instanceId,
+                'workflow_history_id' => (int) $decHid,
+            ]);
+        }
+
         return TransitionResult::ok(TransitionResult::OK, 'Transición aplicada.', [
-            'from'         => $fromCode,
-            'to'           => $toCode,
-            'to_state_id'  => $toStateId,
-            'status'       => $newStatus,
-            'lock_version' => $expectedLock + 1,
-            'advanced'     => true,
+            'from'                  => $fromCode,
+            'to'                    => $toCode,
+            'to_state_id'           => $toStateId,
+            'status'                => $newStatus,
+            'lock_version'          => $expectedLock + 1,
+            'advanced'              => true,
+            'transition_history_id' => (int) $transHid,
         ]);
     }
 
@@ -472,6 +690,111 @@ class Engine
             $recipients[] = $requester;
         }
         return array_values(array_unique(array_map('intval', $recipients)));
+    }
+
+    /**
+     * ID del estado de una definición por su `code` (0 si no existe).
+     * Usado por la invalidación para resolver el checkpoint de reapertura configurado.
+     */
+    private function stateIdByCode(int $defId, string $code): int
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        if ($defId <= 0 || $code === '') {
+            return 0;
+        }
+        foreach ($DB->request([
+            'SELECT' => 'id',
+            'FROM'   => StateDef::getTable(),
+            'WHERE'  => ['workflowdefs_id' => $defId, 'code' => $code],
+            'LIMIT'  => 1,
+        ]) as $row) {
+            return (int) $row['id'];
+        }
+        return 0;
+    }
+
+    /** ID del estado inicial (KIND_INITIAL) de una definición (0 si no existe). */
+    private function initialStateId(int $defId): int
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        if ($defId <= 0) {
+            return 0;
+        }
+        foreach ($DB->request([
+            'SELECT' => 'id',
+            'FROM'   => StateDef::getTable(),
+            'WHERE'  => ['workflowdefs_id' => $defId, 'kind' => StateDef::KIND_INITIAL],
+            'ORDER'  => 'id ASC',
+            'LIMIT'  => 1,
+        ]) as $row) {
+            return (int) $row['id'];
+        }
+        return 0;
+    }
+
+    /**
+     * ¿Ya existe en el historial append-only una invalidación con esta idempotency_key?
+     * Habilita la semántica IDEMPOTENTE (mismo evento de dominio ⇒ no duplica reapertura).
+     */
+    private function hasInvalidationWithKey(int $instanceId, string $key): bool
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        if ($instanceId <= 0 || $key === '') {
+            return false;
+        }
+        foreach ($DB->request([
+            'SELECT' => 'meta_json',
+            'FROM'   => HistoryEvent::getTable(),
+            'WHERE'  => ['instances_id' => $instanceId, 'event' => HistoryEvent::EVENT_APPROVAL_INVALIDATED],
+        ]) as $row) {
+            $raw = (string) ($row['meta_json'] ?? '');
+            if ($raw === '') {
+                continue;
+            }
+            $meta = json_decode($raw, true);
+            if (is_array($meta) && (string) ($meta['idempotency_key'] ?? '') === $key) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Acumula un evento de dominio para emitirlo TRAS el commit (no dentro de la transacción).
+     * @param array<string,mixed> $payload
+     */
+    private function queueEmit(string $name, array $payload): void
+    {
+        $this->pendingEmits[] = ['name' => $name, 'payload' => $payload];
+    }
+
+    /** Dispara (best-effort) los eventos acumulados y vacía la cola. */
+    private function flushEmits(): void
+    {
+        $emits = $this->pendingEmits;
+        $this->pendingEmits = [];
+        foreach ($emits as $e) {
+            $this->emitHook($e['name'], $e['payload']);
+        }
+    }
+
+    /**
+     * Emite un hook de dominio best-effort (post-commit). Nunca revierte lo confirmado ni
+     * propaga excepciones: un consumidor que falle no debe romper la invalidación.
+     * @param array<string,mixed> $payload
+     */
+    private function emitHook(string $name, array $payload): void
+    {
+        try {
+            if (class_exists(\Plugin::class) && method_exists(\Plugin::class, 'doHookFunction')) {
+                \Plugin::doHookFunction($name, $payload);
+            }
+        } catch (\Throwable) {
+            // best-effort: los efectos secundarios no comprometen la transacción ya confirmada.
+        }
     }
 
     private function safeRollback(\DBmysql $DB): void
