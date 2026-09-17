@@ -3,6 +3,36 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.4.0] — Fase 2C (integridad probatoria)
+### Added
+- **Reconciliación DURABLE automática (§3):** tabla propia `reconcile_queue`
+  (`UNIQUE(workflow_history_id)`, `status`/`attempts`/`last_error`/`next_retry_at`) + high-watermark
+  `last_seen_history_id`. `Service/ReconcileService` = **harvest** (encola lo nuevo del ledger y
+  avanza el cursor, sin full-scan) + **worker** (procesa pendientes con reintentos, independientes).
+  `Model/ReconcileTask` expone la **CronTask nativa** `reconcile` (frecuencia configurable). Un
+  evento sin snapshot/`evidence_ref` queda `pending` sin bloquear a los posteriores ni perderse.
+- **`materialized_at`** separado de `event_date` (columna nueva).
+### Changed
+- **`event_date` PROBATORIO (§1):** la evidencia guarda como `event_date` la fecha ORIGINAL del
+  ledger (momento de la decisión), y en `materialized_at` cuándo se materializó/reconcilió.
+  `EvidenceRecorder` exige `event_date` válido (fail-closed).
+- **Identidad por `evidence_ref` EXPLÍCITA (§2):** el `Materializer` ya **no infiere** la versión por
+  timestamp; usa la `evidence_ref` del ledger y la valida (existe · mismo sujeto/entidad · versión y
+  `content_sha256` coinciden). Sin `evidence_ref` válida ⇒ `pending` (no adivina). Dos versiones en
+  el mismo segundo se resuelven sin ambigüedad. `versionInEffectAt()` queda como utilidad no probatoria.
+- **Contexto histórico del aprobador (§5):** el `Materializer` copia `statedefs_id`/`steps_id`/
+  `approver_kind`/`approver_ref`/`delegated_from` del ledger a `actor_role`/`actor_context`.
+- **PDF concurrency-safe (§6):** `ApprovedPdfComposer` serializa la materialización por
+  `document_versions_id` con `SELECT … FOR UPDATE` (dos workers no crean dos `Document`), conservando
+  el recovery por marcador (Document creado → caída antes de `markPdfReady`) y el relink idempotente
+  de `Document_Item`.
+- **Invalidación:** se materializa con `idempotency_key` obligatoria y **actor DURABLE** reconstruido
+  desde el ledger (aunque el listener en vivo nunca corra).
+### Tests
+- Nuevos: `event_date` original tras reconcile tardío; `evidence_ref` explícita (v1/v2 mismo segundo);
+  cola cron durable (pendiente no bloquea / idempotente / restart); `idempotency_key` obligatoria;
+  actor de invalidación durable; contexto de aprobador/delegación histórico; PDF concurrency/crash.
+
 ## [0.3.0] — Fase 2C (hardening probatorio)
 ### Added
 - **Entrega DURABLE + reconciliador (§1):** `Service/Materializer` es la única vía de creación de

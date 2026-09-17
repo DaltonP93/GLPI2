@@ -45,35 +45,71 @@ final class ApprovedPdfComposer
      */
     public function compose(int $versionId): DocumentVersion
     {
+        /** @var \DBmysql $DB */
+        global $DB;
+
         $version = new DocumentVersion();
         if ($versionId <= 0 || !$version->getFromDB($versionId)) {
             throw new \InvalidArgumentException('versión documental inexistente');
         }
 
-        // Idempotencia: ya hay un Document válido → no regenerar.
-        $existingDocId = (int) ($version->fields['documents_id'] ?? 0);
-        if ($existingDocId > 0
-            && (string) ($version->fields['pdf_status'] ?? '') === DocumentVersion::PDF_READY
-            && (new Document())->getFromDB($existingDocId)) {
-            return $version;
-        }
-
+        // CONCURRENCY-SAFE (§6): serializar la materialización del PDF por `document_versions_id`
+        // con SELECT ... FOR UPDATE. Dos workers concurrentes no crean dos Documents: el segundo
+        // espera, re-lee `documents_id` y encuentra el ya creado. Se mantiene el recovery por
+        // marcador para el caso Document creado → caída antes de markPdfReady.
+        $table = DocumentVersion::getTable();
+        $now = $_SESSION['glpi_currenttime'] ?? gmdate('Y-m-d H:i:s');
+        $DB->beginTransaction();
         try {
-            $bytes   = $this->renderPdf($version);
-            $pdfSha  = hash('sha256', $bytes);
-            $docId   = $this->storeAsDocument($version, $bytes, $pdfSha);
-            if ($docId <= 0) {
-                $this->versions->markPdfError($versionId);
-            } else {
-                $this->versions->markPdfReady($versionId, $docId, $pdfSha);
+            $res = $DB->doQuery("SELECT `documents_id`, `pdf_status` FROM `{$table}` WHERE `id` = " . $versionId . " FOR UPDATE");
+            $locked = ($res !== false) ? $DB->fetchAssoc($res) : null;
+            if ($locked === null) {
+                $this->safeRollback($DB);
+                throw new \InvalidArgumentException('versión documental inexistente (lock)');
             }
+
+            // Idempotencia BAJO LOCK: si ya hay un Document válido → no regenerar (ni duplicar).
+            $existingDocId = (int) ($locked['documents_id'] ?? 0);
+            if ($existingDocId > 0
+                && (string) ($locked['pdf_status'] ?? '') === DocumentVersion::PDF_READY
+                && (new Document())->getFromDB($existingDocId)) {
+                $DB->commit();
+                $version->getFromDB($versionId);
+                return $version;
+            }
+
+            $bytes  = $this->renderPdf($version);
+            $pdfSha = hash('sha256', $bytes);
+            $docId  = $this->storeAsDocument($version, $bytes, $pdfSha); // marker search/relink
+            if ($docId <= 0) {
+                $DB->update($table, ['pdf_status' => DocumentVersion::PDF_ERROR, 'date_mod' => $now], ['id' => $versionId]);
+            } else {
+                $DB->update($table, ['documents_id' => $docId, 'pdf_sha256' => $pdfSha, 'pdf_status' => DocumentVersion::PDF_READY, 'date_mod' => $now], ['id' => $versionId]);
+            }
+            $DB->commit();
         } catch (\Throwable $e) {
-            // Nunca compromete la evidencia ya registrada: se marca error y se permite reintento.
-            $this->versions->markPdfError($versionId);
+            $this->safeRollback($DB);
+            // Nunca compromete la evidencia: marca error (fuera del lock) y permite reintento.
+            try {
+                $DB->update($table, ['pdf_status' => DocumentVersion::PDF_ERROR], ['id' => $versionId]);
+            } catch (\Throwable) {
+                // best-effort
+            }
         }
 
         $version->getFromDB($versionId);
         return $version;
+    }
+
+    private function safeRollback(\DBmysql $DB): void
+    {
+        try {
+            if (!method_exists($DB, 'inTransaction') || $DB->inTransaction()) {
+                $DB->rollBack();
+            }
+        } catch (\Throwable) {
+            // best-effort
+        }
     }
 
     private function renderPdf(DocumentVersion $version): string

@@ -29,6 +29,10 @@ final class PluginConfig
         'compose_pdf'            => '1',
         // Zona horaria de PRESENTACIÓN de las fechas (los timestamps se guardan en UTC).
         'presentation_timezone'  => 'America/Asuncion',
+        // Reconciliación durable (§3): high-watermark del ledger + tamaños de lote.
+        'last_seen_history_id'   => '0',
+        'reconcile_harvest_batch' => '500',
+        'reconcile_work_batch'    => '200',
     ];
 
     /** @return array<string,mixed> */

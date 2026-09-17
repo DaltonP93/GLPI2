@@ -24,19 +24,24 @@ Plugin propio de la **Plataforma GLPI Modular**.
 | `Service/CertifiedSignerInterface` + `NullSigner` | Puerto de firma certificada (**sin proveedor** en Fase 2). |
 | `Api/SignatureApi` | Fachada para el dominio (companypurchasing y futuros). Domain-agnostic (**D5**). |
 
-## Hardening probatorio (§1–§7)
+## Hardening / integridad probatoria (§1–§7)
 | Pieza | Rol |
 |------|-----|
-| `Service/Materializer` | Única vía de creación de evidencia desde el **ledger** de `companyworkflow`. Idempotente por `workflow_history_id`, **fail-closed** de snapshot, vincula a la versión vigente en el instante del evento, invalidación **exacta** por referencia. |
-| `Command/ReconcileCommand` | `plugins:companysignature:reconcile`: recupera evidencia perdida si un listener cae tras el COMMIT (`commit → caída → reconcile → una sola vez`). Idempotente. |
-| Evidencia por aprobador | Escucha `companyworkflow:decision_recorded` (una por voto de quórum); la **transición** es evidencia separada. |
+| `Service/Materializer` | Única vía de creación de evidencia desde el **ledger** de `companyworkflow`. Idempotente por `workflow_history_id`; identidad por **`evidence_ref` explícita** (no infiere por fecha); `event_date` = fecha original del ledger; copia el **contexto histórico** del aprobador; invalidación **exacta** por referencia. |
+| `Service/ReconcileService` + `Model/ReconcileTask` | Reconciliación DURABLE: **CronTask nativa** `reconcile` + cola propia (`UNIQUE(workflow_history_id)`, estados/reintentos/backoff) + high-watermark. Un pendiente no bloquea a los posteriores ni se pierde; sobrevive a reinicios. |
+| `Command/ReconcileCommand` | `plugins:companysignature:reconcile` (misma lógica harvest+worker, on-demand). |
 | Verificación fail-closed | Sin versión/snapshot/hash válido → nunca `valid`. Invalidación reflejada por referencia exacta (`references_evidences_id`). |
-| PDF crash-safe | Búsqueda/relink del `Document` por marcador técnico estable antes de crear (sin duplicar en reintento). |
+| PDF crash + concurrency safe | `SELECT … FOR UPDATE` por `document_versions_id` + marcador técnico estable (relink) + `Document_Item` idempotente: ni carrera ni duplicado en reintento. |
+
+Cada evidencia guarda `event_date` (momento original de la decisión, del ledger) y `materialized_at`
+(cuándo companysignature la creó/reconcilió). La `idempotency_key` de invalidación es obligatoria y
+el actor de la invalidación se conserva durablemente.
 
 ## Tests
 - Unit puro: `php plugins/companysignature/tests/unit/run.php`
 - Integración + E2E (en GLPI): `php bin/console plugins:companysignature:selftest`
-- Reconciliación durable: `php bin/console plugins:companysignature:reconcile`
+- Reconciliación durable (harvest + worker): `php bin/console plugins:companysignature:reconcile`
+  (también automática vía CronTask `reconcile`).
 
 ## Regla 0
 Este plugin **no modifica el core de GLPI**. Solo usa hooks/API oficiales.

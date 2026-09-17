@@ -56,6 +56,7 @@ final class WorkflowEventListener
         if ($historyId <= 0) {
             return 0; // sin id durable no hay materialización en vivo; lo tomará la reconciliación
         }
-        return $this->materializer->materializeByHistoryId($historyId);
+        // Si queda pendiente (aún sin evidence_ref/snapshot), la CronTask/reconcile lo materializa luego.
+        return (int) ($this->materializer->materializeByHistoryId($historyId)['created'] ?? 0);
     }
 }

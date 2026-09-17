@@ -18,7 +18,7 @@
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYWORKFLOW_VERSION', '0.4.0');
+define('PLUGIN_COMPANYWORKFLOW_VERSION', '0.5.0');
 
 // Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
 define('PLUGIN_COMPANYWORKFLOW_GLPI_MIN_VERSION', '11.0');

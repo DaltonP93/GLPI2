@@ -20,10 +20,9 @@ declare(strict_types=1);
 
 namespace GlpiPlugin\Companysignature\Command;
 
-use GlpiPlugin\Companysignature\Service\Materializer;
+use GlpiPlugin\Companysignature\Service\ReconcileService;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
-use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 
 final class ReconcileCommand extends Command
@@ -31,43 +30,26 @@ final class ReconcileCommand extends Command
     protected function configure(): void
     {
         $this->setName('plugins:companysignature:reconcile')
-            ->setDescription('Reconciliación durable: materializa evidencia faltante desde el ledger de companyworkflow (idempotente).')
-            ->addOption('since', null, InputOption::VALUE_REQUIRED, 'Sólo filas de historial con id > este valor', '0')
-            ->addOption('limit', null, InputOption::VALUE_REQUIRED, 'Máximo de filas a procesar', '0');
+            ->setDescription('Reconciliación durable (harvest + worker) de evidencia desde el ledger de companyworkflow (idempotente).');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
-        $wfApiClass = 'GlpiPlugin\\Companyworkflow\\Api\\WorkflowApi';
-        if (!class_exists($wfApiClass)) {
+        if (!class_exists('GlpiPlugin\\Companyworkflow\\Api\\WorkflowApi')) {
             $output->writeln('<error>companyworkflow no disponible: no se puede reconciliar.</error>');
             return Command::FAILURE;
         }
 
-        $since = (int) $input->getOption('since');
-        $limit = (int) $input->getOption('limit');
-
-        $api = new $wfApiClass();
-        $filter = [
-            'events'   => [Materializer::WF_DECISION_RECORDED, Materializer::WF_TRANSITIONED, Materializer::WF_APPROVAL_INVALIDATED],
-            'since_id' => $since,
-        ];
-        if ($limit > 0) {
-            $filter['limit'] = $limit;
-        }
-        $rows = $api->history($filter); // orden causal (id ascendente): aprobaciones antes de invalidaciones
-
-        $mat = new Materializer();
-        $scanned = 0;
-        $created = 0;
-        $maxId = $since;
-        foreach ($rows as $row) {
-            $scanned++;
-            $created += $mat->materializeRow($row);
-            $maxId = max($maxId, (int) ($row['id'] ?? 0));
-        }
-
-        $output->writeln(sprintf('<info>reconcile: filas=%d evidencias_nuevas=%d ultimo_history_id=%d</info>', $scanned, $created, $maxId));
+        // Misma lógica DURABLE que la CronTask: encola lo nuevo y procesa la cola con reintentos.
+        $r = (new ReconcileService())->run();
+        $output->writeln(sprintf(
+            '<info>reconcile: encolados=%d procesados=%d evidencias_nuevas=%d pendientes=%d errores=%d</info>',
+            (int) $r['enqueued'],
+            (int) $r['processed'],
+            (int) $r['materialized'],
+            (int) $r['pending'],
+            (int) $r['errored']
+        ));
         return Command::SUCCESS;
     }
 }

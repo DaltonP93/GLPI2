@@ -36,8 +36,9 @@ final class EvidenceRecorder
      *   is_recursive?:int, workflow_instances_id?:int, workflow_history_id?:int, workflow_event_ref?:string,
      *   document_versions_id?:int, document_version?:int, content_sha256?:string,
      *   actor_users_id?:int, actor_role?:string, actor_context?:array<string,mixed>,
-     *   decision:string, event_type:string, comment?:string, references_evidences_id?:int
-     * } $p
+     *   decision:string, event_type:string, comment?:string, references_evidences_id?:int,
+     *   event_date:string
+     * } $p  `event_date` = fecha ORIGINAL e inmutable del evento de workflow (del ledger, §1).
      */
     public function record(array $p): ?ApprovalEvidence
     {
@@ -49,6 +50,13 @@ final class EvidenceRecorder
             return null; // sin clave no hay garantía de idempotencia → fail-closed
         }
 
+        // §1: la evidencia guarda como `event_date` la fecha ORIGINAL del ledger (momento de la
+        // decisión), NO el momento de materialización. Sin fecha válida → fail-closed.
+        $eventDate = trim((string) ($p['event_date'] ?? ''));
+        if (preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $eventDate) !== 1) {
+            return null;
+        }
+
         // 1) Idempotencia: ¿ya existe?
         $existing = $this->findByKey($idem);
         if ($existing !== null) {
@@ -56,7 +64,7 @@ final class EvidenceRecorder
         }
 
         // 2) Inserción append-only, transaccional.
-        $nowUtc = gmdate('Y-m-d H:i:s');
+        $nowUtc = gmdate('Y-m-d H:i:s'); // materialized_at: cuándo companysignature creó la fila
         $tz     = PluginConfig::presentationTimezone();
         $ctx    = $p['actor_context'] ?? [];
 
@@ -87,7 +95,8 @@ final class EvidenceRecorder
                     'event_type'              => (string) $p['event_type'],
                     'comment'                 => ($p['comment'] ?? '') !== '' ? (string) $p['comment'] : null,
                     'references_evidences_id' => (int) ($p['references_evidences_id'] ?? 0),
-                    'event_date'              => $nowUtc,
+                    'event_date'              => $eventDate, // fecha ORIGINAL del ledger (inmutable)
+                    'materialized_at'         => $nowUtc,    // cuándo se materializó (creó/reconcilió)
                     'presentation_timezone'   => $tz,
                     'date_creation'           => $nowUtc,
                 ]);

@@ -3,6 +3,23 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.5.0]
+### Changed
+- **Referencia probatoria EXPLÍCITA en el ledger (§2):** las transiciones/decisiones propagan una
+  `evidence_ref` OPACA aportada por el dominio (`{document_versions_id, document_version,
+  content_sha256}`) en `meta_json` de `DECISION_RECORDED`/`TRANSITIONED`. El motor **no** interpreta
+  ni valida esa tabla (sigue siendo domain-agnostic); el consumidor materializa evidencia por
+  referencia explícita, **sin inferir por timestamp**.
+- **Contexto HISTÓRICO del aprobador (§5):** `DECISION_RECORDED` guarda `statedefs_id`, `steps_id`,
+  `approver_kind`, `approver_ref` y `delegated_from` **en el momento** de la decisión (nuevo
+  `ApproverResolver::approverContext()`), para que la evidencia conserve el contexto aunque luego
+  cambien grupos/delegaciones.
+- **`invalidateApprovals()` (§4):** `idempotency_key` **obligatoria** y validada (8–190,
+  `[A-Za-z0-9._:-]`) — fail-closed **antes** de mutar votos/estado. El **actor** de la invalidación
+  se conserva DURABLEMENTE en `meta_json` (+ `reopen_to_code`/`document_version`) y `is_system`
+  refleja si hubo usuario, de modo que la reconciliación reconstruye el mismo actor aunque el
+  listener en vivo nunca corra.
+
 ## [0.4.0]
 ### Added
 - **Ledger durable + identidad real de eventos (hardening §1/§3/§4):**

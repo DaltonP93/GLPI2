@@ -6,19 +6,17 @@
  * Nombre: `plugins:companysignature:selftest`. Fail-closed → exit 1 si algo falla.
  *
  * Cobertura (gate + hardening §1–§7; domain-agnostic, sin Compras):
- *   [PERSIST]     tablas propias + columna `workflow_history_id`.
- *   [ROUTES]      GET /verify/{token} AUTHENTICATED.
- *   [WIRING]      listeners decision_recorded/transitioned/approval_invalidated + comando reconcile.
- *   [VERSION]     versión inmutable + idempotente (D1).
- *   [LIVE]        aprobación de actor → evidencia por aprobador + evidencia de transición separada;
- *                 verificación valid; PDF Document nativo + regeneración idempotente;
- *                 CRASH-RECOVERY de PDF (relink por marcador, sin duplicar).
- *   [NO-SNAPSHOT] evento de aprobación SIN versión → NO se crea evidencia válida (fail-closed §2);
- *                 y VerificationService fail-closed ante evidencia sin versión.
- *   [QUORUM]      quórum 3/3 → TRES evidencias APPROVED individuales + UNA transición (§4).
- *   [RECONCILE]   listener perdido → reconcile materializa exactamente una vez (idempotente §1).
- *   [INVALIDATE]  invalidación EXACTA por instancia/aprobación (§5): mismo sujeto, otra instancia
- *                 sigue valid; v1 invalidada / v2 valid.
+ *   [PERSIST]     tablas propias + columnas `workflow_history_id`/`materialized_at` + cola durable.
+ *   [WIRING]      listeners + comando + CronTask reconcile.
+ *   [LIVE/PDF]    decisión por aprobador + transición separada; PDF Document nativo concurrency-safe
+ *                 (FOR UPDATE) + idempotente + crash-recovery + relink de Document_Item.
+ *   [EVENT-DATE]  §1: event_date = fecha ORIGINAL del ledger; materialized_at = materialización.
+ *   [EVIDENCE-REF]§2: identidad por evidence_ref explícita; v1/v2 en el MISMO segundo → materializa v1.
+ *   [FAIL-CLOSED] sin evidence_ref/snapshot → pending, sin evidencia; verify fail-closed.
+ *   [QUORUM]      3/3 → 3 APPROVED + 1 transición; contexto histórico del aprobador (§5).
+ *   [DELEGATION]  §5: delegado → delegated_from histórico conservado aunque cambie el grupo.
+ *   [QUEUE]       §3: cron/queue durable; pendiente no bloquea a posteriores; idempotente; restart.
+ *   [INVALIDATE]  §4: idempotency_key obligatoria; actor DURABLE reconstruido; exacta A/B.
  *
  * @license GPL-3.0-or-later
  */
@@ -38,9 +36,10 @@ use GlpiPlugin\Companysignature\Api\SignatureApi;
 use GlpiPlugin\Companysignature\Controller\VerifyController;
 use GlpiPlugin\Companysignature\Model\ApprovalEvidence;
 use GlpiPlugin\Companysignature\Model\DocumentVersion;
+use GlpiPlugin\Companysignature\Model\ReconcileTask;
 use GlpiPlugin\Companysignature\Service\EvidenceRecorder;
-use GlpiPlugin\Companysignature\Service\Materializer;
 use GlpiPlugin\Companysignature\Service\PluginConfig;
+use GlpiPlugin\Companysignature\Service\ReconcileService;
 use GlpiPlugin\Companysignature\Service\VerificationService;
 use GlpiPlugin\Companyworkflow\Api\WorkflowApi;
 use GlpiPlugin\Companyworkflow\Model\HistoryEvent as WfHistoryEvent;
@@ -61,9 +60,6 @@ final class SelftestCommand extends Command
     private int $failures = 0;
     private OutputInterface $out;
     private string $suffix;
-    /** Reloj MONOTÓNICO de la prueba: cada applySession avanza el tiempo, para que el orden causal
-     *  (submit < registrar versión < approve) sea inequívoco y `versionInEffectAt` sea determinista
-     *  aunque todo corra en el mismo segundo de reloj real. */
     private int $clock = 0;
 
     /** @var array<int,int> */
@@ -72,45 +68,46 @@ final class SelftestCommand extends Command
     private array $createdEntities = [];
     private array $createdComputers = [];
 
-    private int $baseHistoryId = 0; // baseline del ledger: reconcile sólo procesa filas de ESTA prueba
     private int $entityA = 0;
-    private int $entityB = 0;
     private int $uReq = 0;
     private int $uA1 = 0;
     private int $uA2 = 0;
     private int $uA3 = 0;
+    private int $uDel = 0;
     private int $g3 = 0;
+    private int $gDel = 0;
 
     protected function configure(): void
     {
         $this->setName('plugins:companysignature:selftest')
-            ->setDescription('Pruebas de integración + E2E de firma/evidencia (durabilidad, por-aprobador, invalidación exacta, PDF crash-safe).');
+            ->setDescription('Pruebas de integración + E2E de firma/evidencia (durabilidad, evidence_ref, cola cron, PDF concurrency).');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $this->out = $output;
         $this->suffix = substr((string) time(), -6);
-        $this->clock = time() - 3600; // base 1h en el pasado; avanza monotónicamente por applySession
+        $this->clock = time() - 3600;
 
         $this->checkPersistence();
         $this->checkRoutes();
         $this->checkWiring();
 
         if (!class_exists(WorkflowApi::class)) {
-            $this->check('[E2E] companyworkflow disponible (dependencia de integración)', false);
-            $output->writeln('<error>SELFTEST: companyworkflow ausente.</error>');
+            $this->check('[E2E] companyworkflow disponible', false);
             return Command::FAILURE;
         }
 
         $this->buildFixtures();
-        $this->baseHistoryId = $this->maxHistoryId(); // sólo reconciliar el ledger de esta prueba
 
-        $this->scenarioLive();
-        $this->scenarioNoSnapshotFailClosed();
-        $this->scenarioQuorumThree();
-        $this->scenarioReconcile();
-        $this->scenarioInvalidationExact();
+        $this->scenarioLiveAndPdf();
+        $this->scenarioEventDateDurable();
+        $this->scenarioExplicitRefSameSecond();
+        $this->scenarioFailClosed();
+        $this->scenarioQuorumAndContext();
+        $this->scenarioDelegationContext();
+        $this->scenarioQueueDurable();
+        $this->scenarioInvalidation();
 
         $this->cleanup();
 
@@ -128,11 +125,13 @@ final class SelftestCommand extends Command
     {
         /** @var \DBmysql $DB */
         global $DB;
-        $this->out->writeln('== [PERSIST] tablas propias + columna durable ==');
-        foreach (['evidences', 'document_versions'] as $t) {
+        $this->out->writeln('== [PERSIST] tablas + columnas + cola durable ==');
+        foreach (['evidences', 'document_versions', 'reconcile_queue'] as $t) {
             $this->check("tabla glpi_plugin_companysignature_{$t} existe", $DB->tableExists("glpi_plugin_companysignature_{$t}"));
         }
-        $this->check('columna evidences.workflow_history_id existe', $DB->fieldExists('glpi_plugin_companysignature_evidences', 'workflow_history_id'));
+        $this->check('evidences.workflow_history_id existe', $DB->fieldExists('glpi_plugin_companysignature_evidences', 'workflow_history_id'));
+        $this->check('evidences.materialized_at existe', $DB->fieldExists('glpi_plugin_companysignature_evidences', 'materialized_at'));
+        $this->check('reconcile_queue.workflow_history_id existe', $DB->fieldExists('glpi_plugin_companysignature_reconcile_queue', 'workflow_history_id'));
     }
 
     private function checkRoutes(): void
@@ -152,9 +151,7 @@ final class SelftestCommand extends Command
                 $args = $a->getArguments();
                 $strategy = (string) ($args['strategy'] ?? $args[0] ?? '');
             }
-            $this->check('ruta /verify/{token} declarada', str_contains($path, '/verify/{token}'));
-            $this->check('ruta es GET', in_array('GET', $methods, true));
-            $this->check('ruta es AUTHENTICATED', $strategy === Firewall::STRATEGY_AUTHENTICATED);
+            $this->check('ruta /verify/{token} GET AUTHENTICATED', str_contains($path, '/verify/{token}') && in_array('GET', $methods, true) && $strategy === Firewall::STRATEGY_AUTHENTICATED);
         } catch (\Throwable $e) {
             $this->check('reflexión de VerifyController: ' . $e->getMessage(), false);
         }
@@ -163,40 +160,53 @@ final class SelftestCommand extends Command
     private function checkWiring(): void
     {
         global $PLUGIN_HOOKS;
-        $this->out->writeln('== [WIRING] listeners + reconcile ==');
-        $this->check('listener :decision_recorded registrado', ($PLUGIN_HOOKS['companyworkflow:decision_recorded']['companysignature'] ?? null) === 'plugin_companysignature_on_decision_recorded');
-        $this->check('listener :transitioned registrado', ($PLUGIN_HOOKS['companyworkflow:transitioned']['companysignature'] ?? null) === 'plugin_companysignature_on_transitioned');
-        $this->check('listener :approval_invalidated registrado', ($PLUGIN_HOOKS['companyworkflow:approval_invalidated']['companysignature'] ?? null) === 'plugin_companysignature_on_approval_invalidated');
+        $this->out->writeln('== [WIRING] listeners + reconcile + cron ==');
+        $this->check('listener :decision_recorded', ($PLUGIN_HOOKS['companyworkflow:decision_recorded']['companysignature'] ?? null) === 'plugin_companysignature_on_decision_recorded');
+        $this->check('listener :transitioned', ($PLUGIN_HOOKS['companyworkflow:transitioned']['companysignature'] ?? null) === 'plugin_companysignature_on_transitioned');
+        $this->check('listener :approval_invalidated', ($PLUGIN_HOOKS['companyworkflow:approval_invalidated']['companysignature'] ?? null) === 'plugin_companysignature_on_approval_invalidated');
         $this->check('comando reconcile existe', class_exists(ReconcileCommand::class));
+        $this->check('CronTask reconcile (cronInfo + cronReconcile)', is_array(ReconcileTask::cronInfo('reconcile')) && method_exists(ReconcileTask::class, 'cronReconcile'));
     }
 
     // ------------------------------------------------------------------ fixtures
 
     private function buildFixtures(): void
     {
-        $this->out->writeln('== fixtures (entidades/usuarios/grupo de quórum) ==');
+        $this->out->writeln('== fixtures (entidad/usuarios/grupos/delegación) ==');
         $this->applySession(2, [0], [
             'entity' => ALLSTANDARDRIGHT, 'user' => ALLSTANDARDRIGHT, 'group' => ALLSTANDARDRIGHT,
             'computer' => ALLSTANDARDRIGHT, 'profile' => ALLSTANDARDRIGHT,
         ], 1);
 
         $this->entityA = (int) (new Entity())->add(['name' => 'SIG-A-' . $this->suffix, 'entities_id' => 0]);
-        $this->entityB = (int) (new Entity())->add(['name' => 'SIG-B-' . $this->suffix, 'entities_id' => 0]);
-        $this->createdEntities = array_filter([$this->entityA, $this->entityB]);
-        $this->check('entidades A y B creadas', $this->entityA > 0 && $this->entityB > 0);
+        $this->createdEntities = array_filter([$this->entityA]);
+        $this->check('entidad A creada', $this->entityA > 0);
 
         $this->uReq = $this->makeUser('req');
         $this->uA1  = $this->makeUser('a1');
         $this->uA2  = $this->makeUser('a2');
         $this->uA3  = $this->makeUser('a3');
-        $this->check('usuarios creados', min($this->uReq, $this->uA1, $this->uA2, $this->uA3) > 0);
+        $this->uDel = $this->makeUser('del');
+        $this->check('usuarios creados', min($this->uReq, $this->uA1, $this->uA2, $this->uA3, $this->uDel) > 0);
 
         $this->g3 = (int) (new Group())->add(['name' => 'SIG-G3-' . $this->suffix, 'entities_id' => $this->entityA]);
-        $this->createdGroups[] = $this->g3;
+        $this->gDel = (int) (new Group())->add(['name' => 'SIG-GDEL-' . $this->suffix, 'entities_id' => $this->entityA]);
+        $this->createdGroups = [$this->g3, $this->gDel];
         foreach ([$this->uA1, $this->uA2, $this->uA3] as $u) {
             (new Group_User())->add(['groups_id' => $this->g3, 'users_id' => $u]);
         }
-        $this->check('grupo de quórum (3 miembros)', $this->g3 > 0);
+        (new Group_User())->add(['groups_id' => $this->gDel, 'users_id' => $this->uA1]);
+
+        // Delegación uA1 → uDel (abierta, cualquier def/entidad).
+        (new \GlpiPlugin\Companyworkflow\Model\Delegation())->add([
+            'users_id_from' => $this->uA1, 'users_id_to' => $this->uDel, 'workflowdefs_id' => 0, 'entities_id' => 0,
+            'date_start' => date('Y-m-d H:i:s', time() - 3600), 'date_end' => date('Y-m-d H:i:s', time() + 86400),
+            'reason' => 'selftest', 'is_active' => 1,
+        ]);
+        $this->check('grupos + delegación uA1→uDel', $this->g3 > 0 && $this->gDel > 0);
+
+        // Baseline del ledger: la reconciliación sólo procesa lo de ESTA prueba.
+        Config::setConfigurationValues(PluginConfig::CONTEXT, ['last_seen_history_id' => (string) $this->maxHistoryId()]);
     }
 
     private function makeUser(string $tag): int
@@ -225,25 +235,27 @@ final class SelftestCommand extends Command
         return $id;
     }
 
-    /** Snapshot canónico de ejemplo (payload arbitrario; domain-agnostic). */
+    /** @return array<string,mixed> */
     private function snap(int $subjectId, int $version, string $marker): array
     {
         return [
-            'schema'           => 'selftest/v1',
-            'subject_type'     => 'Computer',
-            'subject_id'       => $subjectId,
-            'entity_id'        => $this->entityA,
-            'document_version' => $version,
-            'payload'          => ['marker' => $marker, 'amount' => '1000.00', 'items' => ['a', 'b']],
+            'schema' => 'selftest/v1', 'subject_type' => 'Computer', 'subject_id' => $subjectId,
+            'entity_id' => $this->entityA, 'document_version' => $version,
+            'payload' => ['marker' => $marker, 'amount' => '1000.00', 'items' => ['a', 'b']],
         ];
     }
 
-    /** Definición single-actor: DRAFT→PENDING (submit) → APPROVED (approve, intermedio; queda OPEN). */
+    /** evidence_ref EXPLÍCITA (§2) que el dominio adjunta a la transición. @return array<string,mixed> */
+    private function evref(DocumentVersion $dv): array
+    {
+        return ['document_versions_id' => (int) $dv->getID(), 'document_version' => $dv->versionNumber(), 'content_sha256' => $dv->contentHash()];
+    }
+
     private function defSingle(WorkflowApi $api, string $code): WorkflowDef
     {
         $this->applySession(2, [0, $this->entityA], ['plugin_companyworkflow' => ALLSTANDARDRIGHT, 'computer' => ALLSTANDARDRIGHT], 1);
         return $api->builder()->createVersion([
-            'code' => $code, 'name' => 'sig single', 'itemtype_target' => 'Computer', 'entities_id' => 0, 'is_recursive' => 1,
+            'code' => $code, 'name' => 'single', 'itemtype_target' => 'Computer', 'entities_id' => 0, 'is_recursive' => 1,
             'states' => [
                 ['code' => 'DRAFT', 'kind' => StateDef::KIND_INITIAL, 'is_editable' => 1],
                 ['code' => 'PENDING', 'kind' => StateDef::KIND_INTERMEDIATE],
@@ -256,12 +268,12 @@ final class SelftestCommand extends Command
         ]);
     }
 
-    /** Definición con quórum 3/3 sobre g3: PENDING→DONE (final). */
-    private function defQuorum(WorkflowApi $api, string $code): WorkflowDef
+    /** Quórum sobre $group con $count aprobadores; PENDING→DONE (final). */
+    private function defQuorum(WorkflowApi $api, string $code, int $group, int $count): WorkflowDef
     {
         $this->applySession(2, [0, $this->entityA], ['plugin_companyworkflow' => ALLSTANDARDRIGHT, 'computer' => ALLSTANDARDRIGHT], 1);
         return $api->builder()->createVersion([
-            'code' => $code, 'name' => 'sig quorum', 'itemtype_target' => 'Computer', 'entities_id' => 0, 'is_recursive' => 1,
+            'code' => $code, 'name' => 'quorum', 'itemtype_target' => 'Computer', 'entities_id' => 0, 'is_recursive' => 1,
             'states' => [
                 ['code' => 'DRAFT', 'kind' => StateDef::KIND_INITIAL, 'is_editable' => 1],
                 ['code' => 'PENDING', 'kind' => StateDef::KIND_INTERMEDIATE],
@@ -270,262 +282,315 @@ final class SelftestCommand extends Command
             'transitions' => [
                 ['from' => 'DRAFT', 'to' => 'PENDING', 'action' => 'submit'],
                 ['from' => 'PENDING', 'to' => 'DONE', 'action' => 'approve', 'required_right' => WorkflowDef::RIGHT_ACT,
-                 'steps' => [['level' => 1, 'quorum_type' => Step::QUORUM_COUNT, 'quorum_value' => 3, 'approver_kind' => Step::APPROVER_GROUP, 'approver_ref' => $this->g3]]],
+                 'steps' => [['level' => 1, 'quorum_type' => Step::QUORUM_COUNT, 'quorum_value' => $count, 'approver_kind' => Step::APPROVER_GROUP, 'approver_ref' => $group]]],
             ],
         ]);
     }
 
-    // ------------------------------------------------------------------ [LIVE] por-aprobador + transición + PDF
-
-    private function scenarioLive(): void
+    /** start + submit (uReq) → devuelve la instancia. */
+    private function startSubmit(WorkflowApi $api, WorkflowDef $def, int $c): ?\CommonDBTM
     {
-        $this->out->writeln('== [LIVE] decisión por aprobador + transición separada + PDF crash-safe ==');
+        $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => READ]);
+        $inst = $api->startInstance($def, 'Computer', $c, $this->entityA, 0);
+        if ($inst === null) {
+            return null;
+        }
+        $api->transition($inst, 'submit', []);
+        return $inst;
+    }
+
+    /** approve con evidence_ref (o sin ella si $dv es null → provoca pending). */
+    private function approve(WorkflowApi $api, \CommonDBTM $inst, int $user, ?DocumentVersion $dv, string $comment): void
+    {
+        $this->applySession($user, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $ctx = ['comment' => $comment];
+        if ($dv !== null) {
+            $ctx['evidence_ref'] = $this->evref($dv);
+        }
+        $api->transition($inst, 'approve', $ctx);
+    }
+
+    private function recordVersion(SignatureApi $sig, int $c, int $ver, string $marker): DocumentVersion
+    {
+        $this->applySession($this->uReq, [$this->entityA], ['plugin_companysignature' => ALLSTANDARDRIGHT]);
+        return $sig->recordDocumentVersion($this->snap($c, $ver, $marker), true);
+    }
+
+    // ------------------------------------------------------------------ [LIVE/PDF]
+
+    private function scenarioLiveAndPdf(): void
+    {
+        $this->out->writeln('== [LIVE/PDF] por-aprobador + transición + PDF concurrency/crash-safe ==');
         $this->setListen(true);
         $api = new WorkflowApi();
         $sig = new SignatureApi();
         $c = $this->makeComputer();
         $def = $this->defSingle($api, 'sig_live_' . $this->suffix);
-
-        // start + submit (uReq), luego registrar v1, luego approve (uA1) → hooks en vivo materializan.
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => READ]);
-        $inst = $api->startInstance($def, 'Computer', $c, $this->entityA, 0);
+        $inst = $this->startSubmit($api, $def, $c);
         if ($inst === null) {
             $this->check('[LIVE] instancia', false);
             return;
         }
-        $api->transition($inst, 'submit', []);
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companysignature' => ALLSTANDARDRIGHT]);
-        $dv1 = $sig->recordDocumentVersion($this->snap($c, 1, 'X'), true);
-        $this->check('[VERSION] v1 inmutable creada', $dv1->getID() > 0 && $dv1->versionNumber() === 1 && strlen($dv1->contentHash()) === 64);
-        $this->check('[VERSION] idempotente (mismo contenido → misma fila)', (int) $sig->recordDocumentVersion($this->snap($c, 1, 'X'), true)->getID() === (int) $dv1->getID());
-
-        $this->applySession($this->uA1, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT, 'plugin_companysignature' => ALLSTANDARDRIGHT]);
-        $r = $api->transition($inst, 'approve', ['comment' => 'ok a1']);
-        $this->check('[LIVE] approve → APPROVED (instancia sigue OPEN)', $r->success && ($r->data['to'] ?? '') === 'APPROVED');
-        // Materialización durable (vía listener en vivo si el hook corre en consola; si no, reconcile
-        // deja el MISMO resultado: idempotente). Así la prueba no depende del entorno de hooks.
+        $dv1 = $this->recordVersion($sig, $c, 1, 'X');
+        $this->approve($api, $inst, $this->uA1, $dv1, 'ok a1');
         $this->reconcile();
 
-        // Evidencia por aprobador (1 approved) + transición separada (1 transition).
-        $this->check('[LIVE] 1 evidencia APPROVED por el aprobador', $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 1);
+        $this->check('[LIVE] 1 evidencia APPROVED por aprobador', $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 1);
         $this->check('[LIVE] 1 evidencia de TRANSICIÓN separada', $this->countEvidence($c, ApprovalEvidence::EVENT_TRANSITION, null) === 1);
         $ev = $this->latestEvidence($c, ApprovalEvidence::DECISION_APPROVED);
-        $this->check('[LIVE] content_sha256 = hash de v1 + workflow_history_id durable', $ev !== null && (string) $ev->fields['content_sha256'] === $dv1->contentHash() && (int) $ev->fields['workflow_history_id'] > 0);
+        $this->check('[LIVE] content_sha256=v1 + workflow_history_id durable', $ev !== null && (string) $ev->fields['content_sha256'] === $dv1->contentHash() && (int) $ev->fields['workflow_history_id'] > 0);
         $token = $ev !== null ? (string) $ev->fields['verification_token'] : '';
-
-        // Verificación valid.
         $this->applySession($this->uA1, [$this->entityA], ['plugin_companysignature' => ALLSTANDARDRIGHT]);
-        $this->check('[VERIFY] token válido → valid', $sig->verify($token)['status'] === VerificationService::STATUS_VALID);
+        $this->check('[VERIFY] valid', $sig->verify($token)['status'] === VerificationService::STATUS_VALID);
 
-        // PDF como Document nativo + idempotencia.
+        // PDF concurrency-safe + idempotente.
         $docsBefore = $this->countDocuments($c);
         $dv1 = $sig->composePdf((int) $dv1->getID());
-        $this->check('[PDF] pdf_status=ready + Document nativo + pdf_sha256', (string) $dv1->fields['pdf_status'] === DocumentVersion::PDF_READY && (int) $dv1->fields['documents_id'] > 0 && strlen((string) $dv1->fields['pdf_sha256']) === 64);
+        $this->check('[PDF] ready + Document nativo + pdf_sha256', (string) $dv1->fields['pdf_status'] === DocumentVersion::PDF_READY && (int) $dv1->fields['documents_id'] > 0 && strlen((string) $dv1->fields['pdf_sha256']) === 64);
         $docId = (int) $dv1->fields['documents_id'];
         $sig->composePdf((int) $dv1->getID());
-        $this->check('[PDF] regeneración idempotente (no duplica Document)', $this->countDocuments($c) === $docsBefore + 1);
+        $this->check('[PDF] idempotente (no duplica Document)', $this->countDocuments($c) === $docsBefore + 1);
 
-        // CRASH-RECOVERY (§7): simular caída ANTES de markPdfReady → Document existe (marcador) pero
-        // nuestra tabla quedó documents_id=0/pending. El reintento DEBE relinkear el mismo Document.
+        // Crash-recovery: reset a pending (Document existe por marcador) → reintento relinkea.
         /** @var \DBmysql $DB */
         global $DB;
         $DB->update(DocumentVersion::getTable(), ['documents_id' => 0, 'pdf_status' => DocumentVersion::PDF_PENDING], ['id' => (int) $dv1->getID()]);
-        $docsMid = $this->countDocumentsRaw($c);
+        $rawBefore = $this->countDocumentsRaw($c);
         $dv1 = $sig->composePdf((int) $dv1->getID());
-        $this->check('[PDF] crash-recovery: reutiliza el MISMO Document (sin duplicar)', (int) $dv1->fields['documents_id'] === $docId && $this->countDocumentsRaw($c) === $docsMid);
-        $this->check('[PDF] crash-recovery: vuelve a ready', (string) $dv1->fields['pdf_status'] === DocumentVersion::PDF_READY);
+        $this->check('[PDF] crash-recovery: MISMO Document (sin duplicar)', (int) $dv1->fields['documents_id'] === $docId && $this->countDocumentsRaw($c) === $rawBefore && (string) $dv1->fields['pdf_status'] === DocumentVersion::PDF_READY);
+
+        // Document_Item ausente → reintento relinkea sin duplicar Document.
+        $DB->delete(Document_Item::getTable(), ['documents_id' => $docId, 'itemtype' => 'Computer', 'items_id' => $c]);
+        $DB->update(DocumentVersion::getTable(), ['documents_id' => 0, 'pdf_status' => DocumentVersion::PDF_PENDING], ['id' => (int) $dv1->getID()]);
+        $dv1 = $sig->composePdf((int) $dv1->getID());
+        $this->check('[PDF] Document_Item ausente → relink sin duplicar', (int) $dv1->fields['documents_id'] === $docId && $this->countDocumentsRaw($c) === $rawBefore && $this->countDocuments($c) === 1);
     }
 
-    // ------------------------------------------------------------------ [NO-SNAPSHOT] fail-closed §2
+    // ------------------------------------------------------------------ [EVENT-DATE] §1
 
-    private function scenarioNoSnapshotFailClosed(): void
+    private function scenarioEventDateDurable(): void
     {
-        $this->out->writeln('== [NO-SNAPSHOT] aprobación sin versión → NO evidencia válida (fail-closed §2) ==');
+        $this->out->writeln('== [EVENT-DATE] event_date=ledger vs materialized_at (§1) ==');
+        $this->setListen(false); // listener perdido: sólo reconcile materializa (en T2)
+        $api = new WorkflowApi();
+        $sig = new SignatureApi();
+        $c = $this->makeComputer();
+        $def = $this->defSingle($api, 'sig_evd_' . $this->suffix);
+        $inst = $this->startSubmit($api, $def, $c);
+        $dv1 = $this->recordVersion($sig, $c, 1, 'D');
+        $this->approve($api, $inst, $this->uA1, $dv1, 'T1'); // decisión en T1 (reloj del ledger)
+        $ledgerDate = $this->latestLedgerDate((int) $inst->getID(), WfHistoryEvent::EVENT_DECISION_RECORDED);
+        $this->check('[EVENT-DATE] con listener perdido → 0 evidencias aún', $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 0);
+
+        $this->reconcile(); // materializa en T2 (ahora)
+        $ev = $this->latestEvidence($c, ApprovalEvidence::DECISION_APPROVED);
+        $this->check('[EVENT-DATE] materializada tras reconcile', $ev !== null);
+        $this->check('[EVENT-DATE] event_date == fecha ORIGINAL del ledger (T1)', $ev !== null && $ledgerDate !== '' && (string) $ev->fields['event_date'] === $ledgerDate);
+        $this->check('[EVENT-DATE] materialized_at != event_date (T2 != T1)', $ev !== null && (string) $ev->fields['materialized_at'] !== '' && (string) $ev->fields['materialized_at'] !== (string) $ev->fields['event_date']);
+        $this->check('[EVENT-DATE] date_creation >= event_date', $ev !== null && (string) $ev->fields['date_creation'] >= (string) $ev->fields['event_date']);
+    }
+
+    // ------------------------------------------------------------------ [EVIDENCE-REF] §2
+
+    private function scenarioExplicitRefSameSecond(): void
+    {
+        $this->out->writeln('== [EVIDENCE-REF] v1/v2 mismo segundo; decisión referencia v1 (§2) ==');
+        $this->setListen(true);
+        $api = new WorkflowApi();
+        $sig = new SignatureApi();
+        $c = $this->makeComputer();
+        $def = $this->defSingle($api, 'sig_ref_' . $this->suffix);
+        $inst = $this->startSubmit($api, $def, $c);
+
+        // v1 y v2 creadas en el MISMO segundo (misma sesión → mismo reloj → misma date_creation).
+        $this->applySession($this->uReq, [$this->entityA], ['plugin_companysignature' => ALLSTANDARDRIGHT]);
+        $dv1 = $sig->recordDocumentVersion($this->snap($c, 1, 'v1'), true);
+        $dv2 = $sig->recordDocumentVersion($this->snap($c, 2, 'v2'), true);
+        $this->check('[EVIDENCE-REF] v1 y v2 con la MISMA date_creation (mismo segundo)', (string) $dv1->fields['date_creation'] === (string) $dv2->fields['date_creation'] && $dv1->contentHash() !== $dv2->contentHash());
+
+        // La decisión referencia EXPLÍCITAMENTE v1.
+        $this->approve($api, $inst, $this->uA1, $dv1, 'ref v1');
+        $this->reconcile();
+        $ev = $this->latestEvidence($c, ApprovalEvidence::DECISION_APPROVED);
+        $this->check('[EVIDENCE-REF] materializa v1 (nunca v2) pese al empate de fecha', $ev !== null && (int) $ev->fields['document_version'] === 1 && (string) $ev->fields['content_sha256'] === $dv1->contentHash());
+        $this->check('[EVIDENCE-REF] NO usó v2', $ev !== null && (int) $ev->fields['document_versions_id'] === (int) $dv1->getID());
+    }
+
+    // ------------------------------------------------------------------ [FAIL-CLOSED]
+
+    private function scenarioFailClosed(): void
+    {
+        $this->out->writeln('== [FAIL-CLOSED] sin evidence_ref → pending; verify fail-closed ==');
         $this->setListen(true);
         $api = new WorkflowApi();
         $c = $this->makeComputer();
-        $def = $this->defSingle($api, 'sig_nosnap_' . $this->suffix);
-
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => READ]);
-        $inst = $api->startInstance($def, 'Computer', $c, $this->entityA, 0);
-        $api->transition($inst, 'submit', []);
-        // NO registramos versión documental.
-        $this->applySession($this->uA1, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
-        $api->transition($inst, 'approve', ['comment' => 'sin snapshot']);
-        $this->check('[NO-SNAPSHOT] approve sin versión → 0 evidencias (pendiente)', $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 0);
-        // Reconciliar tampoco crea evidencia mientras no exista snapshot.
+        $def = $this->defSingle($api, 'sig_fc_' . $this->suffix);
+        $inst = $this->startSubmit($api, $def, $c);
+        // approve SIN evidence_ref (y sin versión) → nunca evidencia válida.
+        $this->approve($api, $inst, $this->uA1, null, 'sin ref');
         $this->reconcile();
-        $this->check('[NO-SNAPSHOT] reconcile sin versión → sigue 0 (nunca versión 0/hash vacío)', $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 0);
+        $this->check('[FAIL-CLOSED] approve sin evidence_ref → 0 evidencias', $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 0);
 
-        // VerificationService fail-closed ante evidencia sin versión: nunca 'valid'.
+        // VerificationService fail-closed ante evidencia sin versión.
         $ev = (new EvidenceRecorder())->record([
-            'idempotency_key' => 'nosnap-' . $this->suffix, 'subject_itemtype' => 'Computer', 'subject_items_id' => $c,
+            'idempotency_key' => 'fc-' . $this->suffix, 'subject_itemtype' => 'Computer', 'subject_items_id' => $c,
             'entities_id' => $this->entityA, 'document_versions_id' => 0, 'document_version' => 0, 'content_sha256' => '',
             'actor_users_id' => $this->uA1, 'decision' => ApprovalEvidence::DECISION_APPROVED, 'event_type' => ApprovalEvidence::EVENT_DECISION,
+            'event_date' => date('Y-m-d H:i:s', $this->clock),
         ]);
         $this->applySession($this->uA1, [$this->entityA], ['plugin_companysignature' => ALLSTANDARDRIGHT]);
         $res = $ev !== null ? (new SignatureApi())->verify((string) $ev->fields['verification_token']) : ['status' => 'x'];
-        $this->check('[NO-SNAPSHOT] verify de evidencia sin versión → NUNCA valid (tampered)', $res['status'] === VerificationService::STATUS_TAMPERED);
+        $this->check('[FAIL-CLOSED] verify sin versión → NUNCA valid (tampered)', $res['status'] === VerificationService::STATUS_TAMPERED);
     }
 
-    // ------------------------------------------------------------------ [QUORUM] 3/3 → 3 approved + 1 transición §4
+    // ------------------------------------------------------------------ [QUORUM] §4/§5
 
-    private function scenarioQuorumThree(): void
+    private function scenarioQuorumAndContext(): void
     {
-        $this->out->writeln('== [QUORUM] 3/3 → tres evidencias APPROVED + una transición ==');
+        $this->out->writeln('== [QUORUM] 3/3 → 3 APPROVED + 1 transición + contexto histórico ==');
         $this->setListen(true);
         $api = new WorkflowApi();
         $sig = new SignatureApi();
         $c = $this->makeComputer();
-        $def = $this->defQuorum($api, 'sig_q3_' . $this->suffix);
-
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => READ]);
-        $inst = $api->startInstance($def, 'Computer', $c, $this->entityA, 0);
-        $api->transition($inst, 'submit', []);
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companysignature' => ALLSTANDARDRIGHT]);
-        $sig->recordDocumentVersion($this->snap($c, 1, 'Q'), true);
-
+        $def = $this->defQuorum($api, 'sig_q3_' . $this->suffix, $this->g3, 3);
+        $inst = $this->startSubmit($api, $def, $c);
+        $dv1 = $this->recordVersion($sig, $c, 1, 'Q');
         foreach ([$this->uA1, $this->uA2, $this->uA3] as $u) {
-            $this->applySession($u, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
-            $api->transition($inst, 'approve', ['comment' => 'ok ' . $u]);
+            $this->approve($api, $inst, $u, $dv1, 'ok ' . $u);
         }
-        $this->reconcile(); // materialización durable idempotente (independiente del entorno de hooks)
-        $inst->getFromDB((int) $inst->getID());
-        $this->check('[QUORUM] alcanzó DONE (cerrada)', $this->stateCodeOf($inst) === 'DONE');
-        $this->check('[QUORUM] TRES evidencias APPROVED individuales', $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 3);
-        $this->check('[QUORUM] UNA sola evidencia de transición', $this->countEvidence($c, ApprovalEvidence::EVENT_TRANSITION, null) === 1);
-        $this->check('[QUORUM] tres aprobadores DISTINTOS', count($this->distinctActors($c, ApprovalEvidence::DECISION_APPROVED)) === 3);
+        $this->reconcile();
+        $this->check('[QUORUM] TRES evidencias APPROVED', $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 3);
+        $this->check('[QUORUM] UNA transición', $this->countEvidence($c, ApprovalEvidence::EVENT_TRANSITION, null) === 1);
+        $this->check('[QUORUM] tres aprobadores distintos', count($this->distinctActors($c)) === 3);
+        $ev = $this->latestEvidence($c, ApprovalEvidence::DECISION_APPROVED);
+        $ctx = $ev !== null ? json_decode((string) ($ev->fields['actor_context'] ?? ''), true) : null;
+        $this->check('[QUORUM] contexto histórico (approver_kind=group, approver_ref=g3, statedefs_id)', is_array($ctx) && ($ctx['approver_kind'] ?? '') === Step::APPROVER_GROUP && (int) ($ctx['approver_ref'] ?? 0) === $this->g3 && (int) ($ctx['statedefs_id'] ?? 0) > 0);
     }
 
-    // ------------------------------------------------------------------ [RECONCILE] listener perdido §1
+    // ------------------------------------------------------------------ [DELEGATION] §5
 
-    private function scenarioReconcile(): void
+    private function scenarioDelegationContext(): void
     {
-        $this->out->writeln('== [RECONCILE] listener perdido → reconcile materializa una sola vez ==');
-        $api = new WorkflowApi();
-        $sig = new SignatureApi();
-        $c = $this->makeComputer();
-        $def = $this->defSingle($api, 'sig_rec_' . $this->suffix);
-
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => READ]);
-        $inst = $api->startInstance($def, 'Computer', $c, $this->entityA, 0);
-        $api->transition($inst, 'submit', []);
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companysignature' => ALLSTANDARDRIGHT]);
-        $sig->recordDocumentVersion($this->snap($c, 1, 'R'), true);
-
-        // LISTENER PERDIDO: se deshabilita el consumo en vivo (simula caída tras el COMMIT).
-        $this->setListen(false);
-        $this->applySession($this->uA1, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
-        $api->transition($inst, 'approve', ['comment' => 'lost']);
-        $this->check('[RECONCILE] con listener perdido → 0 evidencias', $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 0);
-
-        // RECONCILIAR: materializa lo pendiente exactamente una vez.
-        $this->setListen(true);
-        $this->reconcile();
-        $this->check('[RECONCILE] tras reconcile → 1 APPROVED', $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 1);
-        $this->check('[RECONCILE] tras reconcile → 1 transición', $this->countEvidence($c, ApprovalEvidence::EVENT_TRANSITION, null) === 1);
-        // IDEMPOTENTE: reejecutar no duplica.
-        $this->reconcile();
-        $this->check('[RECONCILE] idempotente (2ª pasada no duplica)', $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 1 && $this->countEvidence($c, ApprovalEvidence::EVENT_TRANSITION, null) === 1);
-    }
-
-    // ------------------------------------------------------------------ [INVALIDATE] exacta §5
-
-    private function scenarioInvalidationExact(): void
-    {
-        $this->out->writeln('== [INVALIDATE] exacta por instancia/aprobación (§5) ==');
+        $this->out->writeln('== [DELEGATION] delegated_from histórico conservado (§5) ==');
         $this->setListen(true);
         $api = new WorkflowApi();
         $sig = new SignatureApi();
-
-        // --- (A) mismo sujeto, otra instancia sigue valid ---
         $c = $this->makeComputer();
-        $def = $this->defSingle($api, 'sig_invA_' . $this->suffix);
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => READ]);
-        $inst = $api->startInstance($def, 'Computer', $c, $this->entityA, 0);
-        $api->transition($inst, 'submit', []);
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companysignature' => ALLSTANDARDRIGHT]);
-        $dvA = $sig->recordDocumentVersion($this->snap($c, 1, 'A'), true);
-        $this->applySession($this->uA1, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
-        $api->transition($inst, 'approve', ['comment' => 'A']);
+        // Quórum 1 sobre gDel (contiene uA1); uDel es delegado de uA1.
+        $def = $this->defQuorum($api, 'sig_del_' . $this->suffix, $this->gDel, 1);
+        $inst = $this->startSubmit($api, $def, $c);
+        $dv1 = $this->recordVersion($sig, $c, 1, 'DEL');
+        $this->approve($api, $inst, $this->uDel, $dv1, 'ok delegado'); // uDel aprueba como delegado de uA1
+        $this->reconcile();
+        $ev = $this->latestEvidence($c, ApprovalEvidence::DECISION_APPROVED);
+        $ctx = $ev !== null ? json_decode((string) ($ev->fields['actor_context'] ?? ''), true) : null;
+        $this->check('[DELEGATION] evidencia del delegado (actor=uDel)', $ev !== null && (int) $ev->fields['actor_users_id'] === $this->uDel);
+        $this->check('[DELEGATION] delegated_from == uA1 (histórico)', is_array($ctx) && (int) ($ctx['delegated_from'] ?? 0) === $this->uA1);
+
+        // Cambiar la membresía del grupo NO altera el contexto ya registrado.
+        /** @var \DBmysql $DB */
+        global $DB;
+        $DB->delete(Group_User::getTable(), ['groups_id' => $this->gDel, 'users_id' => $this->uA1]);
+        $ev2 = new ApprovalEvidence();
+        $ev2->getFromDB((int) $ev->getID());
+        $ctx2 = json_decode((string) ($ev2->fields['actor_context'] ?? ''), true);
+        $this->check('[DELEGATION] tras cambiar el grupo, el contexto histórico se conserva', is_array($ctx2) && (int) ($ctx2['delegated_from'] ?? 0) === $this->uA1 && (int) ($ctx2['approver_ref'] ?? 0) === $this->gDel);
+    }
+
+    // ------------------------------------------------------------------ [QUEUE] §3
+
+    private function scenarioQueueDurable(): void
+    {
+        $this->out->writeln('== [QUEUE] cola durable: pendiente no bloquea; idempotente; restart ==');
+        $this->setListen(false); // sólo la cola/reconcile materializa
+        $api = new WorkflowApi();
+        $sig = new SignatureApi();
+
+        // Sujeto A: approve SIN evidence_ref → quedará pending.
+        $cA = $this->makeComputer();
+        $instA = $this->startSubmit($api, $this->defSingle($api, 'sig_qA_' . $this->suffix), $cA);
+        $this->approve($api, $instA, $this->uA1, null, 'pending A');
+        $hidA = $this->latestLedgerId((int) $instA->getID(), WfHistoryEvent::EVENT_DECISION_RECORDED);
+
+        // Sujeto B: approve CON evidence_ref → materializable.
+        $cB = $this->makeComputer();
+        $instB = $this->startSubmit($api, $this->defSingle($api, 'sig_qB_' . $this->suffix), $cB);
+        $dvB = $this->recordVersion($sig, $cB, 1, 'B');
+        $this->approve($api, $instB, $this->uA1, $dvB, 'ok B');
+
+        $this->reconcile();
+        $this->check('[QUEUE] pendiente (A) NO bloquea al posterior (B materializa)', $this->countEvidence($cB, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 1);
+        $this->check('[QUEUE] A sigue en 0 (pending, sin evidencia válida)', $this->countEvidence($cA, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 0);
+        $this->check('[QUEUE] fila de A en estado pending', $this->queueStatus($hidA) === ReconcileTask::STATUS_PENDING);
+        $hidB = $this->latestLedgerId((int) $instB->getID(), WfHistoryEvent::EVENT_DECISION_RECORDED);
+        $this->check('[QUEUE] fila de B en estado done', $this->queueStatus($hidB) === ReconcileTask::STATUS_DONE);
+
+        // Idempotente + "restart": una nueva ReconcileService (estado en BD) no duplica ni pierde.
+        (new ReconcileService())->run();
+        (new ReconcileService())->run();
+        $this->check('[QUEUE] idempotente/restart: B sigue 1 evidencia', $this->countEvidence($cB, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 1);
+        $this->check('[QUEUE] idempotente/restart: A sigue pending (no perdido)', $this->countEvidence($cA, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === 0 && $this->queueStatus($hidA) === ReconcileTask::STATUS_PENDING);
+    }
+
+    // ------------------------------------------------------------------ [INVALIDATE] §4/§5
+
+    private function scenarioInvalidation(): void
+    {
+        $this->out->writeln('== [INVALIDATE] idempotency obligatoria + actor durable + exacta ==');
+        $this->setListen(false); // reconstrucción por reconcile (listener perdido)
+        $api = new WorkflowApi();
+        $sig = new SignatureApi();
+
+        // (A) idempotency_key obligatoria: sin clave → NO muta.
+        $c = $this->makeComputer();
+        $inst = $this->startSubmit($api, $this->defSingle($api, 'sig_invA_' . $this->suffix), $c);
+        $dv1 = $this->recordVersion($sig, $c, 1, 'A');
+        $this->approve($api, $inst, $this->uA1, $dv1, 'A');
         $this->reconcile();
         $e1 = $this->latestEvidence($c, ApprovalEvidence::DECISION_APPROVED);
-        // Aprobación de "otra instancia" (mismo sujeto) fabricada con workflow_instances_id distinto.
-        $otherInstanceId = (int) $inst->getID() + 777001;
-        $e2 = (new EvidenceRecorder())->record([
-            'idempotency_key' => 'invB-' . $this->suffix, 'subject_itemtype' => 'Computer', 'subject_items_id' => $c,
-            'entities_id' => $this->entityA, 'workflow_instances_id' => $otherInstanceId,
-            'document_versions_id' => (int) $dvA->getID(), 'document_version' => 1, 'content_sha256' => $dvA->contentHash(),
-            'actor_users_id' => $this->uA2, 'decision' => ApprovalEvidence::DECISION_APPROVED, 'event_type' => ApprovalEvidence::EVENT_DECISION,
-        ]);
-        // Invalidar SOLO la instancia real (RIGHT_ACT).
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT, 'plugin_companysignature' => ALLSTANDARDRIGHT]);
-        $api->invalidateApprovals((int) $inst->getID(), 'contenido cambió', ['idempotency_key' => 'kinvA-' . $this->suffix, 'document_version' => 1]);
-        $this->reconcile();
-        $tokenE1 = $e1 !== null ? (string) $e1->fields['verification_token'] : '';
-        $tokenE2 = $e2 !== null ? (string) $e2->fields['verification_token'] : '';
-        $this->check('[INVALIDATE] aprobación de la instancia invalidada → invalidated', $sig->verify($tokenE1)['status'] === VerificationService::STATUS_INVALIDATED);
-        $this->check('[INVALIDATE] 🔒 aprobación de OTRA instancia (mismo sujeto) → sigue valid', $sig->verify($tokenE2)['status'] === VerificationService::STATUS_VALID);
-        $this->check('[INVALIDATE] evidencia previa CONSERVADA (append-only, no borrada)', $e1 !== null && (new ApprovalEvidence())->getFromDB((int) $e1->getID()));
+        $inst->getFromDB((int) $inst->getID());
+        $stateBefore = (int) $inst->fields['current_statedefs_id'];
+        $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $rNoKey = $api->invalidateApprovals((int) $inst->getID(), 'sin clave', []); // sin idempotency_key
+        $inst->getFromDB((int) $inst->getID());
+        $this->check('[INVALIDATE] sin idempotency_key → ERROR y SIN mutación', !$rNoKey->success && (int) $inst->fields['current_statedefs_id'] === $stateBefore);
 
-        // --- (B) v1 aprobada → invalidada → v2 aprobada → v1 invalidated / v2 valid ---
-        $c2 = $this->makeComputer();
-        $def2 = $this->defSingle($api, 'sig_invB_' . $this->suffix);
+        // (B) actor DURABLE: invalidar (actor=uReq) con listener perdido → reconcile reconstruye actor.
+        $rOk = $api->invalidateApprovals((int) $inst->getID(), 'cambio', ['idempotency_key' => 'kA-' . $this->suffix, 'document_version' => 1]);
+        $this->check('[INVALIDATE] con clave → OK', $rOk->success);
+        // misma clave dos veces → una sola invalidación (idempotente en el motor).
+        $api->invalidateApprovals((int) $inst->getID(), 'cambio', ['idempotency_key' => 'kA-' . $this->suffix, 'document_version' => 1]);
+        $this->reconcile();
+        $inv = $this->latestEvidence2($c, ApprovalEvidence::EVENT_INVALIDATION);
+        $this->check('[INVALIDATE] evidencia de invalidación materializada', $inv !== null && (int) $inv->fields['references_evidences_id'] === (int) ($e1?->getID() ?? -1));
+        $this->check('[INVALIDATE] actor DURABLE reconstruido (uReq) aunque el listener no corrió', $inv !== null && (int) $inv->fields['actor_users_id'] === $this->uReq);
+        $this->check('[INVALIDATE] e1 → invalidated', $e1 !== null && $this->verifyAs($this->uReq, $this->entityA, (string) $e1->fields['verification_token']) === VerificationService::STATUS_INVALIDATED);
+
+        // (C) exacta v1→v2: nueva versión + reaprobar → v1 invalidated / v2 valid.
+        $dv2 = $this->recordVersion($sig, $c, 2, 'v2');
+        $inst->getFromDB((int) $inst->getID());
         $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => READ]);
-        $inst2 = $api->startInstance($def2, 'Computer', $c2, $this->entityA, 0);
-        $api->transition($inst2, 'submit', []);
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companysignature' => ALLSTANDARDRIGHT]);
-        $sig->recordDocumentVersion($this->snap($c2, 1, 'v1'), true);
-        $this->applySession($this->uA1, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
-        $api->transition($inst2, 'approve', ['comment' => 'v1']);
+        $api->transition($inst, 'submit', []);
+        $this->approve($api, $inst, $this->uA1, $dv2, 'v2');
         $this->reconcile();
-        $eV1 = $this->latestEvidence($c2, ApprovalEvidence::DECISION_APPROVED);
-
-        // Invalidar v1 (reabre a DRAFT).
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT, 'plugin_companysignature' => ALLSTANDARDRIGHT]);
-        $api->invalidateApprovals((int) $inst2->getID(), 'cambio sustantivo', ['idempotency_key' => 'kinvB-' . $this->suffix, 'document_version' => 1]);
-        $this->reconcile();
-        // Nueva versión v2 + reenviar + aprobar.
-        $sig->recordDocumentVersion($this->snap($c2, 2, 'v2-cambiada'), true);
-        $inst2->getFromDB((int) $inst2->getID());
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => READ]);
-        $api->transition($inst2, 'submit', []);
-        $this->applySession($this->uA1, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
-        $api->transition($inst2, 'approve', ['comment' => 'v2']);
-        $this->reconcile();
-        $eV2 = $this->latestEvidence($c2, ApprovalEvidence::DECISION_APPROVED);
-
-        $this->applySession($this->uReq, [$this->entityA], ['plugin_companysignature' => ALLSTANDARDRIGHT]);
-        $this->check('[INVALIDATE] v1 → invalidated', $eV1 !== null && $sig->verify((string) $eV1->fields['verification_token'])['status'] === VerificationService::STATUS_INVALIDATED);
-        $this->check('[INVALIDATE] v2 → valid', $eV2 !== null && (int) $eV2->getID() !== (int) ($eV1?->getID() ?? 0) && $sig->verify((string) $eV2->fields['verification_token'])['status'] === VerificationService::STATUS_VALID);
+        $eV2 = $this->latestEvidence($c, ApprovalEvidence::DECISION_APPROVED);
+        $this->check('[INVALIDATE] v2 valid; v1 invalidated (exacta)', $eV2 !== null && (int) $eV2->getID() !== (int) ($e1?->getID() ?? 0)
+            && $this->verifyAs($this->uReq, $this->entityA, (string) $eV2->fields['verification_token']) === VerificationService::STATUS_VALID
+            && $this->verifyAs($this->uReq, $this->entityA, (string) $e1->fields['verification_token']) === VerificationService::STATUS_INVALIDATED);
     }
 
     // ------------------------------------------------------------------ helpers
 
-    private function reconcile(): int
+    private function reconcile(): void
     {
-        $api = new WorkflowApi();
-        $rows = $api->history([
-            'events'   => [Materializer::WF_DECISION_RECORDED, Materializer::WF_TRANSITIONED, Materializer::WF_APPROVAL_INVALIDATED],
-            'since_id' => $this->baseHistoryId,
-        ]);
-        $mat = new Materializer();
-        $n = 0;
-        foreach ($rows as $row) {
-            $n += $mat->materializeRow($row);
-        }
-        return $n;
+        (new ReconcileService())->run();
     }
 
-    private function maxHistoryId(): int
+    /** Verifica un token bajo una sesión concreta (login + ACL + entidad) y devuelve el estado. */
+    private function verifyAs(int $user, int $entity, string $token): string
     {
-        /** @var \DBmysql $DB */
-        global $DB;
-        $m = 0;
-        foreach ($DB->request(['SELECT' => 'id', 'FROM' => WfHistoryEvent::getTable(), 'ORDER' => 'id DESC', 'LIMIT' => 1]) as $row) {
-            $m = (int) ($row['id'] ?? 0);
-        }
-        return $m;
+        $this->applySession($user, [$entity], ['plugin_companysignature' => ALLSTANDARDRIGHT]);
+        return (string) ((new SignatureApi())->verify($token)['status'] ?? '');
     }
 
     private function setListen(bool $on): void
@@ -549,12 +614,12 @@ final class SelftestCommand extends Command
     }
 
     /** @return array<int,int> */
-    private function distinctActors(int $subjectId, string $decision): array
+    private function distinctActors(int $subjectId): array
     {
         /** @var \DBmysql $DB */
         global $DB;
         $seen = [];
-        foreach ($DB->request(['SELECT' => 'actor_users_id', 'FROM' => ApprovalEvidence::getTable(), 'WHERE' => ['subject_itemtype' => 'Computer', 'subject_items_id' => $subjectId, 'event_type' => ApprovalEvidence::EVENT_DECISION, 'decision' => $decision]]) as $row) {
+        foreach ($DB->request(['SELECT' => 'actor_users_id', 'FROM' => ApprovalEvidence::getTable(), 'WHERE' => ['subject_itemtype' => 'Computer', 'subject_items_id' => $subjectId, 'event_type' => ApprovalEvidence::EVENT_DECISION, 'decision' => ApprovalEvidence::DECISION_APPROVED]]) as $row) {
             $seen[(int) $row['actor_users_id']] = true;
         }
         return array_keys($seen);
@@ -562,9 +627,20 @@ final class SelftestCommand extends Command
 
     private function latestEvidence(int $subjectId, string $decision): ?ApprovalEvidence
     {
+        return $this->latestBy(['subject_itemtype' => 'Computer', 'subject_items_id' => $subjectId, 'decision' => $decision, 'event_type' => ApprovalEvidence::EVENT_DECISION]);
+    }
+
+    private function latestEvidence2(int $subjectId, string $eventType): ?ApprovalEvidence
+    {
+        return $this->latestBy(['subject_itemtype' => 'Computer', 'subject_items_id' => $subjectId, 'event_type' => $eventType]);
+    }
+
+    /** @param array<string,mixed> $where */
+    private function latestBy(array $where): ?ApprovalEvidence
+    {
         /** @var \DBmysql $DB */
         global $DB;
-        foreach ($DB->request(['SELECT' => 'id', 'FROM' => ApprovalEvidence::getTable(), 'WHERE' => ['subject_itemtype' => 'Computer', 'subject_items_id' => $subjectId, 'decision' => $decision, 'event_type' => ApprovalEvidence::EVENT_DECISION], 'ORDER' => 'id DESC', 'LIMIT' => 1]) as $row) {
+        foreach ($DB->request(['SELECT' => 'id', 'FROM' => ApprovalEvidence::getTable(), 'WHERE' => $where, 'ORDER' => 'id DESC', 'LIMIT' => 1]) as $row) {
             $m = new ApprovalEvidence();
             if ($m->getFromDB((int) $row['id'])) {
                 return $m;
@@ -573,7 +649,6 @@ final class SelftestCommand extends Command
         return null;
     }
 
-    /** Vínculos Document_Item del sujeto (evidencia de no-duplicación de PDF). */
     private function countDocuments(int $subjectId): int
     {
         /** @var \DBmysql $DB */
@@ -585,7 +660,6 @@ final class SelftestCommand extends Command
         return $n;
     }
 
-    /** Documents nativos con nuestro marcador para el sujeto (recuento crudo, para crash-recovery). */
     private function countDocumentsRaw(int $subjectId): int
     {
         /** @var \DBmysql $DB */
@@ -597,10 +671,43 @@ final class SelftestCommand extends Command
         return $n;
     }
 
-    private function stateCodeOf(\CommonDBTM $instance): string
+    private function queueStatus(int $historyId): string
     {
-        $s = new StateDef();
-        return $s->getFromDB((int) $instance->fields['current_statedefs_id']) ? (string) $s->fields['code'] : '';
+        $m = new ReconcileTask();
+        return $m->getFromDBByCrit(['workflow_history_id' => $historyId]) ? (string) $m->fields['status'] : '';
+    }
+
+    private function latestLedgerId(int $instanceId, string $event): int
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $id = 0;
+        foreach ($DB->request(['SELECT' => 'id', 'FROM' => WfHistoryEvent::getTable(), 'WHERE' => ['instances_id' => $instanceId, 'event' => $event], 'ORDER' => 'id DESC', 'LIMIT' => 1]) as $row) {
+            $id = (int) $row['id'];
+        }
+        return $id;
+    }
+
+    private function latestLedgerDate(int $instanceId, string $event): string
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $d = '';
+        foreach ($DB->request(['SELECT' => 'date', 'FROM' => WfHistoryEvent::getTable(), 'WHERE' => ['instances_id' => $instanceId, 'event' => $event], 'ORDER' => 'id DESC', 'LIMIT' => 1]) as $row) {
+            $d = (string) $row['date'];
+        }
+        return $d;
+    }
+
+    private function maxHistoryId(): int
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $m = 0;
+        foreach ($DB->request(['SELECT' => 'id', 'FROM' => WfHistoryEvent::getTable(), 'ORDER' => 'id DESC', 'LIMIT' => 1]) as $row) {
+            $m = (int) ($row['id'] ?? 0);
+        }
+        return $m;
     }
 
     /**
@@ -616,7 +723,7 @@ final class SelftestCommand extends Command
         $_SESSION['glpiactiveentities_string']   = "'" . implode("','", $entities) . "'";
         $_SESSION['glpiactive_entity_recursive'] = $recursive;
         $_SESSION['glpigroups']                  = [];
-        $this->clock += 5; // avance monotónico (5s) → orden causal estricto entre eventos/versiones
+        $this->clock += 5;
         $_SESSION['glpi_currenttime']            = date('Y-m-d H:i:s', $this->clock);
         $_SESSION['glpiactiveprofile']           = array_merge(['id' => 1, 'interface' => 'central', 'entities_id' => $entities[0] ?? 0], $rights);
     }

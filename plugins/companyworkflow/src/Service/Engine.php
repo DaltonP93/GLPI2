@@ -167,7 +167,14 @@ class Engine
             return TransitionResult::fail(TransitionResult::DENIED_ACL, 'Sin derecho (RIGHT_ACT) para invalidar aprobaciones.');
         }
 
+        // La idempotency_key es OBLIGATORIA (§4): sin ella no hay garantía de "exactamente una vez".
+        // Fail-closed ANTES de mutar votos/estado. Formato acotado y no vacío.
         $idemKey = trim((string) ($context['idempotency_key'] ?? ''));
+        if ($idemKey === '' || strlen($idemKey) < 8 || strlen($idemKey) > 190 || preg_match('/^[A-Za-z0-9._:\-]+$/', $idemKey) !== 1) {
+            return TransitionResult::fail(TransitionResult::ERROR, 'idempotency_key obligatoria y con formato válido (8–190, [A-Za-z0-9._:-]).');
+        }
+        // Actor DURABLE de la invalidación: se conserva aunque el listener en vivo nunca corra.
+        $invActor = (int) (Session::getLoginUserID() ?: 0);
         $defId   = (int) $instance->fields['workflowdefs_id'];
 
         // Checkpoint de reapertura: por código configurado, o estado inicial de la definición.
@@ -230,14 +237,22 @@ class Engine
                 return TransitionResult::fail(TransitionResult::CONFLICT_VERSION, 'Invalidación en conflicto (concurrencia/replay).');
             }
 
-            // Auditoría append-only con la idempotency key (habilita el chequeo idempotente).
-            $meta = ['reason' => $reason, 'idempotency_key' => $idemKey];
+            // Auditoría append-only con la idempotency key (habilita el chequeo idempotente) y el
+            // ACTOR + contexto DURABLES (§4): el reconciliador reconstruye la misma invalidación.
+            $meta = [
+                'reason'           => $reason,
+                'idempotency_key'  => $idemKey,
+                'actor'            => $invActor,
+                'reopen_to_code'   => $toCode,
+                'reopen_to_state'  => $reopenStateId,
+            ];
             foreach (['subject_type', 'subject_id', 'document_version'] as $k) {
                 if (isset($context[$k])) {
                     $meta[$k] = is_int($context[$k]) ? (int) $context[$k] : (string) $context[$k];
                 }
             }
-            $invHid = $this->audit->record($instanceId, HistoryEvent::EVENT_APPROVAL_INVALIDATED, $fromCode, $toCode, $reason, true, $meta);
+            // is_system sólo si NO hay usuario autenticado (actor 0); si hay, se conserva el actor.
+            $invHid = $this->audit->record($instanceId, HistoryEvent::EVENT_APPROVAL_INVALIDATED, $fromCode, $toCode, $reason, $invActor === 0, $meta);
 
             $DB->commit();
         } catch (\Throwable $e) {
@@ -357,6 +372,8 @@ class Engine
         $instanceId = (int) $fresh['id'];
         $step       = $stage['step'];
         $approvers  = $stage['approvers'];
+        // Referencia probatoria EXPLÍCITA (opaca para el motor): la aporta el dominio (§2).
+        $evidenceRef = (isset($ctx['evidence_ref']) && is_array($ctx['evidence_ref'])) ? $ctx['evidence_ref'] : null;
 
         $ballotState = $this->recordBallot($instanceId, $fromStateId, $step, $actor, $comment);
         if ($ballotState === 'error') {
@@ -365,19 +382,25 @@ class Engine
         if ($ballotState === 'new') {
             // Decisión DURABLE por aprobador (ledger). Cada voto individual queda registrado con su
             // propio id de historial → evidencia por aprobador (no sólo del que alcanza el quórum).
+            // Se conserva el CONTEXTO HISTÓRICO del aprobador (§5) y la evidence_ref opaca (§2).
             $code = $this->stateCode($fromStateId);
-            $hid = $this->audit->record($instanceId, HistoryEvent::EVENT_DECISION_RECORDED,
-                $code, $code, $comment, false,
-                ['decision' => Assignment::DECISION_APPROVED, 'actor' => $actor, 'statedefs_id' => $fromStateId, 'steps_id' => (int) ($step['id'] ?? 0)]);
+            $actorCtx = $this->approvers->approverContext($step, (int) $fresh['workflowdefs_id'], (int) $fresh['entities_id'], $actor);
+            $meta = [
+                'decision'       => Assignment::DECISION_APPROVED,
+                'actor'          => $actor,
+                'statedefs_id'   => $fromStateId,
+                'steps_id'       => (int) ($step['id'] ?? 0),
+                'approver_kind'  => $actorCtx['approver_kind'],
+                'approver_ref'   => $actorCtx['approver_ref'],
+                'delegated_from' => $actorCtx['delegated_from'],
+            ];
+            if ($evidenceRef !== null) {
+                $meta['evidence_ref'] = $evidenceRef;
+            }
+            $hid = $this->audit->record($instanceId, HistoryEvent::EVENT_DECISION_RECORDED, $code, $code, $comment, false, $meta);
             $this->queueEmit('companyworkflow:decision_recorded', [
                 'instances_id'        => $instanceId,
                 'workflow_history_id' => (int) $hid,
-                'decision'            => Assignment::DECISION_APPROVED,
-                'actor'               => $actor,
-                'statedefs_id'        => $fromStateId,
-                'state'               => $code,
-                'steps_id'            => (int) ($step['id'] ?? 0),
-                'comment'             => $comment,
             ]);
         }
 
@@ -411,7 +434,7 @@ class Engine
         $this->afterQuorumBeforeAdvance();
 
         // Quórum: las decisiones ya se registraron por aprobador (arriba); aquí sólo la transición.
-        return $this->applyStateChange($fresh, $t, $fromStateId, $actor, 'approve', $comment, null);
+        return $this->applyStateChange($fresh, $t, $fromStateId, $actor, 'approve', $comment, null, $evidenceRef);
     }
 
     /**
@@ -426,7 +449,8 @@ class Engine
             'return'  => 'returned',
             default   => null, // cancel u otras: transición sin decisión de evidencia
         };
-        return $this->applyStateChange($fresh, $t, $fromStateId, $actor, $action, $comment, $decision);
+        $evidenceRef = (isset($ctx['evidence_ref']) && is_array($ctx['evidence_ref'])) ? $ctx['evidence_ref'] : null;
+        return $this->applyStateChange($fresh, $t, $fromStateId, $actor, $action, $comment, $decision, $evidenceRef);
     }
 
     /**
@@ -435,8 +459,9 @@ class Engine
      * `$actorDecision` (approved/rejected/returned|null): si no es null, registra ADEMÁS una decisión
      * durable del actor único (caso sin quórum); en quórum es null (las decisiones fueron los votos).
      * @param array<string,mixed> $fresh @param array<string,mixed> $t
+     * @param array<string,mixed>|null $evidenceRef  referencia probatoria opaca aportada por el dominio (§2)
      */
-    private function applyStateChange(array $fresh, array $t, int $fromStateId, int $actor, string $action, string $comment, ?string $actorDecision = null): TransitionResult
+    private function applyStateChange(array $fresh, array $t, int $fromStateId, int $actor, string $action, string $comment, ?string $actorDecision = null, ?array $evidenceRef = null): TransitionResult
     {
         /** @var \DBmysql $DB */
         global $DB;
@@ -477,8 +502,13 @@ class Engine
         }
 
         // Auditoría append-only. El id de la fila TRANSITIONED es la identidad durable de la
-        // transición (ledger para la evidencia de "transición" en companysignature).
-        $transHid = $this->audit->record($instanceId, HistoryEvent::EVENT_TRANSITIONED, $fromCode, $toCode, $comment, false, ['action' => $action]);
+        // transición (ledger para la evidencia de "transición" en companysignature). Lleva la
+        // evidence_ref opaca del dominio (§2) para materializar sin inferir por fecha.
+        $transMeta = ['action' => $action];
+        if ($evidenceRef !== null) {
+            $transMeta['evidence_ref'] = $evidenceRef;
+        }
+        $transHid = $this->audit->record($instanceId, HistoryEvent::EVENT_TRANSITIONED, $fromCode, $toCode, $comment, false, $transMeta);
         if ($action === 'reject') {
             $this->audit->record($instanceId, HistoryEvent::EVENT_REJECTED, $fromCode, $toCode, $comment, false);
         } elseif ($action === 'return') {
@@ -492,17 +522,14 @@ class Engine
 
         // Decisión durable del actor único (sin quórum) → una fila DECISION_RECORDED + evento.
         if ($actorDecision !== null) {
-            $decHid = $this->audit->record($instanceId, HistoryEvent::EVENT_DECISION_RECORDED, $fromCode, $toCode, $comment, false,
-                ['decision' => $actorDecision, 'actor' => $actor, 'statedefs_id' => $fromStateId]);
+            $decMeta = ['decision' => $actorDecision, 'actor' => $actor, 'statedefs_id' => $fromStateId, 'steps_id' => 0];
+            if ($evidenceRef !== null) {
+                $decMeta['evidence_ref'] = $evidenceRef;
+            }
+            $decHid = $this->audit->record($instanceId, HistoryEvent::EVENT_DECISION_RECORDED, $fromCode, $toCode, $comment, false, $decMeta);
             $this->queueEmit('companyworkflow:decision_recorded', [
                 'instances_id'        => $instanceId,
                 'workflow_history_id' => (int) $decHid,
-                'decision'            => $actorDecision,
-                'actor'               => $actor,
-                'statedefs_id'        => $fromStateId,
-                'state'               => $fromCode,
-                'steps_id'            => 0,
-                'comment'             => $comment,
             ]);
         }
 
