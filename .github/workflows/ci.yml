@@ -92,6 +92,9 @@ jobs:
       - name: Regla 0 — core no versionado
         run: bash tests/upgrade/verify-core-untouched.sh
 
+      - name: Regresión — selftests Fase 2 obligatorios (sin guard racy)
+        run: bash tests/ci/verify-selftests-mandatory.sh
+
       - name: Chequeo básico de secretos
         run: bash tests/security/secret-scan.sh
 
@@ -155,23 +158,22 @@ jobs:
         working-directory: infra/docker
         run: |
           set -euo pipefail
-          # Convención: cada plugin Fase 2 expone `plugins:<p>:selftest` (integración + E2E,
-          # fail-closed). Guardado: se omite si el comando no existe en esta rama (evita acoplar
-          # los PRs de companyworkflow y snipeit-si1). Cambio idéntico en ambas ramas.
+          # Los selftests de estos tres plugins son OBLIGATORIOS (integración + E2E, fail-closed).
+          # Se ejecutan DIRECTAMENTE, sin guard de descubrimiento: si un comando no existe, no carga o
+          # devuelve nonzero → CI ROJO. Ya NO se saltan silenciosamente.
+          #
+          # Se eliminó el patrón `bin/console list | grep -q ...` que, bajo `set -o pipefail`, saltaba
+          # aleatoriamente un comando EXISTENTE: `grep -q` cierra el pipe al primer match y
+          # `bin/console list` recibe SIGPIPE (exit 141), que pipefail propaga como fallo del `if`. Eso
+          # producía un FALSO VERDE que jamás ejecutaba estos selftests. Ver tests/ci/verify-selftests-mandatory.sh.
           for p in companyworkflow companyintegrations companysignature; do
-            if docker compose exec -T -u www-data glpi php bin/console list 2>/dev/null | grep -q "plugins:${p}:selftest"; then
-              echo "== selftest ${p} =="
-              docker compose exec -T -u www-data glpi php bin/console "plugins:${p}:selftest"
-            else
-              echo "== ${p}: sin selftest en esta rama (omitido) =="
-            fi
+            echo "== selftest ${p} =="
+            docker compose exec -T -u www-data glpi php bin/console "plugins:${p}:selftest" --no-interaction
           done
-          # Reconciliador durable de companysignature: debe correr limpio e IDEMPOTENTE (no-op)
-          # tras los selftests (recupera evidencia si un listener se pierde). Guardado por existencia.
-          if docker compose exec -T -u www-data glpi php bin/console list 2>/dev/null | grep -q "plugins:companysignature:reconcile"; then
-            echo "== reconcile companysignature (idempotente) =="
-            docker compose exec -T -u www-data glpi php bin/console plugins:companysignature:reconcile
-          fi
+          # Reconciliador durable de companysignature: debe correr limpio e IDEMPOTENTE (no-op) tras los
+          # selftests (recupera evidencia si un listener se pierde). También obligatorio.
+          echo "== reconcile companysignature (idempotente) =="
+          docker compose exec -T -u www-data glpi php bin/console plugins:companysignature:reconcile --no-interaction
 
       - name: Autotest de integración companyqr (ACL multi-entidad, no-fuga, ciclo, etiqueta) — FAIL-CLOSED
         working-directory: infra/docker

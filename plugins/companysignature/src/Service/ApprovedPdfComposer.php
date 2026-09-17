@@ -28,6 +28,13 @@ use GlpiPlugin\Companysignature\Model\DocumentVersion;
 
 final class ApprovedPdfComposer
 {
+    /**
+     * Última excepción capturada al materializar el PDF (clase + mensaje, SIN secretos). El PDF nunca
+     * bloquea la evidencia, por eso se traga la excepción y se marca `pdf_status=error`; pero el motivo
+     * REAL queda aquí para diagnóstico (p. ej. el selftest lo imprime), en vez de perderse.
+     */
+    public static ?string $lastError = null;
+
     private VersionStore $versions;
     private VerificationQrRenderer $qr;
 
@@ -48,6 +55,7 @@ final class ApprovedPdfComposer
         /** @var \DBmysql $DB */
         global $DB;
 
+        self::$lastError = null;
         $version = new DocumentVersion();
         if ($versionId <= 0 || !$version->getFromDB($versionId)) {
             throw new \InvalidArgumentException('versión documental inexistente');
@@ -85,7 +93,9 @@ final class ApprovedPdfComposer
                 $DB->update($table, ['documents_id' => $docId, 'pdf_sha256' => $pdfSha, 'pdf_status' => DocumentVersion::PDF_READY, 'date_mod' => $now], ['id' => $versionId]);
             }
         } catch (\Throwable $e) {
-            // Nunca compromete la evidencia ya registrada: marca error y permite reintento.
+            // Nunca compromete la evidencia ya registrada: marca error y permite reintento. El motivo
+            // REAL se conserva para diagnóstico (no sólo `pdf_status=error`).
+            self::$lastError = get_class($e) . ': ' . $e->getMessage();
             try {
                 $DB->update($table, ['pdf_status' => DocumentVersion::PDF_ERROR], ['id' => $versionId]);
             } catch (\Throwable) {
