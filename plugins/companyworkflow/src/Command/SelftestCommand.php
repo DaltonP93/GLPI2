@@ -776,8 +776,17 @@ final class SelftestCommand extends Command
 
     private function makeComputerInEntity(int $entityId): int
     {
-        $this->applySession(2, [0, $entityId], ['computer' => ALLSTANDARDRIGHT], 1);
-        return (int) (new Computer())->add(['name' => 'WF-ITEM-' . $this->suffix . '-' . random_int(1000, 9999), 'entities_id' => $entityId]);
+        // Crear el Computer requiere derechos NATIVOS de 'computer'. Este helper NO debe contaminar la
+        // sesión del llamador: varios escenarios evalúan makeComputer() en línea DENTRO de startInstance
+        // (después de applySession), y la transición siguiente (p. ej. submit) correría con la sesión
+        // pisada → DENIED_ACL. Se aísla con snapshot → cambio → restore (helper sin efectos colaterales).
+        $sessionSnapshot = $_SESSION;
+        try {
+            $this->applySession(2, [0, $entityId], ['computer' => ALLSTANDARDRIGHT], 1);
+            return (int) (new Computer())->add(['name' => 'WF-ITEM-' . $this->suffix . '-' . random_int(1000, 9999), 'entities_id' => $entityId]);
+        } finally {
+            $_SESSION = $sessionSnapshot;
+        }
     }
 
     private function stateCodeOf(Instance $instance): string
