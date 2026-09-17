@@ -357,7 +357,8 @@ final class SelftestCommand extends Command
             $this->check('[RETURN] instancia', false);
             return;
         }
-        $api->transition($inst, 'submit', []);
+        $rSubmit = $api->transition($inst, 'submit', []);
+        $this->diagTransition('RETURN-submit', 'submit', (int) $inst->getID(), $this->requester, 'DRAFT', 0, $rSubmit);
         $this->applySession($this->uA1, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
         $approvalsBefore = $this->approvalsCount((int) $inst->getID());
         $rApprove = $api->transition($inst, 'approve', ['comment' => 'ok a1']);
