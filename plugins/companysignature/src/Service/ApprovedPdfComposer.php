@@ -52,17 +52,11 @@ final class ApprovedPdfComposer
      */
     public function compose(int $versionId): DocumentVersion
     {
-        /** @var \DBmysql $DB */
-        global $DB;
-
         self::$lastError = null;
         $version = new DocumentVersion();
         if ($versionId <= 0 || !$version->getFromDB($versionId)) {
             throw new \InvalidArgumentException('versión documental inexistente');
         }
-
-        $table = DocumentVersion::getTable();
-        $now   = $_SESSION['glpi_currenttime'] ?? gmdate('Y-m-d H:i:s');
 
         // CONCURRENCY-SAFE (§6): serializar la materialización del PDF por `document_versions_id` con
         // un LOCK CON NOMBRE de MySQL (GET_LOCK), INDEPENDIENTE de transacciones. No se puede envolver
@@ -87,17 +81,19 @@ final class ApprovedPdfComposer
             $bytes  = $this->renderPdf($version);
             $pdfSha = hash('sha256', $bytes);
             $docId  = $this->storeAsDocument($version, $bytes, $pdfSha); // marker search/relink
+            // Persistir por el MODELO (CommonDBTM): la tabla document_versions NO tiene `date_mod`; los
+            // helpers markPdfReady/markPdfError no lo referencian (evita "Unknown column 'date_mod'").
             if ($docId <= 0) {
-                $DB->update($table, ['pdf_status' => DocumentVersion::PDF_ERROR, 'date_mod' => $now], ['id' => $versionId]);
+                $this->versions->markPdfError($versionId);
             } else {
-                $DB->update($table, ['documents_id' => $docId, 'pdf_sha256' => $pdfSha, 'pdf_status' => DocumentVersion::PDF_READY, 'date_mod' => $now], ['id' => $versionId]);
+                $this->versions->markPdfReady($versionId, $docId, $pdfSha);
             }
         } catch (\Throwable $e) {
             // Nunca compromete la evidencia ya registrada: marca error y permite reintento. El motivo
             // REAL se conserva para diagnóstico (no sólo `pdf_status=error`).
             self::$lastError = get_class($e) . ': ' . $e->getMessage();
             try {
-                $DB->update($table, ['pdf_status' => DocumentVersion::PDF_ERROR], ['id' => $versionId]);
+                $this->versions->markPdfError($versionId);
             } catch (\Throwable) {
                 // best-effort
             }
