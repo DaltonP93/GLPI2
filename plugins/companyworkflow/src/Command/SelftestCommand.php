@@ -814,7 +814,14 @@ final class SelftestCommand extends Command
 
     private function hasHistoryEvent(int $instanceId, string $event): bool
     {
-        return (new HistoryEvent())->getFromDBByCrit(['instances_id' => $instanceId, 'event' => $event]);
+        // Chequeo de EXISTENCIA tolerante a múltiples filas (p. ej. hay 2 `quorum_reached` en el
+        // ciclo feliz L1+L2): getFromDBByCrit lanza excepción si el criterio devuelve >1.
+        /** @var \DBmysql $DB */
+        global $DB;
+        foreach ($DB->request(['COUNT' => 'c', 'FROM' => HistoryEvent::getTable(), 'WHERE' => ['instances_id' => $instanceId, 'event' => $event]]) as $row) {
+            return ((int) $row['c']) > 0;
+        }
+        return false;
     }
 
     /**
