@@ -4,6 +4,26 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
 ## [0.4.0] — Fase 2C (integridad probatoria)
+### Hardening — durabilidad fail-closed (cola de reconciliación + lock del PDF)
+- **Watermark FAIL-CLOSED (§1):** `ReconcileService::harvest()` sólo avanza `last_seen_history_id`
+  sobre eventos **durablemente encolados y contiguos**. Si un evento no queda durable (`add()` falla y
+  tampoco lo insertó otro worker), el watermark se detiene en el último id durable: la próxima corrida
+  reintenta el hueco. Nunca "`history #N add FAIL → watermark pasa por encima`". Nuevo helper puro
+  `safeWatermark()` con prueba unitaria (#100 OK, #101 falla, #102 existe → watermark queda en 100).
+- **Anti-starvation por backoff (§2):** el worker filtra la **elegibilidad en SQL** (`status` +
+  `attempts < MAX` + `next_retry_at <= now`), de modo que N tareas en backoff **no acaparan el batch**
+  ni hambrean a una elegible posterior. Se mantiene el orden causal por `workflow_history_id`.
+- **Estados del Materializer fail-closed (§3):** una dependencia caída **nunca** consume la tarea.
+  `companyworkflow` no disponible → `PENDING` (retry); fila del ledger no legible → `PENDING`;
+  instancia/sujeto **inconsistente** → `ERROR` **visible/auditable** (`last_error` saneado), no éxito
+  silencioso. `DONE` sólo significa evidencia creada, ya existente, o evento sin evidencia por diseño.
+- **PDF lock FAIL-CLOSED (§6):** si no se adquiere `GET_LOCK`, `compose()` **no** crea el `Document`
+  (sin exclusión mutua no se materializa): la evidencia no se toca, el PDF queda **retryable**
+  (`pending`) con diagnóstico saneado (`$lastError`), y el Cron/reintento lo intenta luego. La
+  aprobación nunca se revierte por esto.
+- **Tests:** unit (`safeWatermark`); integración/E2E (starvation 200-en-backoff + 1 elegible;
+  Materializer PENDING/PENDING/ERROR; PDF sin lock → 0 `Document`, retry → exactamente 1, idempotente).
+
 ### Fixed
 - **PDF: persistencia por el MODELO.** Al introducir el lock advisory, `ApprovedPdfComposer::compose()`
   guardaba la versión con un `UPDATE` crudo que incluía `date_mod`, columna **inexistente** en

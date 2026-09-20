@@ -191,4 +191,21 @@ final class VersionStore
             'pdf_status' => DocumentVersion::PDF_ERROR,
         ]);
     }
+
+    /**
+     * Marca el artefacto PDF como PENDIENTE (RETRYABLE). Se usa cuando la materialización se DIFIERE
+     * de forma controlada (p. ej. no se pudo adquirir el lock advisory): la evidencia NO se toca y el
+     * Cron/reintento lo volverá a intentar. NO es un error: es "todavía no, sin exclusión mutua".
+     */
+    public function markPdfPending(int $versionId): bool
+    {
+        $m = new DocumentVersion();
+        if (!$m->getFromDB($versionId)) {
+            return false;
+        }
+        return (bool) $m->update([
+            'id'         => $versionId,
+            'pdf_status' => DocumentVersion::PDF_PENDING,
+        ]);
+    }
 }

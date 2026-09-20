@@ -130,6 +130,23 @@ $sc = new SubstantiveChange();
 ok('hashes iguales → no difiere', $sc->differs('a', 'a') === false);
 ok('hashes distintos → difiere', $sc->differs('a', 'b') === true);
 
+echo "== ReconcileService::safeWatermark (fail-closed §1) ==\n";
+require $svc . 'ReconcileService.php'; // sólo se ejercita el helper PURO (no toca BD/GLPI)
+$sw = 'GlpiPlugin\\Companysignature\\Service\\ReconcileService';
+ok('todo durable → avanza contiguo al último', $sw::safeWatermark(0, [
+    ['hid' => 100, 'durable' => true], ['hid' => 101, 'durable' => true], ['hid' => 102, 'durable' => true],
+]) === 102);
+ok('#100 OK, #101 FALLA, #102 existe → watermark queda en 100', $sw::safeWatermark(0, [
+    ['hid' => 100, 'durable' => true], ['hid' => 101, 'durable' => false], ['hid' => 102, 'durable' => true],
+]) === 100);
+ok('primer evento no durable → no avanza (queda en el actual)', $sw::safeWatermark(50, [
+    ['hid' => 51, 'durable' => false], ['hid' => 52, 'durable' => true],
+]) === 50);
+ok('lista vacía → conserva el watermark', $sw::safeWatermark(7, []) === 7);
+ok('nunca retrocede por debajo del actual', $sw::safeWatermark(500, [
+    ['hid' => 100, 'durable' => true],
+]) === 500);
+
 echo "== NullSigner (puerto certificado, §8) ==\n";
 $ns = new NullSigner();
 $res = $ns->sign('payload');

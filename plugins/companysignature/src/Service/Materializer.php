@@ -29,7 +29,9 @@ namespace GlpiPlugin\Companysignature\Service;
 use GlpiPlugin\Companysignature\Model\ApprovalEvidence;
 use GlpiPlugin\Companysignature\Model\DocumentVersion;
 
-final class Materializer
+// No es `final`: `workflowApi()` es `protected` para permitir un test determinista del camino
+// FAIL-CLOSED cuando la dependencia (companyworkflow) NO está disponible.
+class Materializer
 {
     public const WF_DECISION_RECORDED    = 'decision_recorded';
     public const WF_TRANSITIONED         = 'transitioned';
@@ -63,10 +65,17 @@ final class Materializer
     {
         $api = $this->workflowApi();
         if ($api === null) {
-            return ['created' => 0, 'status' => self::R_DONE];
+            // Dependencia (companyworkflow) NO disponible: es una condición TEMPORAL. NUNCA consumir la
+            // tarea (no DONE): reintentar cuando la dependencia vuelva (fail-closed §3).
+            return ['created' => 0, 'status' => self::R_PENDING, 'reason' => 'companyworkflow no disponible'];
         }
         $row = $api->historyById($historyId);
-        return $row === null ? ['created' => 0, 'status' => self::R_DONE] : $this->materializeRow($row);
+        if ($row === null) {
+            // La fila del ledger no es legible AHORA. El historial es append-only (no debería faltar
+            // permanentemente), así que se trata como transitorio: reintentar, no marcar DONE.
+            return ['created' => 0, 'status' => self::R_PENDING, 'reason' => 'ledger no legible (historyById null)'];
+        }
+        return $this->materializeRow($row);
     }
 
     /**
@@ -79,14 +88,23 @@ final class Materializer
         $historyId  = (int) ($row['id'] ?? 0);
         $event      = (string) ($row['event'] ?? '');
         $instanceId = (int) ($row['instances_id'] ?? 0);
-        if ($historyId <= 0 || $instanceId <= 0) {
-            return ['created' => 0, 'status' => self::R_DONE];
+        if ($historyId <= 0) {
+            return ['created' => 0, 'status' => self::R_DONE]; // fila sin id utilizable: nada que hacer
         }
-        $subject = $this->resolveSubject($instanceId);
-        if ($subject === null) {
-            // instancia/sujeto inexistente: nada que materializar (no bloquear la cola).
-            return ['created' => 0, 'status' => self::R_DONE];
+        if ($instanceId <= 0) {
+            // Fila del ledger sin instancia: INCONSISTENCIA auditable, no éxito silencioso (§3).
+            return ['created' => 0, 'status' => self::R_ERROR, 'reason' => 'ledger sin instances_id'];
         }
+        $subjectRes = $this->resolveSubject($instanceId);
+        if ($subjectRes['status'] === 'pending') {
+            // Dependencia (clase Instance) no cargada: TEMPORAL → reintentar (fail-closed §3).
+            return ['created' => 0, 'status' => self::R_PENDING, 'reason' => 'companyworkflow no disponible'];
+        }
+        if ($subjectRes['status'] === 'error') {
+            // Instancia/sujeto FALTANTE o incoherente: INCONSISTENCIA auditable, NO DONE silencioso (§3).
+            return ['created' => 0, 'status' => self::R_ERROR, 'reason' => 'instancia/sujeto inconsistente'];
+        }
+        $subject   = $subjectRes['subject'];
         $eventDate = (string) ($row['date'] ?? '');
         $meta = $this->decodeMeta($row);
 
@@ -113,7 +131,7 @@ final class Materializer
         }
         $ref = $this->resolveRef($meta, $subject);
         if ($ref['status'] !== 'ok') {
-            return ['created' => 0, 'status' => $ref['status'] === 'error' ? self::R_ERROR : self::R_PENDING];
+            return ['created' => 0, 'status' => $ref['status'] === 'error' ? self::R_ERROR : self::R_PENDING, 'reason' => 'evidence_ref: ' . $ref['reason']];
         }
         /** @var DocumentVersion $version */
         $version = $ref['version'];
@@ -146,7 +164,7 @@ final class Materializer
         }
         $ref = $this->resolveRef($meta, $subject);
         if ($ref['status'] !== 'ok') {
-            return ['created' => 0, 'status' => $ref['status'] === 'error' ? self::R_ERROR : self::R_PENDING];
+            return ['created' => 0, 'status' => $ref['status'] === 'error' ? self::R_ERROR : self::R_PENDING, 'reason' => 'evidence_ref: ' . $ref['reason']];
         }
         /** @var DocumentVersion $version */
         $version = $ref['version'];
@@ -355,34 +373,38 @@ final class Materializer
     }
 
     /**
-     * @return array{itemtype:string, items_id:int, entities_id:int, is_recursive:int}|null
+     * Resuelve el sujeto de la instancia distinguiendo TEMPORAL (dependencia caída → reintentar) de
+     * PERMANENTE (instancia/sujeto faltante o incoherente → error auditable). NUNCA "ok" silencioso
+     * ante inconsistencia.
+     *
+     * @return array{status:string, subject:?array{itemtype:string,items_id:int,entities_id:int,is_recursive:int}}
      */
-    private function resolveSubject(int $instanceId): ?array
+    private function resolveSubject(int $instanceId): array
     {
         $instClass = 'GlpiPlugin\\Companyworkflow\\Model\\Instance';
         if (!class_exists($instClass)) {
-            return null;
+            return ['status' => 'pending', 'subject' => null]; // dependencia caída → reintentar (temporal)
         }
         /** @var \CommonDBTM $inst */
         $inst = new $instClass();
         if (!$inst->getFromDB($instanceId)) {
-            return null;
+            return ['status' => 'error', 'subject' => null]; // instancia faltante → inconsistente/auditable
         }
         $itemtype = (string) ($inst->fields['itemtype'] ?? '');
         $itemsId  = (int) ($inst->fields['items_id'] ?? 0);
         if ($itemtype === '' || $itemsId <= 0) {
-            return null;
+            return ['status' => 'error', 'subject' => null]; // instancia sin sujeto → inconsistente
         }
-        return [
+        return ['status' => 'ok', 'subject' => [
             'itemtype'     => $itemtype,
             'items_id'     => $itemsId,
             'entities_id'  => (int) ($inst->fields['entities_id'] ?? 0),
             'is_recursive' => (int) ($inst->fields['is_recursive'] ?? 0),
-        ];
+        ]];
     }
 
     /** @return object|null instancia de WorkflowApi de companyworkflow, o null si no está disponible */
-    private function workflowApi(): ?object
+    protected function workflowApi(): ?object
     {
         $cls = 'GlpiPlugin\\Companyworkflow\\Api\\WorkflowApi';
         return class_exists($cls) ? new $cls() : null;

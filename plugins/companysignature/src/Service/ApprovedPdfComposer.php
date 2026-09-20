@@ -26,7 +26,9 @@ use TCPDF;
 use GlpiPlugin\Companysignature\Model\ApprovalEvidence;
 use GlpiPlugin\Companysignature\Model\DocumentVersion;
 
-final class ApprovedPdfComposer
+// No es `final`: `acquireLock()` es `protected` para permitir tests deterministas del camino
+// FAIL-CLOSED del lock (simular "lock no adquirido") sin depender de una segunda conexión MySQL.
+class ApprovedPdfComposer
 {
     /**
      * Última excepción capturada al materializar el PDF (clase + mensaje, SIN secretos). El PDF nunca
@@ -67,7 +69,20 @@ final class ApprovedPdfComposer
         // reutiliza el Document ya creado. Se conserva el recovery por marcador (Document creado →
         // caída antes de marcar READY) y el relink idempotente del `Document_Item`.
         $lock = $this->lockName($versionId);
-        $held = $this->acquireLock($lock, 10);
+        if (!$this->acquireLock($lock, 10)) {
+            // FAIL-CLOSED (§6): sin exclusión mutua NO se crea el Document (evita dos `Document` en
+            // carrera). La evidencia ya registrada NO se toca; el PDF queda RETRYABLE (`pending`) y el
+            // Cron/reintento lo volverá a intentar. Se registra el motivo saneado (sin secretos).
+            self::$lastError = 'GET_LOCK no adquirido para document_versions_id=' . $versionId . ' (PDF diferido, retryable)';
+            try {
+                $this->versions->markPdfPending($versionId);
+            } catch (\Throwable) {
+                // best-effort: nunca comprometer la evidencia por el PDF
+            }
+            $version->getFromDB($versionId);
+            return $version;
+        }
+        // A partir de aquí SIEMPRE tenemos el lock: se libera en el `finally`.
         try {
             // Re-lectura BAJO LOCK: otro worker pudo haber materializado ya la versión.
             $version->getFromDB($versionId);
@@ -98,9 +113,7 @@ final class ApprovedPdfComposer
                 // best-effort
             }
         } finally {
-            if ($held) {
-                $this->releaseLock($lock);
-            }
+            $this->releaseLock($lock);
         }
 
         $version->getFromDB($versionId);
@@ -117,11 +130,13 @@ final class ApprovedPdfComposer
     }
 
     /**
-     * Adquiere el lock con nombre (`GET_LOCK`). BEST-EFFORT: si no se obtiene (timeout/error) NO se
-     * bloquea el PDF (el PDF nunca debe bloquear la evidencia); el marcador estable sigue evitando
-     * duplicados. El nombre se compone sólo de caracteres seguros ⇒ literal SQL sin inyección.
+     * Adquiere el lock con nombre (`GET_LOCK`). FAIL-CLOSED: si NO se obtiene (timeout/error) el
+     * llamador NO debe crear el `Document` (para no romper la exclusión mutua) — deja el PDF
+     * `pending` (retryable) y reintenta luego. La aprobación/evidencia nunca se revierte por esto. El
+     * nombre se compone sólo de caracteres seguros ⇒ literal SQL sin inyección. `protected` para poder
+     * simular el fallo de adquisición en tests deterministas.
      */
-    private function acquireLock(string $name, int $timeoutSeconds): bool
+    protected function acquireLock(string $name, int $timeoutSeconds): bool
     {
         /** @var \DBmysql $DB */
         global $DB;

@@ -37,7 +37,9 @@ use GlpiPlugin\Companysignature\Controller\VerifyController;
 use GlpiPlugin\Companysignature\Model\ApprovalEvidence;
 use GlpiPlugin\Companysignature\Model\DocumentVersion;
 use GlpiPlugin\Companysignature\Model\ReconcileTask;
+use GlpiPlugin\Companysignature\Service\ApprovedPdfComposer;
 use GlpiPlugin\Companysignature\Service\EvidenceRecorder;
+use GlpiPlugin\Companysignature\Service\Materializer;
 use GlpiPlugin\Companysignature\Service\PluginConfig;
 use GlpiPlugin\Companysignature\Service\ReconcileService;
 use GlpiPlugin\Companysignature\Service\VerificationService;
@@ -108,6 +110,9 @@ final class SelftestCommand extends Command
         $this->scenarioDelegationContext();
         $this->scenarioQueueDurable();
         $this->scenarioInvalidation();
+        $this->scenarioMaterializerFailClosed();
+        $this->scenarioPdfLockFailClosed();
+        $this->scenarioNoStarvation();
 
         $this->cleanup();
 
@@ -577,6 +582,155 @@ final class SelftestCommand extends Command
         $this->check('[INVALIDATE] v2 valid; v1 invalidated (exacta)', $eV2 !== null && (int) $eV2->getID() !== (int) ($e1?->getID() ?? 0)
             && $this->verifyAs($this->uReq, $this->entityA, (string) $eV2->fields['verification_token']) === VerificationService::STATUS_VALID
             && $this->verifyAs($this->uReq, $this->entityA, (string) $e1->fields['verification_token']) === VerificationService::STATUS_INVALIDATED);
+    }
+
+    // ------------------------------------------------------------------ [MAT-FAILCLOSED] §3
+
+    /** Estados fail-closed del Materializer: una dependencia caída NUNCA consume la tarea. */
+    private function scenarioMaterializerFailClosed(): void
+    {
+        $this->out->writeln('== [MAT-FAILCLOSED] estados del Materializer (§3) ==');
+
+        // (1) companyworkflow NO disponible → PENDING (retryable), jamás DONE.
+        $noApi = new class extends Materializer {
+            protected function workflowApi(): ?object
+            {
+                return null;
+            }
+        };
+        $r1 = $noApi->materializeByHistoryId(1);
+        $this->check('[MAT] companyworkflow no disponible → PENDING (retryable, no DONE)', ($r1['status'] ?? '') === Materializer::R_PENDING);
+
+        // (2) Fila del ledger temporalmente no legible (historyById null) → PENDING, no DONE.
+        $mat = new Materializer();
+        $r2 = $mat->materializeByHistoryId(2000000000); // id inexistente
+        $this->check('[MAT] history no legible → PENDING (no DONE)', ($r2['status'] ?? '') === Materializer::R_PENDING);
+
+        // (3) Instancia/sujeto definitivamente inconsistente → ERROR visible (auditable), no DONE.
+        $r3 = $mat->materializeRow([
+            'id'           => 1,
+            'event'        => Materializer::WF_DECISION_RECORDED,
+            'instances_id' => 999999999, // instancia inexistente
+            'date'         => gmdate('Y-m-d H:i:s'),
+            'meta_json'    => json_encode(['decision' => 'approved']),
+        ]);
+        $this->check('[MAT] instancia/sujeto inconsistente → ERROR visible (no DONE)', ($r3['status'] ?? '') === Materializer::R_ERROR);
+    }
+
+    // ------------------------------------------------------------------ [PDF-LOCK] §6
+
+    /** El advisory lock es FAIL-CLOSED: sin exclusión mutua NO se crea el Document. */
+    private function scenarioPdfLockFailClosed(): void
+    {
+        $this->out->writeln('== [PDF-LOCK] fail-closed: sin lock no se crea Document (§6) ==');
+        $api = new WorkflowApi();
+        $sig = new SignatureApi();
+        $c = $this->makeComputer();
+        $inst = $this->startSubmit($api, $this->defSingle($api, 'sig_lock_' . $this->suffix), $c);
+        if ($inst === null) {
+            $this->check('[PDF-LOCK] instancia', false);
+            return;
+        }
+        $dv = $this->recordVersion($sig, $c, 1, 'L');
+        $this->approve($api, $inst, $this->uA1, $dv, 'ok lock');
+        $this->reconcile();
+        $versionId = (int) $dv->getID();
+
+        // (1) Lock NO adquirido → NO se crea Document; PDF retryable (pending); evidencia intacta.
+        $docsBefore = $this->countDocumentsRaw($c);
+        $evBefore   = $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED);
+        $lockFail = new class extends ApprovedPdfComposer {
+            protected function acquireLock(string $name, int $timeoutSeconds): bool
+            {
+                return false; // simula "lock ocupado" de forma determinista
+            }
+        };
+        $dvAfter = $lockFail->compose($versionId);
+        $this->check('[PDF-LOCK] sin lock → NO se crea Document', $this->countDocumentsRaw($c) === $docsBefore);
+        $this->check('[PDF-LOCK] sin lock → PDF retryable (no ready), documents_id=0', (string) $dvAfter->fields['pdf_status'] !== DocumentVersion::PDF_READY && (int) $dvAfter->fields['documents_id'] === 0);
+        $this->check('[PDF-LOCK] la evidencia NO se ve afectada', $this->countEvidence($c, ApprovalEvidence::EVENT_DECISION, ApprovalEvidence::DECISION_APPROVED) === $evBefore);
+        $this->check('[PDF-LOCK] $lastError saneado registrado (GET_LOCK)', str_contains((string) (ApprovedPdfComposer::$lastError ?? ''), 'GET_LOCK'));
+
+        // (2) Reintento con lock real → crea EXACTAMENTE uno; segundo intento idempotente.
+        $dvOk = $sig->composePdf($versionId);
+        $this->check('[PDF-LOCK] reintento con lock → crea exactamente 1 Document', (string) $dvOk->fields['pdf_status'] === DocumentVersion::PDF_READY && (int) $dvOk->fields['documents_id'] > 0 && $this->countDocumentsRaw($c) === $docsBefore + 1);
+        $sig->composePdf($versionId);
+        $this->check('[PDF-LOCK] idempotente (dos intentos → un solo Document)', $this->countDocumentsRaw($c) === $docsBefore + 1);
+    }
+
+    // ------------------------------------------------------------------ [STARVATION] §2
+
+    /** El worker NO debe dejar que tareas en backoff acaparen el batch y hambreen a una elegible. */
+    private function scenarioNoStarvation(): void
+    {
+        $this->out->writeln('== [STARVATION] backoff no acapara el batch (§2) ==');
+        /** @var \DBmysql $DB */
+        global $DB;
+        $table = ReconcileTask::getTable();
+        // Slate limpio y determinista (la cola es estado de prueba; el reconcile del CI re-cosecha).
+        $DB->doQuery('DELETE FROM `' . $table . '`');
+        $future = gmdate('Y-m-d H:i:s', time() + 3600); // backoff vigente → NO elegible
+        $past   = gmdate('Y-m-d H:i:s', time() - 60);   // backoff vencido → elegible
+
+        // 200 tareas en backoff, con hid MENORES (ordenan primero por workflow_history_id ASC).
+        for ($i = 0; $i < 200; $i++) {
+            (new ReconcileTask())->add([
+                'workflow_history_id' => 900000 + $i,
+                'event'               => Materializer::WF_DECISION_RECORDED,
+                'instances_id'        => 999999,
+                'status'              => ReconcileTask::STATUS_PENDING,
+                'attempts'            => 0,
+                'next_retry_at'       => $future,
+                'date_creation'       => $past,
+                'date_mod'            => $past,
+            ]);
+        }
+        // 1 tarea ELEGIBLE con hid MAYOR (ordena al final): si el backoff acaparara el batch, se hambrearía.
+        $eligibleHid = 900500;
+        (new ReconcileTask())->add([
+            'workflow_history_id' => $eligibleHid,
+            'event'               => Materializer::WF_DECISION_RECORDED,
+            'instances_id'        => 999999,
+            'status'              => ReconcileTask::STATUS_PENDING,
+            'attempts'            => 0,
+            'next_retry_at'       => $past,
+            'date_creation'       => $past,
+            'date_mod'            => $past,
+        ]);
+
+        // batch por defecto (200): la elegibilidad en SQL excluye las 200 en backoff → sólo procesa la
+        // elegible (incrementa sus intentos); las 200 en backoff quedan intactas (attempts=0).
+        (new ReconcileService())->work();
+
+        $this->check('[STARVATION] la tarea elegible (hid mayor) se procesó pese a 200 en backoff', $this->taskAttempts($eligibleHid) >= 1);
+        $this->check('[STARVATION] ninguna tarea en backoff fue procesada (todas attempts=0)', $this->countBackoffProcessed(900000, 900199) === 0);
+
+        // Limpieza: dejar la cola vacía (no perturbar el paso reconcile del CI).
+        $DB->doQuery('DELETE FROM `' . $table . '`');
+    }
+
+    private function taskAttempts(int $historyId): int
+    {
+        $m = new ReconcileTask();
+        return $m->getFromDBByCrit(['workflow_history_id' => $historyId]) ? (int) $m->fields['attempts'] : -1;
+    }
+
+    private function countBackoffProcessed(int $fromHid, int $toHid): int
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        foreach ($DB->request([
+            'COUNT' => 'c',
+            'FROM'  => ReconcileTask::getTable(),
+            'WHERE' => [
+                ['workflow_history_id' => ['>=', $fromHid]],
+                ['workflow_history_id' => ['<=', $toHid]],
+                ['attempts' => ['>', 0]],
+            ],
+        ]) as $row) {
+            return (int) $row['c'];
+        }
+        return 0;
     }
 
     // ------------------------------------------------------------------ helpers
