@@ -1,0 +1,37 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: companysignature 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"Language: en_GB\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Approval evidence"
+msgid_plural "Approval evidences"
+msgstr[0] "Approval evidence"
+msgstr[1] "Approval evidences"
+
+msgid "Approved document version"
+msgid_plural "Approved document versions"
+msgstr[0] "Approved document version"
+msgstr[1] "Approved document versions"
+
+msgid "Record evidence / document version"
+msgstr "Record evidence / document version"
+
+msgid "Verify evidence token"
+msgstr "Verify evidence token"
+
+msgid "Configure plugin"
+msgstr "Configure plugin"
+
+msgid "Approved document — evidence"
+msgstr "Approved document — evidence"
+
+msgid "Document version"
+msgstr "Document version"
+
+msgid "Internal verification (login + ACL):"
+msgstr "Internal verification (login + ACL):"
