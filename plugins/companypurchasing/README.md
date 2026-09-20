@@ -5,7 +5,11 @@ Plugin propio de la **Plataforma GLPI Modular**.
 - **Estrategia (matriz):** Build (apoyado en Forms/Assets nativos)
 - **Propósito:** Solicitudes de compra, cotizaciones versionadas, aprobaciones, recepcion y alta/vinculo de activos GLPI.
 - **GLPI soportado:** `>=11.0` y `<12.0` (el `max=12.0` es límite superior **excluyente**; probado en 11.0.8; GLPI 12 no soportado hasta suite de regresión — ver `../../docs/architecture/glpi-version-compatibility.md`)
-- **Estado:** Fase 0 — esqueleto (sin lógica de negocio)
+- **Estado:** Fase 2D — **gate de decisiones** (sólo documentación; sin lógica de negocio todavía)
+- **Gate native-first (leer antes de implementar):**
+  `../../docs/architecture/companypurchasing-native-first-gate.md` — fija el alcance de v1
+  reconciliado con el código real ya mergeado (`companyworkflow`, `companysignature`,
+  `companyintegrations` SI-1).
 
 ## Regla 0
 Este plugin **no modifica el core de GLPI**. Solo usa hooks/API oficiales.

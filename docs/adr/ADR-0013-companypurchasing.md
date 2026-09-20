@@ -5,6 +5,8 @@
 - **Decisores:** Producto, Compras, finanzas, seguridad, plataforma
 - **Módulo/área:** `plugins/companypurchasing` (Fase 2)
 - **Complementa:** ADR-0006 (workflow de compras), ADR-0012 (motor), ADR-0014 (firma), ADR-0011 (companyqr)
+- **Gate native-first (Fase 2D, decisiones fijadas y reconciliadas con el código real):**
+  `../architecture/companypurchasing-native-first-gate.md`
 
 ## Contexto
 Hoy la solicitud de compra es un **formulario físico** con circuito de firmas
