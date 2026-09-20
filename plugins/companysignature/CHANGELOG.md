@@ -19,7 +19,10 @@ y versionado [SemVer](https://semver.org/lang/es/).
   silencioso. `DONE` sólo significa evidencia creada, ya existente, o evento sin evidencia por diseño.
 - **PDF lock FAIL-CLOSED (§6):** si no se adquiere `GET_LOCK`, `compose()` **no** crea el `Document`
   (sin exclusión mutua no se materializa): la evidencia no se toca, el PDF queda **retryable**
-  (`pending`) con diagnóstico saneado (`$lastError`), y el Cron/reintento lo intenta luego. La
+  (`pending`) con diagnóstico saneado (`$lastError`) y **retryable e idempotente** vía
+  `SignatureApi::composePdf()` (on-demand: el dominio/API/comando lo reintenta; un reintento con lock
+  materializa exactamente un `Document`). La CronTask `reconcile` reconcilia la **evidencia** del
+  ledger; **no** recompone el PDF (hoy no hay tarea automática que reintente PDFs `pending`). La
   aprobación nunca se revierte por esto.
 - **Tests:** unit (`safeWatermark`); integración/E2E (starvation 200-en-backoff + 1 elegible;
   Materializer PENDING/PENDING/ERROR; PDF sin lock → 0 `Document`, retry → exactamente 1, idempotente).
@@ -57,8 +60,9 @@ y versionado [SemVer](https://semver.org/lang/es/).
   de transacciones (dos workers no crean dos `Document`). No se envuelve `Document::add()` en un
   `beginTransaction()`/`FOR UPDATE` propio porque el `Document` nativo gestiona SUS PROPIAS
   transacciones y hace E/S de fichero: anidar rompería el commit. Se conserva el recovery por marcador
-  (Document creado → caída antes de marcar `READY`) y el relink idempotente de `Document_Item`. El lock
-  es best-effort: si no se obtiene, el PDF no se bloquea (el marcador sigue evitando duplicados).
+  (Document creado → caída antes de marcar `READY`) y el relink idempotente de `Document_Item`.
+  (El lock se endureció luego a **FAIL-CLOSED** — ver «Hardening — durabilidad fail-closed» arriba: sin
+  `GET_LOCK` **no** se crea `Document`; el marcador sigue evitando duplicados en el reintento.)
 - **Invalidación:** se materializa con `idempotency_key` obligatoria y **actor DURABLE** reconstruido
   desde el ledger (aunque el listener en vivo nunca corra).
 ### Tests
