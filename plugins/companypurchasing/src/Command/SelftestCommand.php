@@ -331,10 +331,12 @@ final class SelftestCommand extends Command
         $table = 'glpi_plugin_companypurchasing_requests';
 
         plugin_companypurchasing_uninstall();
-        $this->check('[MIGRATE] uninstall elimina las tablas propias', !$DB->tableExists($table));
+        // Comprobación EN VIVO (SHOW TABLES): la caché de esquema de GLPI no se invalida tras un DROP por
+        // SQL crudo dentro del mismo proceso, así que no se usa $DB->tableExists() aquí.
+        $this->check('[MIGRATE] uninstall elimina las tablas propias', !$this->tableExistsLive($table));
 
         plugin_companypurchasing_install();
-        $this->check('[MIGRATE] reinstall recrea las tablas propias', $DB->tableExists($table));
+        $this->check('[MIGRATE] reinstall recrea las tablas propias', $this->tableExistsLive($table));
         // Scopes re-sembrados tras reinstalar.
         $seeded = 0;
         foreach ($DB->request(['FROM' => ScopeDef::getTable(), 'WHERE' => ['scopes_version' => 1]]) as $ignored) {
@@ -344,6 +346,15 @@ final class SelftestCommand extends Command
     }
 
     // ---------------------------------------------------------------- helpers
+
+    /** Existencia de tabla EN VIVO (independiente de la caché de esquema de GLPI). */
+    private function tableExistsLive(string $table): bool
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $res = $DB->doQuery("SHOW TABLES LIKE '" . $table . "'");
+        return $res !== false && $DB->numrows($res) > 0;
+    }
 
     private function countEvents(int $reqId, string $event): int
     {

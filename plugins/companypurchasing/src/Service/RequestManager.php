@@ -189,11 +189,11 @@ final class RequestManager
         $qty = array_key_exists('quantity', $line)
             ? $this->validateQuantity($line['quantity'], $isInv === 1)
             : (int) $item->fields['quantity'];
-        $unitPrice = Money::of(
-            array_key_exists('estimated_unit_price', $line) ? (string) $line['estimated_unit_price'] : (string) $item->fields['estimated_unit_price'],
-            $currency,
-            $overrides
-        );
+        // Precio provisto por el usuario → `of()` (escala de la moneda). Precio NO provisto → se reusa
+        // el valor YA ALMACENADO (DECIMAL 6dp que MySQL devuelve como "N.000000") → `ofStored()`.
+        $unitPrice = array_key_exists('estimated_unit_price', $line)
+            ? Money::of((string) $line['estimated_unit_price'], $currency, $overrides)
+            : Money::ofStored((string) $item->fields['estimated_unit_price'], $currency, $overrides);
         $lineTotal = $unitPrice->timesInt($qty);
 
         $fields = [
