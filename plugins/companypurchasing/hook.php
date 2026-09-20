@@ -38,7 +38,7 @@ function plugin_companypurchasing_install() {
     $DB->doQuery("CREATE TABLE IF NOT EXISTS `glpi_plugin_companypurchasing_requests` (
         `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
         `number` VARCHAR(60) DEFAULT NULL,
-        `number_seq` INT UNSIGNED NOT NULL DEFAULT 0,
+        `number_seq` INT UNSIGNED DEFAULT NULL,
         `number_scope` VARCHAR(60) NOT NULL DEFAULT '',
         `number_year` SMALLINT UNSIGNED NOT NULL DEFAULT 0,
         `entities_id` INT UNSIGNED NOT NULL DEFAULT 0,
@@ -62,7 +62,11 @@ function plugin_companypurchasing_install() {
         `date_creation` TIMESTAMP NULL DEFAULT NULL,
         `date_mod` TIMESTAMP NULL DEFAULT NULL,
         PRIMARY KEY (`id`),
-        UNIQUE KEY `number` (`number`),
+        -- Numeración por ENTIDAD (secuencias independientes): el texto visible \"REQUEST-<año>-<seq>\"
+        -- puede repetirse ENTRE entidades pero jamás dentro de la misma entidad. `number`/`number_seq`
+        -- son NULL en borrador (MySQL admite múltiples NULL en UNIQUE), así que varios borradores conviven.
+        UNIQUE KEY `ent_number` (`entities_id`,`number`),
+        UNIQUE KEY `ent_seq` (`entities_id`,`number_scope`,`number_year`,`number_seq`),
         KEY `entities_id` (`entities_id`),
         KEY `users_id_requester` (`users_id_requester`),
         KEY `domain_state` (`domain_state`)

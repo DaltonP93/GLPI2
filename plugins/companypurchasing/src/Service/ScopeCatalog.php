@@ -71,28 +71,56 @@ final class ScopeCatalog
     }
 
     /**
-     * Lista de campos de un scope para una versión, leída de la tabla `scope_defs`; si no hay filas
-     * (BD sin sembrar o versión desconocida) cae al default de código. @return array<int,string>
+     * Lista de campos de un scope para una versión, leída de la tabla `scope_defs`. FAIL-CLOSED: en
+     * RUNTIME NO cae silenciosamente a los defaults de código; si la definición pinneada no existe o
+     * su JSON es inválido/vacío, LANZA. Los defaults viven en `defaultFields()` (seed + unit tests).
+     *
+     * @return array<int,string>
+     * @throws \RuntimeException
      */
     public static function fields(int $version, string $scopeKey): array
     {
         /** @var \DBmysql $DB */
         global $DB;
-        if (!isset($DB) || !$DB->tableExists(ScopeDef::getTable())) {
-            return self::defaultFields($scopeKey, $version);
-        }
+        $raw = null;
         foreach ($DB->request([
             'SELECT' => 'fields_json',
             'FROM'   => ScopeDef::getTable(),
             'WHERE'  => ['scopes_version' => $version, 'scope_key' => $scopeKey],
             'LIMIT'  => 1,
         ]) as $row) {
-            $decoded = json_decode((string) $row['fields_json'], true);
-            if (is_array($decoded)) {
-                return array_values(array_map('strval', $decoded));
-            }
+            $raw = (string) $row['fields_json'];
         }
-        return self::defaultFields($scopeKey, $version);
+        if ($raw === null) {
+            throw new \RuntimeException("scope '{$scopeKey}' v{$version} inexistente (fail-closed)");
+        }
+        $decoded = json_decode($raw, true);
+        if (!is_array($decoded) || $decoded === []) {
+            throw new \RuntimeException("scope '{$scopeKey}' v{$version} con definición inválida/vacía (fail-closed)");
+        }
+        return array_values(array_map('strval', $decoded));
+    }
+
+    /**
+     * Verifica que una versión de scopes esté COMPLETA y consistente para poder usarse en una
+     * aprobación (gate §Scope pinning). Lanza si falta cualquiera de los scopes baseline, su JSON es
+     * inválido/vacío, o si `REQUEST_SCOPE` quedó contaminado con claves comerciales.
+     *
+     * @throws \RuntimeException
+     */
+    public static function assertVersionComplete(int $version): void
+    {
+        if ($version <= 0) {
+            throw new \RuntimeException('scopes_version inválida (fail-closed)');
+        }
+        $req = self::fields($version, self::SCOPE_REQUEST);               // lanza si falta/corrupto
+        $com = self::fields($version, self::SCOPE_COMMERCIAL_FINANCIAL);  // idem
+        if (!self::isFreeOfCommercialKeys($req)) {
+            throw new \RuntimeException("REQUEST_SCOPE v{$version} contaminado con claves comerciales (fail-closed)");
+        }
+        if (array_intersect(self::COMMERCIAL_ONLY_KEYS, $com) === []) {
+            throw new \RuntimeException("COMMERCIAL_FINANCIAL_SCOPE v{$version} incompleto (sin claves comerciales) (fail-closed)");
+        }
     }
 
     /** Siembra en BD la versión 1 (idempotente). Se llama en la instalación. */

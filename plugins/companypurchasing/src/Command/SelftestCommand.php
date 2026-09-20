@@ -79,11 +79,15 @@ final class SelftestCommand extends Command
             $this->scenarioPersist();
             $this->scenarioMoney();
             $this->scenarioNumbering();
+            $this->scenarioMultiEntityNumbering();
             $this->scenarioCrudE2E();
             $this->scenarioAcl();
             $this->scenarioMultiEntity();
             $this->scenarioSupplierBudget();
+            $this->scenarioScopeFailClosed();
             $this->scenarioNegatives();
+            $this->scenarioConcurrentNumbering();
+            $this->scenarioConcurrentSubmit();
         } catch (\Throwable $e) {
             $this->out->writeln('<error>EXCEPCIÓN: ' . $e->getMessage() . '</error>');
             $this->failures++;
@@ -208,6 +212,9 @@ final class SelftestCommand extends Command
         $items = $rm->loadItems($reqId);
         $snap = (new ScopeSnapshotBuilder())->build($req, $items, ScopeCatalog::SCOPE_REQUEST);
         $this->check('[E2E] snapshot REQUEST_SCOPE con subject/entidad correctos', $snap['subject_type'] === Request::class && (int) $snap['subject_id'] === $reqId && (int) $snap['entity_id'] === $this->entityA);
+        $this->check('[E2E] snapshot SEMÁNTICO (sin document_version hardcodeada)', !array_key_exists('document_version', $snap));
+        $env = ScopeSnapshotBuilder::envelope($snap, 7);
+        $this->check('[E2E] envelope() exige document_version>0 (parametrizada, no inventada)', (int) $env['document_version'] === 7 && $this->throws(fn() => ScopeSnapshotBuilder::envelope($snap, 0)));
         $leak = array_intersect(array_keys($snap['payload']), ScopeCatalog::COMMERCIAL_ONLY_KEYS);
         $this->check('[E2E] REQUEST_SCOPE no filtra campos comerciales', $leak === []);
         $this->check('[E2E] REQUEST_SCOPE incluye líneas ordenadas', isset($snap['payload']['lines']) && count($snap['payload']['lines']) === 2);
@@ -288,6 +295,18 @@ final class SelftestCommand extends Command
         $req = new Request();
         $req->getFromDB($reqId);
         $this->check('[REUSE] referencia a Supplier/Budget nativos persistida', (int) $req->fields['suppliers_id_suggested'] === $sup && (int) $req->fields['budgets_id'] === $bud);
+
+        // Negativos de validación de referencias.
+        $this->check('[REUSE] Supplier inexistente → rechazo', $this->throws(fn() => $rm->createDraft(['entities_id' => $this->entityA, 'suppliers_id_suggested' => 99999999])));
+        $this->check('[REUSE] Budget inexistente → rechazo', $this->throws(fn() => $rm->createDraft(['entities_id' => $this->entityA, 'budgets_id' => 99999999])));
+        // Referencia cross-entity NO visible: proveedor en B, sesión sólo en A.
+        $this->applySession($this->uOwner, [$this->entityA, $this->entityB], ['plugin_companypurchasing' => self::FULL], 1);
+        $supB = (int) (new Supplier())->add(['name' => 'CP-SUPB-' . $this->suffix, 'entities_id' => $this->entityB]);
+        if ($supB > 0) {
+            $this->createdSuppliers[] = $supB;
+        }
+        $this->applySession($this->uOwner, [$this->entityA], ['plugin_companypurchasing' => self::FULL]);
+        $this->check('[REUSE] referencia cross-entity no visible → rechazo', $this->throws(fn() => $rm->createDraft(['entities_id' => $this->entityA, 'suppliers_id_suggested' => $supB])));
     }
 
     // ---------------------------------------------------------------- [NEGATIVOS]
@@ -311,6 +330,108 @@ final class SelftestCommand extends Command
         $this->check('[NEG] precio decimal inválido (PYG "100.50") → rechazado', $this->throws(fn() => $rm->addLine($reqId, ['description' => 'z', 'quantity' => '1', 'estimated_unit_price' => '100.50'])));
         $this->check('[NEG] cantidad decimal → rechazada', $this->throws(fn() => $rm->addLine($reqId, ['description' => 'q', 'quantity' => '2.5', 'estimated_unit_price' => '100'])));
         $this->check('[NEG] cantidad cero → rechazada', $this->throws(fn() => $rm->addLine($reqId, ['description' => 'q', 'quantity' => '0', 'estimated_unit_price' => '100'])));
+    }
+
+    // ---------------------------------------------------------------- [MULTI-ENT-NUM]
+
+    private function scenarioMultiEntityNumbering(): void
+    {
+        $this->out->writeln('== [MULTI-ENT-NUM] mismo número visible en entidades distintas ==');
+        // El texto visible "REQUEST-2099-000001" puede coexistir en A y B (secuencias independientes),
+        // pero jamás repetirse dentro de la misma entidad (ni por `number` ni por seq).
+        $a1 = $this->insertReqRow($this->entityA, 'REQUEST-2099-000001', 1, 2099);
+        $b1 = $this->insertReqRow($this->entityB, 'REQUEST-2099-000001', 1, 2099);
+        $this->check('[MULTI-ENT-NUM] A y B con el MISMO número visible → ambas persisten', $a1 && $b1);
+        $dupNumber = $this->insertReqRow($this->entityA, 'REQUEST-2099-000001', 2, 2099);
+        $this->check('[MULTI-ENT-NUM] mismo número en la MISMA entidad → rechazado (UNIQUE ent_number)', !$dupNumber);
+        $dupSeq = $this->insertReqRow($this->entityA, 'REQUEST-2099-000002', 1, 2099);
+        $this->check('[MULTI-ENT-NUM] mismo seq en la MISMA entidad/año → rechazado (UNIQUE ent_seq)', !$dupSeq);
+    }
+
+    // ---------------------------------------------------------------- [SCOPE-FAILCLOSED]
+
+    private function scenarioScopeFailClosed(): void
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $this->out->writeln('== [SCOPE-FAILCLOSED] pinning estricto ==');
+        $this->applySession($this->uOwner, [$this->entityA], ['plugin_companypurchasing' => self::FULL]);
+        $rm = new RequestManager();
+
+        // (a) versión vigente INCOMPLETA (falta COMMERCIAL) → submit falla; sigue DRAFT y sin número.
+        $reqId = $rm->createDraft(['entities_id' => $this->entityA, 'reason' => 'scopefc']);
+        $DB->delete(ScopeDef::getTable(), ['scopes_version' => 1, 'scope_key' => ScopeCatalog::SCOPE_COMMERCIAL_FINANCIAL]);
+        $threw = $this->throws(fn() => $rm->submitDraft($reqId));
+        $req = new Request();
+        $req->getFromDB($reqId);
+        $this->check('[SCOPE-FAILCLOSED] scope vigente incompleto → submit falla', $threw);
+        $this->check('[SCOPE-FAILCLOSED] sigue DRAFT y SIN número (no consumió secuencia)', $req->isDraft() && $req->fields['number'] === null);
+        (new ScopeDef())->add([
+            'scopes_version' => 1, 'scope_key' => ScopeCatalog::SCOPE_COMMERCIAL_FINANCIAL,
+            'fields_json' => json_encode(ScopeCatalog::defaultFields(ScopeCatalog::SCOPE_COMMERCIAL_FINANCIAL, 1)),
+            'date_creation' => date('Y-m-d H:i:s'),
+        ]);
+        $this->check('[SCOPE-FAILCLOSED] assertVersionComplete(999) inexistente → lanza', $this->throws(fn() => ScopeCatalog::assertVersionComplete(999)));
+
+        // (b) fields_json corrupto → build de snapshot falla (no fallback a defaults).
+        $items = $rm->loadItems($reqId);
+        $DB->update(ScopeDef::getTable(), ['fields_json' => '{invalido'], ['scopes_version' => 1, 'scope_key' => ScopeCatalog::SCOPE_REQUEST]);
+        $req->getFromDB($reqId);
+        $this->check('[SCOPE-FAILCLOSED] fields_json corrupto → snapshot falla', $this->throws(fn() => (new ScopeSnapshotBuilder())->build($req, $items, ScopeCatalog::SCOPE_REQUEST, 1)));
+        $DB->update(ScopeDef::getTable(), ['fields_json' => json_encode(ScopeCatalog::defaultFields(ScopeCatalog::SCOPE_REQUEST, 1))], ['scopes_version' => 1, 'scope_key' => ScopeCatalog::SCOPE_REQUEST]);
+
+        // (c) amount almacenado incompatible con PYG → snapshot falla (sin fallback silencioso).
+        $DB->update(Request::getTable(), ['amount_estimated' => '1.500000'], ['id' => $reqId]);
+        $req->getFromDB($reqId);
+        $items = $rm->loadItems($reqId);
+        $this->check('[SCOPE-FAILCLOSED] amount incompatible con PYG → snapshot falla', $this->throws(fn() => (new ScopeSnapshotBuilder())->build($req, $items, ScopeCatalog::SCOPE_REQUEST, 1)));
+    }
+
+    // ---------------------------------------------------------------- [CONCURRENCY]
+
+    private function scenarioConcurrentNumbering(): void
+    {
+        $this->out->writeln('== [CONCURRENCY] numeración: procesos REALES en paralelo ==');
+        $year = 2097;
+        $n = 6;
+        $base = 'php bin/console plugins:companypurchasing:concurrency-probe --op=assign --entity='
+            . $this->entityA . ' --year=' . $year . ' --no-interaction';
+        $outs = $this->runParallel(array_fill(0, $n, $base));
+        $this->out->writeln('  probes: ' . implode(' | ', $outs));
+        $seqs = [];
+        foreach ($outs as $o) {
+            if (preg_match('/OK:(\d+)/', $o, $m) === 1) {
+                $seqs[] = (int) $m[1];
+            }
+        }
+        $this->check('[CONCURRENCY] los ' . $n . ' procesos devolvieron número', count($seqs) === $n);
+        $this->check('[CONCURRENCY] todos DISTINTOS (sin lost update)', $seqs !== [] && count(array_unique($seqs)) === count($seqs));
+        sort($seqs);
+        $this->check('[CONCURRENCY] secuencia contigua 1..' . $n . ' (una sola secuencia por entidad/año)', $seqs === range(1, $n));
+    }
+
+    private function scenarioConcurrentSubmit(): void
+    {
+        $this->out->writeln('== [CONCURRENCY] submit: doble envío del MISMO request ==');
+        $this->applySession($this->uOwner, [$this->entityA], ['plugin_companypurchasing' => self::FULL]);
+        $rm = new RequestManager();
+        $reqId = $rm->createDraft(['entities_id' => $this->entityA, 'reason' => 'concsubmit']);
+        $rm->addLine($reqId, ['description' => 'x', 'quantity' => '1', 'estimated_unit_price' => '1000', 'is_inventoriable' => 0]);
+        $cmd = 'php bin/console plugins:companypurchasing:concurrency-probe --op=submit --request=' . $reqId . ' --no-interaction';
+        $outs = $this->runParallel([$cmd, $cmd]);
+        $this->out->writeln('  probes: ' . implode(' | ', $outs));
+        $seqs = [];
+        foreach ($outs as $o) {
+            if (preg_match('/OK:(\d+)/', $o, $m) === 1) {
+                $seqs[] = (int) $m[1];
+            }
+        }
+        $this->check('[CONCURRENCY] ambos procesos OK (idempotente)', count($seqs) === 2);
+        $this->check('[CONCURRENCY] mismo número devuelto por ambos', count($seqs) === 2 && $seqs[0] === $seqs[1]);
+        $req = new Request();
+        $req->getFromDB($reqId);
+        $this->check('[CONCURRENCY] una sola transición DRAFT→PENDING (número asignado una vez)', (string) $req->fields['domain_state'] === Request::STATE_PENDING && (int) $req->fields['number_seq'] > 0);
+        $this->check('[CONCURRENCY] un solo evento REQUEST_SUBMITTED', $this->countEvents($reqId, PurchasingEvent::EV_REQUEST_SUBMITTED) === 1);
     }
 
     // ---------------------------------------------------------------- [MIGRATE]
@@ -365,6 +486,63 @@ final class SelftestCommand extends Command
             $n++;
         }
         return $n;
+    }
+
+    /**
+     * Lanza comandos en PARALELO (procesos reales) y devuelve el stdout de cada uno. Habilita el probe
+     * de concurrencia vía env (`COMPANYPURCHASING_ALLOW_PROBE=1`).
+     *
+     * @param array<int,string> $cmds
+     * @return array<int,string>
+     */
+    private function runParallel(array $cmds): array
+    {
+        $env = getenv();
+        $env['COMPANYPURCHASING_ALLOW_PROBE'] = '1';
+        $procs = [];
+        $pipes = [];
+        foreach ($cmds as $i => $cmd) {
+            $descr = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+            $pp = [];
+            $p = @proc_open($cmd, $descr, $pp, getcwd(), $env);
+            if (is_resource($p)) {
+                $procs[$i] = $p;
+                $pipes[$i] = $pp;
+            }
+        }
+        $out = [];
+        foreach ($procs as $i => $p) {
+            $out[$i] = trim((string) stream_get_contents($pipes[$i][1]));
+            fclose($pipes[$i][1]);
+            fclose($pipes[$i][2]);
+            proc_close($p);
+        }
+        return $out;
+    }
+
+    /** Inserta una fila `requests` (para probar los UNIQUE multi-entidad). Devuelve true si persistió. */
+    private function insertReqRow(int $entity, ?string $number, int $seq, int $year): bool
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $now = date('Y-m-d H:i:s');
+        try {
+            $ok = $DB->insert(Request::getTable(), [
+                'entities_id'      => $entity,
+                'number'           => $number,
+                'number_scope'     => 'request',
+                'number_year'      => $year,
+                'number_seq'       => $seq,
+                'domain_state'     => Request::STATE_PENDING,
+                'currency_code'    => 'PYG',
+                'amount_estimated' => 0,
+                'date_creation'    => $now,
+                'date_mod'         => $now,
+            ]);
+            return $ok !== false;
+        } catch (\Throwable) {
+            return false; // violación de UNIQUE (u otro error) → no persistió
+        }
     }
 
     private function makeEntity(string $tag): int

@@ -3,10 +3,13 @@
 /**
  * Constructor DETERMINISTA del snapshot semántico de un scope de aprobación (gate §Approval scopes).
  *
- * En P2D-1 SÓLO construye el payload; NO ejecuta aprobaciones ni llama a `companysignature`. En P2D-2,
- * el payload se entregará a `SignatureApi::recordDocumentVersion()` con el contrato EXACTO que espera
- * (`{ schema, subject_type, subject_id, entity_id, document_version, payload }`). Compras construye el
- * payload SEMÁNTICO; **Firma canonicaliza/hashea** (no se duplica su canonicalización criptográfica).
+ * SEPARACIÓN (gate §document_version):
+ *   - `build()` produce SÓLO el snapshot SEMÁNTICO (metadata de sujeto/scope + payload). En P2D-1 NO
+ *     inventa una `document_version` (el DOMINIO la declara; su allocator pertenece a P2D-2).
+ *   - `envelope()` arma la envoltura probatoria que espera `SignatureApi::recordDocumentVersion()`
+ *     (`{ schema, subject_type, subject_id, entity_id, document_version, payload }`), exigiendo
+ *     `document_version > 0` como PARÁMETRO (nunca hardcodeado). Se usará en P2D-2.
+ * Compras construye el payload SEMÁNTICO; **Firma canonicaliza/hashea** (no se duplica su canonicalización).
  *
  * Determinismo: dados el mismo estado de solicitud + la misma versión de scope ⇒ el mismo payload
  * (claves de nivel superior ordenadas; líneas ordenadas por `line_no`,`id`; importes como string exacto).
@@ -43,16 +46,39 @@ final class ScopeSnapshotBuilder
         $full    = $this->fullRecord($request, $items);
         $payload = self::selectFields($full, $fields);
 
+        // Snapshot SEMÁNTICO — SIN `document_version` (la declara el dominio en P2D-2, ver `envelope()`).
         return [
-            'schema'           => self::SCHEMA,
-            'subject_type'     => Request::class,
-            'subject_id'       => (int) $request->getID(),
-            'entity_id'        => (int) ($request->fields['entities_id'] ?? 0),
-            // Reservado en P2D-1 (el ciclo de versiones documentales lo maneja Firma en P2D-2).
-            'document_version' => 1,
-            'scope'            => $scopeKey,
-            'scopes_version'   => $version,
-            'payload'          => $payload,
+            'schema'         => self::SCHEMA,
+            'subject_type'   => Request::class,
+            'subject_id'     => (int) $request->getID(),
+            'entity_id'      => (int) ($request->fields['entities_id'] ?? 0),
+            'scope'          => $scopeKey,
+            'scopes_version' => $version,
+            'payload'        => $payload,
+        ];
+    }
+
+    /**
+     * Envoltura probatoria para `SignatureApi::recordDocumentVersion()` a partir de un snapshot
+     * SEMÁNTICO. `document_version` es OBLIGATORIA y `> 0` (la declara el dominio; NUNCA hardcodeada).
+     * Pura y unit-testable. Se usará en P2D-2 (P2D-1 no aloca versiones documentales).
+     *
+     * @param array<string,mixed> $semantic
+     * @return array<string,mixed>
+     * @throws \InvalidArgumentException
+     */
+    public static function envelope(array $semantic, int $documentVersion): array
+    {
+        if ($documentVersion <= 0) {
+            throw new \InvalidArgumentException('document_version debe ser > 0 (la declara el dominio, no el builder)');
+        }
+        return [
+            'schema'           => (string) ($semantic['schema'] ?? ''),
+            'subject_type'     => (string) ($semantic['subject_type'] ?? ''),
+            'subject_id'       => (int) ($semantic['subject_id'] ?? 0),
+            'entity_id'        => (int) ($semantic['entity_id'] ?? 0),
+            'document_version' => $documentVersion,
+            'payload'          => $semantic['payload'] ?? [],
         ];
     }
 
@@ -87,12 +113,9 @@ final class ScopeSnapshotBuilder
     {
         $currency = (string) ($request->fields['currency_code'] ?? 'PYG');
         $overrides = PluginConfig::currencyScaleOverrides();
-        $total = (string) ($request->fields['amount_estimated'] ?? '0');
-        try {
-            $total = Money::ofStored($total, $currency, $overrides)->amount();
-        } catch (\Throwable) {
-            // Si el almacenamiento fuese inconsistente, se deja el crudo (no debe ocurrir en P2D-1).
-        }
+        // FAIL-CLOSED: un importe almacenado inconsistente con la moneda LANZA (nunca entra crudo a un
+        // snapshot que luego se firmará). Sin fallback silencioso.
+        $total = Money::ofStored((string) ($request->fields['amount_estimated'] ?? '0'), $currency, $overrides)->amount();
 
         return [
             'requester'    => (int) ($request->fields['users_id_requester'] ?? 0),

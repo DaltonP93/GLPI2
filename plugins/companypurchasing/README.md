@@ -16,10 +16,10 @@ Plugin propio de la **Plataforma GLPI Modular**.
 | Pieza | Rol |
 |------|-----|
 | `Model/Request` + `RequestItem` | Solicitud (borrador) y líneas. Identidad de línea = `id`; `line_no` sólo orden. Define el derecho `plugin_companypurchasing` y sus bits (ACL por acción). |
-| `Model/NumberSequence` + `Service/NumberingService` | Numeración `UNIQUE(entities_id, scope, year)`, **transaccional/concurrency-safe**; el número se asigna al **abandonar DRAFT** (no se reutiliza; se aceptan huecos). |
+| `Model/NumberSequence` + `Service/NumberingService` | Numeración `UNIQUE(entities_id, scope, year)`, **transaccional/concurrency-safe** (probada con procesos paralelos reales); el número se asigna al **abandonar DRAFT** (no se reutiliza; se aceptan huecos). El texto visible `REQUEST-<año>-<seq>` es **por entidad** (`requests` tiene `UNIQUE(entities_id, number)` + `UNIQUE(entities_id, number_scope, number_year, number_seq)`), así que A y B pueden compartir número. |
 | `Service/Decimal` + `Money` + `CurrencyPolicy` | Dinero **EXACTO** sin `float` (aritmética de strings). PYG escala 0; importes como string exacto; no redondea (fail-closed). |
 | `Model/ScopeDef` + `Service/ScopeCatalog` + `ScopeSnapshotBuilder` | **Approval scopes** versionados/configurables (`REQUEST_SCOPE`, `COMMERCIAL_FINANCIAL_SCOPE`); el builder arma el payload semántico determinista para Firma (P2D-2). `REQUEST_SCOPE` **no** incluye proveedor/cotización/precio final. |
-| `Service/RequestManager` | CRUD controlado de borrador (crear/editar/líneas/submit), ACL y multi-entidad **fail-closed**, dinero exacto, auditoría. **No** integra `companyworkflow` (el `domain_state` es snapshot/cache). |
+| `Service/RequestManager` + `Service/AdvisoryLock` | CRUD controlado de borrador (crear/editar/líneas/submit), ACL y multi-entidad **fail-closed**, dinero exacto, auditoría, validación de referencias `Supplier`/`Budget` nativas. `submitDraft()` es **concurrency-safe** (advisory lock `GET_LOCK`) e **idempotente** (reenvío → mismo número, sin doble transición/evento) y valida los scopes **fail-closed** antes de reservar número. **No** integra `companyworkflow` (el `domain_state` es snapshot/cache). |
 | `Model/PurchasingEvent` + `Service/Audit` | Auditoría de negocio **append-only** (sin secretos, con `correlation_id`). |
 | `Command/SelftestCommand` | `plugins:companypurchasing:selftest` (integración + E2E; obligatorio en CI). |
 

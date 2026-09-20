@@ -106,6 +106,15 @@ ok('formato "REQUEST-2026-000007"', NumberingService::formatNumber('request', 20
 ok('secuencias distintas → números distintos', NumberingService::formatNumber('request', 2026, 7) !== NumberingService::formatNumber('request', 2026, 8));
 ok('otro año → distinta cadena (secuencia independiente)', NumberingService::formatNumber('request', 2027, 7) !== NumberingService::formatNumber('request', 2026, 7));
 
+echo "== ScopeSnapshotBuilder::envelope (document_version la declara el dominio) ==\n";
+$sem = ['schema' => 'companypurchasing/request/v1', 'subject_type' => 'X', 'subject_id' => 5, 'entity_id' => 3, 'scope' => 'REQUEST_SCOPE', 'scopes_version' => 1, 'payload' => ['a' => 1]];
+ok('snapshot semántico NO trae document_version', !array_key_exists('document_version', $sem));
+$env = ScopeSnapshotBuilder::envelope($sem, 4);
+ok('envelope agrega document_version parametrizada (=4)', ($env['document_version'] ?? null) === 4);
+ok('envelope conserva schema/subject/payload', $env['schema'] === 'companypurchasing/request/v1' && (int) $env['subject_id'] === 5 && (($env['payload']['a'] ?? null) === 1));
+ok('envelope con document_version 0 → excepción (nunca hardcodeada)', throws(fn() => ScopeSnapshotBuilder::envelope($sem, 0)));
+ok('envelope con document_version negativa → excepción', throws(fn() => ScopeSnapshotBuilder::envelope($sem, -1)));
+
 echo "== Cantidades (v1: entero positivo) ==\n";
 ok('entero válido "5" → 5', QuantityPolicy::validate('5', true) === 5);
 ok('inventariable con decimal "2.5" → inválido', throws(fn() => QuantityPolicy::validate('2.5', true)));

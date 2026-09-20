@@ -24,11 +24,13 @@ final class RequestManager
 {
     private NumberingService $numbering;
     private Audit $audit;
+    private AdvisoryLock $lock;
 
-    public function __construct(?NumberingService $numbering = null, ?Audit $audit = null)
+    public function __construct(?NumberingService $numbering = null, ?Audit $audit = null, ?AdvisoryLock $lock = null)
     {
         $this->numbering = $numbering ?? new NumberingService();
         $this->audit     = $audit ?? new Audit();
+        $this->lock      = $lock ?? new AdvisoryLock();
     }
 
     // ---------------------------------------------------------------- CREATE
@@ -55,13 +57,16 @@ final class RequestManager
         $now = $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s');
         $corr = bin2hex(random_bytes(16));
 
+        // Referencias a maestros NATIVOS: 0 = sin referencia; >0 debe existir y ser visible en la entidad.
+        $supplierId = (int) ($in['suppliers_id_suggested'] ?? 0);
+        $budgetId   = (int) ($in['budgets_id'] ?? 0);
+        $this->assertReference(\Supplier::class, $supplierId);
+        $this->assertReference(\Budget::class, $budgetId);
+
         $req = new Request();
-        // `number` se OMITE a propósito: toma el DEFAULT NULL de la columna (varios borradores conviven
-        // sin chocar con UNIQUE(number); MySQL admite múltiples NULL). Se asigna en submitDraft().
+        // `number`/`number_seq` se OMITEN: toman el DEFAULT NULL (varios borradores conviven sin chocar
+        // con los UNIQUE; MySQL admite múltiples NULL). Se asignan en submitDraft().
         $id = (int) $req->add([
-            'number_seq'           => 0,
-            'number_scope'         => '',
-            'number_year'          => 0,
             'entities_id'          => $entity,
             'is_recursive'         => (int) ($in['is_recursive'] ?? 0),
             'users_id_requester'   => (int) ($in['users_id_requester'] ?? $me),
@@ -70,8 +75,8 @@ final class RequestManager
             'destination'          => substr((string) ($in['destination'] ?? ''), 0, 255),
             'reason'               => (string) ($in['reason'] ?? ''),
             'observations'         => (string) ($in['observations'] ?? ''),
-            'suppliers_id_suggested' => (int) ($in['suppliers_id_suggested'] ?? 0),
-            'budgets_id'           => (int) ($in['budgets_id'] ?? 0),
+            'suppliers_id_suggested' => $supplierId,
+            'budgets_id'           => $budgetId,
             'currency_code'        => $currency,
             'amount_estimated'     => Money::zero($currency, PluginConfig::currencyScaleOverrides())->amount(),
             'domain_state'         => Request::STATE_DRAFT,
@@ -121,6 +126,13 @@ final class RequestManager
         }
         if ($fields === []) {
             return;
+        }
+        // Validar referencias nativas si cambian (0 = sin referencia; >0 debe existir y ser visible).
+        if (array_key_exists('suppliers_id_suggested', $fields)) {
+            $this->assertReference(\Supplier::class, (int) $fields['suppliers_id_suggested']);
+        }
+        if (array_key_exists('budgets_id', $fields)) {
+            $this->assertReference(\Budget::class, (int) $fields['budgets_id']);
         }
         $this->applyUpdate($req, $fields);
         $this->audit->record($id, PurchasingEvent::EV_REQUEST_UPDATED, $entity, ['fields' => array_keys($fields)], (string) $req->fields['correlation_id']);
@@ -247,29 +259,62 @@ final class RequestManager
      */
     public function submitDraft(int $id): int
     {
-        $req = $this->loadForEdit($id);
-        $entity = (int) $req->fields['entities_id'];
-        $year = (int) date('Y', strtotime((string) ($_SESSION['glpi_currenttime'] ?? 'now')) ?: time());
-
-        $seq = $this->numbering->assign($entity, NumberingService::SCOPE_REQUEST, $year);
-        $scopesVersion = PluginConfig::currentScopesVersion();
-        $number = NumberingService::formatNumber(NumberingService::SCOPE_REQUEST, $year, $seq);
-
-        if (!$req->update([
-            'id'             => $id,
-            'number'         => $number,
-            'number_seq'     => $seq,
-            'number_scope'   => NumberingService::SCOPE_REQUEST,
-            'number_year'    => $year,
-            'domain_state'   => Request::STATE_PENDING,
-            'scopes_version' => $scopesVersion,
-            'lock_version'   => (int) $req->fields['lock_version'] + 1,
-            'date_mod'       => $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s'),
-        ])) {
-            throw new \RuntimeException('no se pudo enviar la solicitud');
+        // Serialización por solicitud (advisory lock con nombre): dos workers no pueden enviar la MISMA
+        // solicitud a la vez. Independiente de transacciones.
+        $lockName = AdvisoryLock::name('submit_' . $id);
+        if (!$this->lock->acquire($lockName, 10)) {
+            throw new \RuntimeException('no se pudo obtener el lock de envío (reintente)');
         }
-        $this->audit->record($id, PurchasingEvent::EV_REQUEST_SUBMITTED, $entity, ['number' => $number, 'seq' => $seq, 'scopes_version' => $scopesVersion], (string) $req->fields['correlation_id']);
-        return $seq;
+        try {
+            // Re-lectura FRESCA bajo lock (otro worker pudo enviarla ya).
+            $req = new Request();
+            if (!$req->getFromDB($id)) {
+                throw new \RuntimeException('solicitud inexistente');
+            }
+            $entity = (int) $req->fields['entities_id'];
+            $this->assertRight(Request::RIGHT_EDIT_DRAFT);
+            $this->assertEntity($entity);
+            if (!$this->canView($req)) {
+                throw new \RuntimeException('sin permiso sobre la solicitud');
+            }
+
+            // IDEMPOTENCIA: si ya NO es borrador y ya tiene número → devolver el MISMO número (no reserva
+            // otro ni emite otro REQUEST_SUBMITTED). En otro estado sin número, es un error explícito.
+            if (!$req->isDraft()) {
+                $existing = (int) ($req->fields['number_seq'] ?? 0);
+                if ($existing > 0) {
+                    return $existing; // ya enviada: retry idempotente
+                }
+                throw new \RuntimeException('la solicitud ya no es un borrador enviable (estado: ' . (string) $req->fields['domain_state'] . ')');
+            }
+
+            // FAIL-CLOSED de scopes ANTES de reservar número: si la versión vigente falta/corrupta, la
+            // solicitud sigue en DRAFT y NO consume número.
+            $scopesVersion = PluginConfig::currentScopesVersion();
+            ScopeCatalog::assertVersionComplete($scopesVersion);
+
+            $year   = (int) date('Y', strtotime((string) ($_SESSION['glpi_currenttime'] ?? 'now')) ?: time());
+            $seq    = $this->numbering->assign($entity, NumberingService::SCOPE_REQUEST, $year);
+            $number = NumberingService::formatNumber(NumberingService::SCOPE_REQUEST, $year, $seq);
+
+            if (!$req->update([
+                'id'             => $id,
+                'number'         => $number,
+                'number_seq'     => $seq,
+                'number_scope'   => NumberingService::SCOPE_REQUEST,
+                'number_year'    => $year,
+                'domain_state'   => Request::STATE_PENDING,
+                'scopes_version' => $scopesVersion,
+                'lock_version'   => (int) $req->fields['lock_version'] + 1,
+                'date_mod'       => $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s'),
+            ])) {
+                throw new \RuntimeException('no se pudo enviar la solicitud');
+            }
+            $this->audit->record($id, PurchasingEvent::EV_REQUEST_SUBMITTED, $entity, ['number' => $number, 'seq' => $seq, 'scopes_version' => $scopesVersion], (string) $req->fields['correlation_id']);
+            return $seq;
+        } finally {
+            $this->lock->release($lockName);
+        }
     }
 
     // ---------------------------------------------------------------- READ / helpers
@@ -416,6 +461,32 @@ final class RequestManager
     {
         if (!Session::haveAccessToEntity($entitiesId)) {
             throw new \RuntimeException('sin acceso a la entidad');
+        }
+    }
+
+    /**
+     * Valida una referencia a un maestro NATIVO de GLPI (Supplier/Budget) por su modelo soportado:
+     *   - `0` = sin referencia (OK).
+     *   - `>0` debe EXISTIR y ser VISIBLE en su entidad para la sesión actual (fail-closed).
+     * No se duplican maestros ni se consulta el core saltando su modelo.
+     */
+    private function assertReference(string $itemtype, int $id): void
+    {
+        if ($id <= 0) {
+            return;
+        }
+        if (!class_exists($itemtype)) {
+            throw new \RuntimeException("tipo de referencia inválido: {$itemtype}");
+        }
+        /** @var \CommonDBTM $obj */
+        $obj = new $itemtype();
+        if (!$obj->getFromDB($id)) {
+            throw new \InvalidArgumentException("referencia inexistente: {$itemtype}#{$id}");
+        }
+        if (isset($obj->fields['entities_id'])
+            && !Session::haveAccessToEntity((int) $obj->fields['entities_id'], (bool) ($obj->fields['is_recursive'] ?? false))
+        ) {
+            throw new \RuntimeException("referencia no visible en la entidad: {$itemtype}#{$id}");
         }
     }
 }

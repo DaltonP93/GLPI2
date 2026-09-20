@@ -4,6 +4,28 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
 ## [0.2.0] — Fase 2D · P2D-1 (núcleo de compras)
+### Hardening — consistencia/concurrencia (última pasada P2D-1)
+- **Numeración multi-entidad:** se elimina el `UNIQUE` GLOBAL de `requests.number` (hacía colisionar
+  A#1 con B#1) y se reemplaza por **`UNIQUE(entities_id, number)`** + **`UNIQUE(entities_id, number_scope,
+  number_year, number_seq)`**. El texto visible `REQUEST-<año>-<seq>` puede coexistir ENTRE entidades y
+  jamás repetirse DENTRO de una entidad/año. `number`/`number_seq` son NULL en borrador.
+- **`submitDraft()` concurrency-safe + idempotente:** serializado por **advisory lock**
+  (`GET_LOCK(cpur_<db>_submit_<id>)`): re-lectura fresca → ACL/entidad/DRAFT → scopes → reservar número →
+  update → audit → `RELEASE_LOCK`. Un reenvío de una solicitud ya enviada devuelve el **mismo** número
+  (idempotente): nunca reserva otro número ni emite otro `REQUEST_SUBMITTED`.
+- **Scope pinning FAIL-CLOSED:** `ScopeCatalog::fields()` ya **no** cae a defaults en runtime;
+  `assertVersionComplete()` exige que la versión vigente exista y sea válida ANTES de reservar número
+  (si falta/corrupta, la solicitud sigue DRAFT y no consume número). `ScopeSnapshotBuilder` **no** captura
+  un `Money::ofStored()` inválido: un importe persistido inconsistente **lanza** (nunca entra crudo al snapshot).
+- **`document_version` no hardcodeada:** `ScopeSnapshotBuilder::build()` produce sólo el snapshot
+  SEMÁNTICO (sin `document_version`); `envelope($semantic, $documentVersion)` exige el número `> 0` como
+  parámetro (lo declara el dominio en P2D-2; el allocator NO es de P2D-1).
+- **Referencias Supplier/Budget validadas:** en create/update, `>0` debe EXISTIR y ser VISIBLE en su
+  entidad (fail-closed); `0` = sin referencia. No se duplican maestros ni se saltan sus modelos.
+- **Concurrencia REAL probada:** nuevo probe interno `plugins:companypurchasing:concurrency-probe` +
+  selftest que lanza **procesos paralelos reales** contra MariaDB: N asignaciones simultáneas → N números
+  distintos (secuencia contigua); doble `submit` del mismo request → una sola transición/número/evento.
+
 ### Added
 - **Esquema propio (migraciones reversibles):** `requests`, `items`, `numbering`, `events`,
   `scope_defs` (prefijo `glpi_plugin_companypurchasing_`). `install/uninstall/reinstall` verificados.
