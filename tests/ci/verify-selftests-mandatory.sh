@@ -21,7 +21,7 @@ set -euo pipefail
 cd "$(cd "$(dirname "$0")/../.." && pwd)"
 
 CI=".github/workflows/ci.yml"
-PLUGINS="companyworkflow companyintegrations companysignature"
+PLUGINS="companyworkflow companyintegrations companysignature companypurchasing"
 FAIL=0
 
 if [ ! -f "$CI" ]; then
@@ -43,10 +43,10 @@ done
 
 echo ">> [2] El CI ejecuta los tres selftests DIRECTAMENTE (sin guard de descubrimiento)"
 # El paso itera sobre los tres plugins e invoca el comando por variable.
-if grep -q 'for p in companyworkflow companyintegrations companysignature' "$CI"; then
-  echo "   OK: el bucle recorre exactamente los tres plugins obligatorios"
+if grep -q 'for p in companyworkflow companyintegrations companysignature companypurchasing' "$CI"; then
+  echo "   OK: el bucle recorre exactamente los cuatro plugins obligatorios"
 else
-  echo "   FALLO: no se encontró el bucle 'for p in companyworkflow companyintegrations companysignature' en $CI"
+  echo "   FALLO: no se encontró el bucle 'for p in companyworkflow companyintegrations companysignature companypurchasing' en $CI"
   FAIL=1
 fi
 if grep -q 'bin/console "plugins:${p}:selftest"' "$CI"; then

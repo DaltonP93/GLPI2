@@ -14,7 +14,7 @@
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYPURCHASING_VERSION', '0.1.0');
+define('PLUGIN_COMPANYPURCHASING_VERSION', '0.2.0');
 
 // Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
 // max='12.0' => GLPI 11.x soportado; 12.x NO hasta pasar la suite de regresion.
@@ -33,11 +33,14 @@ function plugin_init_companypurchasing() {
     // Cumplimiento CSRF exigido por GLPI para todo plugin.
     $PLUGIN_HOOKS['csrf_compliant']['companypurchasing'] = true;
 
-    // TODO(fase-modulo): registrar menús, clases y hooks de negocio.
-    // Ejemplos de extensión SOPORTADA (nunca editar core):
-    //   Plugin::registerClass(\GlpiPlugin\Xxx\MiClase::class);
-    //   $PLUGIN_HOOKS['menu_toadd']['companypurchasing'] = [...];
-    //   $PLUGIN_HOOKS['item_add']['companypurchasing']   = [...];
+    // Registrar la clase de solicitud (para derechos/perfiles y futuras pestañas). El derecho
+    // `plugin_companypurchasing` y sus bits (ACL por acción) viven en este modelo.
+    if (class_exists(\GlpiPlugin\Companypurchasing\Model\Request::class)) {
+        Plugin::registerClass(\GlpiPlugin\Companypurchasing\Model\Request::class);
+    }
+
+    // P2D-2…P2D-4 (no implementado en el núcleo): integración con companyworkflow/companysignature,
+    // recepción/outbox y UI (portal/formularios/bandejas/métricas).
 }
 
 /**

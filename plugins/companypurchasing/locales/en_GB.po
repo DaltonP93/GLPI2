@@ -1,0 +1,61 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: companypurchasing 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"Language: en_GB\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Purchase request"
+msgid_plural "Purchase requests"
+msgstr[0] "Purchase request"
+msgstr[1] "Purchase requests"
+
+msgid "Request line"
+msgid_plural "Request lines"
+msgstr[0] "Request line"
+msgstr[1] "Request lines"
+
+msgid "Purchasing event"
+msgid_plural "Purchasing events"
+msgstr[0] "Purchasing event"
+msgstr[1] "Purchasing events"
+
+msgid "Numbering sequence"
+msgid_plural "Numbering sequences"
+msgstr[0] "Numbering sequence"
+msgstr[1] "Numbering sequences"
+
+msgid "Approval scope"
+msgid_plural "Approval scopes"
+msgstr[0] "Approval scope"
+msgstr[1] "Approval scopes"
+
+msgid "Create purchase request"
+msgstr "Create purchase request"
+
+msgid "View own requests"
+msgstr "View own requests"
+
+msgid "View entity requests"
+msgstr "View entity requests"
+
+msgid "Edit draft request"
+msgstr "Edit draft request"
+
+msgid "Manage purchasing configuration"
+msgstr "Manage purchasing configuration"
+
+msgid "Manage purchasing (quotes/selection)"
+msgstr "Manage purchasing (quotes/selection)"
+
+msgid "Receive goods"
+msgstr "Receive goods"
+
+msgid "Deliver goods"
+msgstr "Deliver goods"
+
+msgid "View purchasing metrics"
+msgstr "View purchasing metrics"
