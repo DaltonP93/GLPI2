@@ -650,36 +650,26 @@ final class SelftestCommand extends Command
     private function scenarioReferenceEntityScope(): void
     {
         $this->out->writeln('== [REF-ENTITY] referencias válidas PARA la entidad de la solicitud ==');
-        // Entidad HIJA de A (para el caso recursivo/ancestro permitido). El mock de sesión no expande
-        // descendientes, así que la incluimos explícitamente en la sesión de trabajo.
+        // Entidad HIJA. GLPI puede IGNORAR el `entities_id` de entrada al crear una Entity y parentarla en
+        // la raíz; `makeChildEntity()` intenta forzar el padre. El test NO asume dónde queda: lee el
+        // ANCESTRO REAL de la hija y coloca allí los suppliers del caso recursivo, así ejercita una
+        // relación de ancestro genuina tanto si quedó bajo A como bajo la raíz.
         $this->applySession($this->uOwner, [$this->entityA, $this->entityB], ['plugin_companypurchasing' => self::FULL], 1);
-        $childA = (int) (new Entity())->add(['name' => 'CP-ENT-AC-' . $this->suffix, 'entities_id' => $this->entityA]);
-        if ($childA > 0) {
-            $this->createdEntities[] = $childA;
-        }
+        $childA = $this->makeChildEntity($this->entityA);
+        $childRow = new Entity();
+        $childRow->getFromDB($childA);
+        $ancestor = (int) ($childRow->fields['entities_id'] ?? 0); // A si el reparent funcionó; si no, la raíz (0)
         $this->applySession($this->uOwner, [$this->entityA, $this->entityB, $childA], ['plugin_companypurchasing' => self::FULL], 1);
 
-        $supArec  = $this->makeSupplier('CP-SUPAR-' . $this->suffix, $this->entityA, true);  // A, recursivo
-        $supAflat = $this->makeSupplier('CP-SUPAF-' . $this->suffix, $this->entityA, false); // A, no recursivo
-        $supBrec  = $this->makeSupplier('CP-SUPBR-' . $this->suffix, $this->entityB, true);  // B, recursivo (otra rama)
-        $this->check('[REF-ENTITY] fixtures (entidad hija + suppliers A/B) creados', $childA > 0 && $supArec > 0 && $supAflat > 0 && $supBrec > 0);
-
-        // Diagnóstico del estado REAL de las entidades/refs (GLPI puede no honrar is_recursive en add()).
-        $dChild = new Entity();
-        $dChild->getFromDB($childA);
-        $dSup = new Supplier();
-        $dSup->getFromDB($supArec);
-        $this->out->writeln(sprintf(
-            '    [REF-ENTITY][diag] childA=%d childA.entities_id=%s | supArec=%d sup.entities_id=%s sup.is_recursive=%s | haveAccess(childA)=%s',
-            $childA, (string) ($dChild->fields['entities_id'] ?? 'NULL'),
-            $supArec, (string) ($dSup->fields['entities_id'] ?? 'NULL'), (string) ($dSup->fields['is_recursive'] ?? 'NULL'),
-            \Session::haveAccessToEntity($childA) ? 'yes' : 'no'
-        ));
+        $supInA     = $this->makeSupplier('CP-SUPA-' . $this->suffix, $this->entityA, false);  // A (misma entidad)
+        $supBrec    = $this->makeSupplier('CP-SUPBR-' . $this->suffix, $this->entityB, true);   // B recursivo (otra rama)
+        $supAncRec  = $this->makeSupplier('CP-SUPANR-' . $this->suffix, $ancestor, true);       // ancestro real, recursivo
+        $supAncFlat = $this->makeSupplier('CP-SUPANF-' . $this->suffix, $ancestor, false);      // ancestro real, no recursivo
+        $this->check('[REF-ENTITY] fixtures (entidad hija + suppliers) creados', $childA > 0 && $supInA > 0 && $supBrec > 0 && $supAncRec > 0 && $supAncFlat > 0);
 
         $rm = new RequestManager();
 
-        // (1) Sesión con acceso A+B; solicitud en A; Supplier EXCLUSIVO de la rama B (aunque el usuario ve
-        // B) → RECHAZO. Esto es lo que `haveAccessToEntity` sola no distinguía.
+        // (1) Sesión A+B; solicitud en A; Supplier EXCLUSIVO de la rama B → RECHAZO (aunque el usuario ve B).
         $this->check('[REF-ENTITY] Supplier de OTRA rama (B) para solicitud en A, con sesión A+B → rechazo', $this->throws(fn() => $rm->createDraft([
             'entities_id' => $this->entityA, 'suppliers_id_suggested' => $supBrec, 'reason' => 'refent-b',
         ])));
@@ -687,22 +677,22 @@ final class SelftestCommand extends Command
         // (2) Solicitud en A; Supplier de la MISMA entidad A → aceptado.
         $okSame = false;
         try {
-            $okSame = $rm->createDraft(['entities_id' => $this->entityA, 'suppliers_id_suggested' => $supArec, 'reason' => 'refent-a']) > 0;
+            $okSame = $rm->createDraft(['entities_id' => $this->entityA, 'suppliers_id_suggested' => $supInA, 'reason' => 'refent-a']) > 0;
         } catch (\Throwable) {
         }
         $this->check('[REF-ENTITY] Supplier de la MISMA entidad (A) → aceptado', $okSame);
 
-        // (3) Solicitud en la entidad HIJA de A; Supplier RECURSIVO del ANCESTRO (A) → aceptado (hereda).
+        // (3) Solicitud en la hija; Supplier RECURSIVO del ANCESTRO real → aceptado (hereda hacia abajo).
         $okAncestor = false;
         try {
-            $okAncestor = $rm->createDraft(['entities_id' => $childA, 'suppliers_id_suggested' => $supArec, 'reason' => 'refent-anc']) > 0;
+            $okAncestor = $rm->createDraft(['entities_id' => $childA, 'suppliers_id_suggested' => $supAncRec, 'reason' => 'refent-anc']) > 0;
         } catch (\Throwable) {
         }
-        $this->check('[REF-ENTITY] Supplier RECURSIVO del ancestro (A) para solicitud en la hija → aceptado', $okAncestor);
+        $this->check('[REF-ENTITY] Supplier RECURSIVO del ancestro para solicitud en la hija → aceptado', $okAncestor);
 
-        // (4) Solicitud en la hija; Supplier NO recursivo del ancestro (A) → RECHAZO (no se hereda).
+        // (4) Solicitud en la hija; Supplier NO recursivo del ancestro → RECHAZO (no se hereda).
         $this->check('[REF-ENTITY] Supplier NO recursivo del ancestro para solicitud en la hija → rechazo', $this->throws(fn() => $rm->createDraft([
-            'entities_id' => $childA, 'suppliers_id_suggested' => $supAflat, 'reason' => 'refent-flat',
+            'entities_id' => $childA, 'suppliers_id_suggested' => $supAncFlat, 'reason' => 'refent-flat',
         ])));
 
         // (5) updateDraft también valida contra la entidad de la solicitud: solicitud en A, referenciar B → rechazo.
@@ -985,6 +975,25 @@ final class SelftestCommand extends Command
         $cur = new Supplier();
         if ($cur->getFromDB($id) && (int) ($cur->fields['is_recursive'] ?? 0) !== $want) {
             $cur->update(['id' => $id, 'is_recursive' => $want]);
+        }
+        return $id;
+    }
+
+    /**
+     * Crea una Entity HIJA de `$parent`. GLPI puede ignorar el `entities_id` de entrada al crear una
+     * Entity (parentándola en la raíz); se intenta FORZAR el padre por la interfaz del modelo. El llamador
+     * NO debe asumir el padre resultante: debe leerlo (`getFromDB`).
+     */
+    private function makeChildEntity(int $parent): int
+    {
+        $id = (int) (new \Entity())->add(['name' => 'CP-ENT-AC-' . $this->suffix, 'entities_id' => $parent]);
+        if ($id <= 0) {
+            return 0;
+        }
+        $this->createdEntities[] = $id;
+        $cur = new \Entity();
+        if ($cur->getFromDB($id) && (int) ($cur->fields['entities_id'] ?? -1) !== $parent) {
+            (new \Entity())->update(['id' => $id, 'entities_id' => $parent]);
         }
         return $id;
     }
