@@ -691,6 +691,24 @@ final class SelftestCommand extends Command
     }
 
     /**
+     * ¿El total almacenado de la solicitud coincide con la suma de los totales de línea? En PYG (escala 0)
+     * los importes son enteros, por lo que la comparación por `(int)` sobre el DECIMAL almacenado es exacta.
+     */
+    private function totalMatchesLines(int $reqId): bool
+    {
+        $rm = new RequestManager();
+        $sum = 0;
+        foreach ($rm->loadItems($reqId) as $it) {
+            $sum += (int) $it->fields['estimated_line_total'];
+        }
+        $req = new Request();
+        if (!$req->getFromDB($reqId)) {
+            return false;
+        }
+        return (int) $req->fields['amount_estimated'] === $sum;
+    }
+
+    /**
      * Lanza comandos en PARALELO (procesos reales) y devuelve el stdout de cada uno. Habilita el probe
      * de concurrencia vía env (`COMPANYPURCHASING_ALLOW_PROBE=1`).
      *
