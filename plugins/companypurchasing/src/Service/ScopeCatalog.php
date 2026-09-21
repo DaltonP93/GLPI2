@@ -35,6 +35,24 @@ final class ScopeCatalog
         'discounts', 'taxes', 'freight', 'total',
     ];
 
+    /** Claves de nivel de SOLICITUD (no comerciales). */
+    public const REQUEST_KEYS = [
+        'requester', 'department', 'category', 'destination', 'reason', 'observations', 'budget', 'lines',
+    ];
+
+    /**
+     * VOCABULARIO admitido por `companypurchasing`: única fuente de claves válidas para cualquier scope
+     * (incluye las comerciales futuras ya aprobadas para P2D-2). Un campo fuera de aquí es typo/desconocido.
+     */
+    public const ALLOWED_KEYS = [
+        'requester', 'department', 'category', 'destination', 'reason', 'observations', 'budget', 'lines',
+        'currency', 'suppliers_id_selected', 'selected_quote', 'final_prices', 'discounts', 'taxes',
+        'freight', 'total',
+    ];
+
+    /** Invariante baseline: REQUEST_SCOPE debe proteger al menos la identidad mínima de la solicitud. */
+    public const REQUEST_BASELINE = ['requester', 'lines'];
+
     /**
      * Defaults en código (versión 1). El jefe aprueba REQUEST_SCOPE; Compras/Gerencia el superconjunto
      * comercial/financiero.
@@ -113,13 +131,42 @@ final class ScopeCatalog
         if ($version <= 0) {
             throw new \RuntimeException('scopes_version inválida (fail-closed)');
         }
-        $req = self::fields($version, self::SCOPE_REQUEST);               // lanza si falta/corrupto
-        $com = self::fields($version, self::SCOPE_COMMERCIAL_FINANCIAL);  // idem
-        if (!self::isFreeOfCommercialKeys($req)) {
-            throw new \RuntimeException("REQUEST_SCOPE v{$version} contaminado con claves comerciales (fail-closed)");
+        // `fields()` lanza si falta/corrupto/vacío; `validateScopeFields()` valida la SEMÁNTICA.
+        self::validateScopeFields($version, self::SCOPE_REQUEST, self::fields($version, self::SCOPE_REQUEST));
+        self::validateScopeFields($version, self::SCOPE_COMMERCIAL_FINANCIAL, self::fields($version, self::SCOPE_COMMERCIAL_FINANCIAL));
+    }
+
+    /**
+     * Validación SEMÁNTICA de la definición de un scope (fail-closed). Rechaza: campo desconocido/typo
+     * (fuera de `ALLOWED_KEYS`), campo duplicado, scope vacío, `REQUEST_SCOPE` con claves comerciales, y
+     * violación de invariantes baseline.
+     *
+     * @param array<int,string> $fields
+     * @throws \RuntimeException
+     */
+    private static function validateScopeFields(int $version, string $scopeKey, array $fields): void
+    {
+        if ($fields === []) {
+            throw new \RuntimeException("scope '{$scopeKey}' v{$version} vacío (fail-closed)");
         }
-        if (array_intersect(self::COMMERCIAL_ONLY_KEYS, $com) === []) {
-            throw new \RuntimeException("COMMERCIAL_FINANCIAL_SCOPE v{$version} incompleto (sin claves comerciales) (fail-closed)");
+        if (count($fields) !== count(array_unique($fields))) {
+            throw new \RuntimeException("scope '{$scopeKey}' v{$version} con claves DUPLICADAS (fail-closed)");
+        }
+        $unknown = array_values(array_diff($fields, self::ALLOWED_KEYS));
+        if ($unknown !== []) {
+            throw new \RuntimeException("scope '{$scopeKey}' v{$version} con clave desconocida/typo: " . implode(', ', $unknown) . ' (fail-closed)');
+        }
+        if ($scopeKey === self::SCOPE_REQUEST) {
+            if (!self::isFreeOfCommercialKeys($fields)) {
+                throw new \RuntimeException("REQUEST_SCOPE v{$version} contaminado con claves comerciales (fail-closed)");
+            }
+            $missing = array_values(array_diff(self::REQUEST_BASELINE, $fields));
+            if ($missing !== []) {
+                throw new \RuntimeException("REQUEST_SCOPE v{$version} incumple baseline (falta: " . implode(', ', $missing) . ') (fail-closed)');
+            }
+        }
+        if ($scopeKey === self::SCOPE_COMMERCIAL_FINANCIAL && array_intersect(self::COMMERCIAL_ONLY_KEYS, $fields) === []) {
+            throw new \RuntimeException("COMMERCIAL_FINANCIAL_SCOPE v{$version} sin claves comerciales (fail-closed)");
         }
     }
 

@@ -93,9 +93,12 @@ final class ScopeSnapshotBuilder
     {
         $out = [];
         foreach ($fields as $key) {
-            if (array_key_exists($key, $full)) {
-                $out[$key] = $full[$key];
+            if (!array_key_exists($key, $full)) {
+                // FAIL-CLOSED: un campo protegido/configurado que el builder NO puede producir AHORA no se
+                // ignora en silencio — se rechaza (jamás un snapshot parcial que luego se firmará).
+                throw new \RuntimeException("campo de scope no producible por el builder: '{$key}' (fail-closed)");
             }
+            $out[$key] = $full[$key];
         }
         ksort($out); // determinismo del orden de claves de nivel superior
         return $out;

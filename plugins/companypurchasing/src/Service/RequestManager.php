@@ -4,9 +4,14 @@
  * Orquestador del NÚCLEO de compras (P2D-1): CRUD controlado de borrador, numeración al abandonar
  * DRAFT, importes exactos y auditoría. Fail-closed en ACL y multi-entidad.
  *
+ * CONCURRENCIA: TODAS las mutaciones de una solicitud (updateDraft/addLine/updateLine/removeLine/
+ * submitDraft) se serializan bajo un **lock común por solicitud** (`request_<id>`): adquirir → recargar
+ * FRESCO → entidad+ACL → DRAFT si corresponde → mutar → recomputar total → audit → liberar. Esto impide
+ * "edito un DRAFT que otro worker ya envió" y los totales stale por mutaciones simultáneas de líneas.
+ *
  * NO integra `companyworkflow` (P2D-2): el `domain_state` es un snapshot/cache local; DRAFT es el
- * estado inicial y `submitDraft()` es el evento local "abandona DRAFT" (asigna número + pinnea la
- * versión de scopes). La AUTORIDAD de estados será `companyworkflow`.
+ * estado inicial y `submitDraft()` es el evento local "abandona DRAFT". La AUTORIDAD de estados será
+ * `companyworkflow`.
  *
  * @license GPL-3.0-or-later
  */
@@ -53,9 +58,20 @@ final class RequestManager
             throw new \InvalidArgumentException('moneda inválida');
         }
 
-        $me  = (int) (Session::getLoginUserID() ?: 0);
-        $now = $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s');
-        $corr = bin2hex(random_bytes(16));
+        // IDENTIDAD DEL SOLICITANTE (C): por política, el solicitante es SIEMPRE el usuario autenticado.
+        // Intentar declarar otro solicitante se rechaza (crear "en nombre de" requerirá un derecho propio
+        // en una fase posterior; CREATE_REQUEST por sí solo NO lo concede).
+        $me = (int) (Session::getLoginUserID() ?: 0);
+        if (array_key_exists('users_id_requester', $in)
+            && (int) $in['users_id_requester'] !== 0
+            && (int) $in['users_id_requester'] !== $me
+        ) {
+            throw new \RuntimeException('no se permite crear en nombre de otro solicitante en P2D-1');
+        }
+
+        // Departamento: 0 = sin departamento; >0 el Group debe existir y ser visible desde la entidad.
+        $deptId = (int) ($in['groups_id_department'] ?? 0);
+        $this->assertReference(\Group::class, $deptId);
 
         // Referencias a maestros NATIVOS: 0 = sin referencia; >0 debe existir y ser visible en la entidad.
         $supplierId = (int) ($in['suppliers_id_suggested'] ?? 0);
@@ -63,14 +79,18 @@ final class RequestManager
         $this->assertReference(\Supplier::class, $supplierId);
         $this->assertReference(\Budget::class, $budgetId);
 
+        $now = $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s');
+        $corr = bin2hex(random_bytes(16));
+
         $req = new Request();
         // `number`/`number_seq` se OMITEN: toman el DEFAULT NULL (varios borradores conviven sin chocar
         // con los UNIQUE; MySQL admite múltiples NULL). Se asignan en submitDraft().
         $id = (int) $req->add([
             'entities_id'          => $entity,
-            'is_recursive'         => (int) ($in['is_recursive'] ?? 0),
-            'users_id_requester'   => (int) ($in['users_id_requester'] ?? $me),
-            'groups_id_department' => (int) ($in['groups_id_department'] ?? 0),
+            // `is_recursive` NO queda bajo control libre del solicitante (C): baseline de dominio = 0.
+            'is_recursive'         => 0,
+            'users_id_requester'   => $me,
+            'groups_id_department' => $deptId,
             'category'             => substr((string) ($in['category'] ?? ''), 0, 190),
             'destination'          => substr((string) ($in['destination'] ?? ''), 0, 255),
             'reason'               => (string) ($in['reason'] ?? ''),
@@ -100,42 +120,47 @@ final class RequestManager
     /** @param array<string,mixed> $in */
     public function updateDraft(int $id, array $in): void
     {
-        $req = $this->loadForEdit($id);
-        $entity = (int) $req->fields['entities_id'];
+        $this->withRequestLock($id, function () use ($id, $in): void {
+            $req = $this->loadForEdit($id); // recarga FRESCA bajo lock + checks (isDraft)
+            $entity = (int) $req->fields['entities_id'];
 
-        $fields = [];
-        foreach ([
-            'groups_id_department' => 'int',
-            'category'             => 'str190',
-            'destination'          => 'str255',
-            'reason'               => 'text',
-            'observations'         => 'text',
-            'suppliers_id_suggested' => 'int',
-            'budgets_id'           => 'int',
-            'users_id_requester'   => 'int',
-        ] as $key => $type) {
-            if (!array_key_exists($key, $in)) {
-                continue;
+            // `users_id_requester` NO es editable en P2D-1 (identidad cerrada); se ignora si viniera.
+            $fields = [];
+            foreach ([
+                'groups_id_department' => 'int',
+                'category'             => 'str190',
+                'destination'          => 'str255',
+                'reason'               => 'text',
+                'observations'         => 'text',
+                'suppliers_id_suggested' => 'int',
+                'budgets_id'           => 'int',
+            ] as $key => $type) {
+                if (!array_key_exists($key, $in)) {
+                    continue;
+                }
+                $fields[$key] = match ($type) {
+                    'int'    => (int) $in[$key],
+                    'str190' => substr((string) $in[$key], 0, 190),
+                    'str255' => substr((string) $in[$key], 0, 255),
+                    default  => (string) $in[$key],
+                };
             }
-            $fields[$key] = match ($type) {
-                'int'    => (int) $in[$key],
-                'str190' => substr((string) $in[$key], 0, 190),
-                'str255' => substr((string) $in[$key], 0, 255),
-                default  => (string) $in[$key],
-            };
-        }
-        if ($fields === []) {
-            return;
-        }
-        // Validar referencias nativas si cambian (0 = sin referencia; >0 debe existir y ser visible).
-        if (array_key_exists('suppliers_id_suggested', $fields)) {
-            $this->assertReference(\Supplier::class, (int) $fields['suppliers_id_suggested']);
-        }
-        if (array_key_exists('budgets_id', $fields)) {
-            $this->assertReference(\Budget::class, (int) $fields['budgets_id']);
-        }
-        $this->applyUpdate($req, $fields);
-        $this->audit->record($id, PurchasingEvent::EV_REQUEST_UPDATED, $entity, ['fields' => array_keys($fields)], (string) $req->fields['correlation_id']);
+            if ($fields === []) {
+                return;
+            }
+            // Validar referencias nativas si cambian (0 = sin referencia; >0 debe existir y ser visible).
+            if (array_key_exists('groups_id_department', $fields)) {
+                $this->assertReference(\Group::class, (int) $fields['groups_id_department']);
+            }
+            if (array_key_exists('suppliers_id_suggested', $fields)) {
+                $this->assertReference(\Supplier::class, (int) $fields['suppliers_id_suggested']);
+            }
+            if (array_key_exists('budgets_id', $fields)) {
+                $this->assertReference(\Budget::class, (int) $fields['budgets_id']);
+            }
+            $this->applyUpdate($req, $fields);
+            $this->audit->record($id, PurchasingEvent::EV_REQUEST_UPDATED, $entity, ['fields' => array_keys($fields)], (string) $req->fields['correlation_id']);
+        });
     }
 
     // ---------------------------------------------------------------- LINES
@@ -146,127 +171,131 @@ final class RequestManager
      */
     public function addLine(int $reqId, array $line): int
     {
-        $req = $this->loadForEdit($reqId);
-        $currency = (string) $req->fields['currency_code'];
-        $overrides = PluginConfig::currencyScaleOverrides();
+        return (int) $this->withRequestLock($reqId, function () use ($reqId, $line): int {
+            $req = $this->loadForEdit($reqId);
+            $currency = (string) $req->fields['currency_code'];
+            $overrides = PluginConfig::currencyScaleOverrides();
 
-        $isInv = (int) (($line['is_inventoriable'] ?? 0) ? 1 : 0);
-        $qty   = $this->validateQuantity($line['quantity'] ?? null, $isInv === 1);
-        $unitPrice = Money::of((string) ($line['estimated_unit_price'] ?? '0'), $currency, $overrides);
-        $lineTotal = $unitPrice->timesInt($qty);
+            $isInv = (int) (($line['is_inventoriable'] ?? 0) ? 1 : 0);
+            $qty   = $this->validateQuantity($line['quantity'] ?? null, $isInv === 1);
+            $unitPrice = Money::of((string) ($line['estimated_unit_price'] ?? '0'), $currency, $overrides);
+            $lineTotal = $unitPrice->timesInt($qty);
 
-        $lineNo = isset($line['line_no']) ? (int) $line['line_no'] : $this->nextLineNo($reqId);
-        $this->assertLineNoFree($reqId, $lineNo, 0);
+            $lineNo = isset($line['line_no']) ? (int) $line['line_no'] : $this->nextLineNo($reqId);
+            $this->assertLineNoFree($reqId, $lineNo, 0);
 
-        $now = $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s');
-        $item = new RequestItem();
-        $lineId = (int) $item->add([
-            'requests_id'          => $reqId,
-            'line_no'              => $lineNo,
-            'description'          => substr((string) ($line['description'] ?? ''), 0, 255),
-            'category'             => substr((string) ($line['category'] ?? ''), 0, 190),
-            'quantity'             => $qty,
-            'unit'                 => substr((string) ($line['unit'] ?? ''), 0, 30),
-            'is_inventoriable'     => $isInv,
-            'currency_code'        => $currency,
-            'estimated_unit_price' => $unitPrice->amount(),
-            'estimated_line_total' => $lineTotal->amount(),
-            'notes'                => (string) ($line['notes'] ?? ''),
-            'date_creation'        => $now,
-            'date_mod'             => $now,
-        ]);
-        if ($lineId <= 0) {
-            throw new \RuntimeException('no se pudo crear la línea');
-        }
-        $this->recomputeEstimated($req);
-        $this->audit->record($reqId, PurchasingEvent::EV_LINE_ADDED, (int) $req->fields['entities_id'], ['line_id' => $lineId, 'line_no' => $lineNo], (string) $req->fields['correlation_id']);
-        return $lineId;
+            $now = $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s');
+            $item = new RequestItem();
+            $lineId = (int) $item->add([
+                'requests_id'          => $reqId,
+                'line_no'              => $lineNo,
+                'description'          => substr((string) ($line['description'] ?? ''), 0, 255),
+                'category'             => substr((string) ($line['category'] ?? ''), 0, 190),
+                'quantity'             => $qty,
+                'unit'                 => substr((string) ($line['unit'] ?? ''), 0, 30),
+                'is_inventoriable'     => $isInv,
+                'currency_code'        => $currency,
+                'estimated_unit_price' => $unitPrice->amount(),
+                'estimated_line_total' => $lineTotal->amount(),
+                'notes'                => (string) ($line['notes'] ?? ''),
+                'date_creation'        => $now,
+                'date_mod'             => $now,
+            ]);
+            if ($lineId <= 0) {
+                throw new \RuntimeException('no se pudo crear la línea');
+            }
+            $this->recomputeEstimated($req);
+            $this->audit->record($reqId, PurchasingEvent::EV_LINE_ADDED, (int) $req->fields['entities_id'], ['line_id' => $lineId, 'line_no' => $lineNo], (string) $req->fields['correlation_id']);
+            return $lineId;
+        });
     }
 
     /** @param array<string,mixed> $line */
     public function updateLine(int $lineId, array $line): void
     {
-        $item = new RequestItem();
-        if (!$item->getFromDB($lineId)) {
-            throw new \RuntimeException('línea inexistente');
-        }
-        $reqId = (int) $item->fields['requests_id'];
-        $req = $this->loadForEdit($reqId);
-        $currency = (string) $req->fields['currency_code'];
-        $overrides = PluginConfig::currencyScaleOverrides();
-
-        $isInv = array_key_exists('is_inventoriable', $line)
-            ? (int) (($line['is_inventoriable'] ? 1 : 0))
-            : (int) $item->fields['is_inventoriable'];
-        $qty = array_key_exists('quantity', $line)
-            ? $this->validateQuantity($line['quantity'], $isInv === 1)
-            : (int) $item->fields['quantity'];
-        // Precio provisto por el usuario → `of()` (escala de la moneda). Precio NO provisto → se reusa
-        // el valor YA ALMACENADO (DECIMAL 6dp que MySQL devuelve como "N.000000") → `ofStored()`.
-        $unitPrice = array_key_exists('estimated_unit_price', $line)
-            ? Money::of((string) $line['estimated_unit_price'], $currency, $overrides)
-            : Money::ofStored((string) $item->fields['estimated_unit_price'], $currency, $overrides);
-        $lineTotal = $unitPrice->timesInt($qty);
-
-        $fields = [
-            'id'                   => $lineId,
-            'is_inventoriable'     => $isInv,
-            'quantity'             => $qty,
-            'estimated_unit_price' => $unitPrice->amount(),
-            'estimated_line_total' => $lineTotal->amount(),
-            'date_mod'             => $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s'),
-        ];
-        foreach (['description' => 'str255', 'category' => 'str190', 'unit' => 'str30', 'notes' => 'text'] as $k => $t) {
-            if (array_key_exists($k, $line)) {
-                $fields[$k] = match ($t) {
-                    'str255' => substr((string) $line[$k], 0, 255),
-                    'str190' => substr((string) $line[$k], 0, 190),
-                    'str30'  => substr((string) $line[$k], 0, 30),
-                    default  => (string) $line[$k],
-                };
+        $reqId = $this->lineRequestId($lineId);
+        $this->withRequestLock($reqId, function () use ($reqId, $lineId, $line): void {
+            $req = $this->loadForEdit($reqId);
+            // Recargar la línea FRESCA bajo lock y confirmar que pertenece a esta solicitud.
+            $item = new RequestItem();
+            if (!$item->getFromDB($lineId) || (int) $item->fields['requests_id'] !== $reqId) {
+                throw new \RuntimeException('línea inexistente');
             }
-        }
-        if (array_key_exists('line_no', $line)) {
-            $newNo = (int) $line['line_no'];
-            $this->assertLineNoFree($reqId, $newNo, $lineId);
-            $fields['line_no'] = $newNo;
-        }
-        if (!$item->update($fields)) {
-            throw new \RuntimeException('no se pudo actualizar la línea');
-        }
-        $this->recomputeEstimated($req);
-        $this->audit->record($reqId, PurchasingEvent::EV_LINE_UPDATED, (int) $req->fields['entities_id'], ['line_id' => $lineId], (string) $req->fields['correlation_id']);
+            $currency = (string) $req->fields['currency_code'];
+            $overrides = PluginConfig::currencyScaleOverrides();
+
+            $isInv = array_key_exists('is_inventoriable', $line)
+                ? (int) (($line['is_inventoriable'] ? 1 : 0))
+                : (int) $item->fields['is_inventoriable'];
+            $qty = array_key_exists('quantity', $line)
+                ? $this->validateQuantity($line['quantity'], $isInv === 1)
+                : (int) $item->fields['quantity'];
+            // Precio provisto → `of()` (escala de la moneda). NO provisto → valor ALMACENADO → `ofStored()`.
+            $unitPrice = array_key_exists('estimated_unit_price', $line)
+                ? Money::of((string) $line['estimated_unit_price'], $currency, $overrides)
+                : Money::ofStored((string) $item->fields['estimated_unit_price'], $currency, $overrides);
+            $lineTotal = $unitPrice->timesInt($qty);
+
+            $fields = [
+                'id'                   => $lineId,
+                'is_inventoriable'     => $isInv,
+                'quantity'             => $qty,
+                'estimated_unit_price' => $unitPrice->amount(),
+                'estimated_line_total' => $lineTotal->amount(),
+                'date_mod'             => $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s'),
+            ];
+            foreach (['description' => 'str255', 'category' => 'str190', 'unit' => 'str30', 'notes' => 'text'] as $k => $t) {
+                if (array_key_exists($k, $line)) {
+                    $fields[$k] = match ($t) {
+                        'str255' => substr((string) $line[$k], 0, 255),
+                        'str190' => substr((string) $line[$k], 0, 190),
+                        'str30'  => substr((string) $line[$k], 0, 30),
+                        default  => (string) $line[$k],
+                    };
+                }
+            }
+            if (array_key_exists('line_no', $line)) {
+                $newNo = (int) $line['line_no'];
+                $this->assertLineNoFree($reqId, $newNo, $lineId);
+                $fields['line_no'] = $newNo;
+            }
+            if (!$item->update($fields)) {
+                throw new \RuntimeException('no se pudo actualizar la línea');
+            }
+            $this->recomputeEstimated($req);
+            $this->audit->record($reqId, PurchasingEvent::EV_LINE_UPDATED, (int) $req->fields['entities_id'], ['line_id' => $lineId], (string) $req->fields['correlation_id']);
+        });
     }
 
     public function removeLine(int $lineId): void
     {
-        $item = new RequestItem();
-        if (!$item->getFromDB($lineId)) {
-            throw new \RuntimeException('línea inexistente');
-        }
-        $reqId = (int) $item->fields['requests_id'];
-        $req = $this->loadForEdit($reqId);
-        $item->delete(['id' => $lineId], true);
-        $this->recomputeEstimated($req);
-        $this->audit->record($reqId, PurchasingEvent::EV_LINE_REMOVED, (int) $req->fields['entities_id'], ['line_id' => $lineId], (string) $req->fields['correlation_id']);
+        $reqId = $this->lineRequestId($lineId);
+        $this->withRequestLock($reqId, function () use ($reqId, $lineId): void {
+            $req = $this->loadForEdit($reqId);
+            $item = new RequestItem();
+            if (!$item->getFromDB($lineId) || (int) $item->fields['requests_id'] !== $reqId) {
+                throw new \RuntimeException('línea inexistente');
+            }
+            $item->delete(['id' => $lineId], true);
+            $this->recomputeEstimated($req);
+            $this->audit->record($reqId, PurchasingEvent::EV_LINE_REMOVED, (int) $req->fields['entities_id'], ['line_id' => $lineId], (string) $req->fields['correlation_id']);
+        });
     }
 
     // ---------------------------------------------------------------- SUBMIT (leaves DRAFT)
 
     /**
-     * Abandona DRAFT por primera vez: asigna el número visible (transaccional) y pinnea la versión de
-     * scopes. NO integra companyworkflow (P2D-2). Devuelve el número asignado.
+     * Abandona DRAFT por primera vez: reserva el número (transacción independiente; el hueco se permite
+     * si lo posterior falla) y luego, en UNA transacción local sobre tablas propias, pasa a PENDING e
+     * inserta el evento `REQUEST_SUBMITTED` (idempotente por `idempotency_key = request-submit:<id>`).
+     * Serializado por el lock común de la solicitud. Idempotente ante reenvío. Devuelve el número.
      */
     public function submitDraft(int $id): int
     {
-        // Serialización por solicitud (advisory lock con nombre): dos workers no pueden enviar la MISMA
-        // solicitud a la vez. Independiente de transacciones.
-        $lockName = AdvisoryLock::name('submit_' . $id);
-        if (!$this->lock->acquire($lockName, 10)) {
-            throw new \RuntimeException('no se pudo obtener el lock de envío (reintente)');
-        }
-        try {
-            // Re-lectura FRESCA bajo lock (otro worker pudo enviarla ya).
+        return (int) $this->withRequestLock($id, function () use ($id): int {
+            /** @var \DBmysql $DB */
+            global $DB;
+
             $req = new Request();
             if (!$req->getFromDB($id)) {
                 throw new \RuntimeException('solicitud inexistente');
@@ -278,12 +307,11 @@ final class RequestManager
                 throw new \RuntimeException('sin permiso sobre la solicitud');
             }
 
-            // IDEMPOTENCIA: si ya NO es borrador y ya tiene número → devolver el MISMO número (no reserva
-            // otro ni emite otro REQUEST_SUBMITTED). En otro estado sin número, es un error explícito.
+            // IDEMPOTENCIA: ya no es borrador y tiene número → devolver el MISMO (sin nuevo número/evento).
             if (!$req->isDraft()) {
                 $existing = (int) ($req->fields['number_seq'] ?? 0);
                 if ($existing > 0) {
-                    return $existing; // ya enviada: retry idempotente
+                    return $existing;
                 }
                 throw new \RuntimeException('la solicitud ya no es un borrador enviable (estado: ' . (string) $req->fields['domain_state'] . ')');
             }
@@ -294,27 +322,46 @@ final class RequestManager
             ScopeCatalog::assertVersionComplete($scopesVersion);
 
             $year   = (int) date('Y', strtotime((string) ($_SESSION['glpi_currenttime'] ?? 'now')) ?: time());
+            // Reserva de número: transacción PROPIA e independiente (si lo de abajo falla, queda un hueco
+            // permitido, jamás reciclado).
             $seq    = $this->numbering->assign($entity, NumberingService::SCOPE_REQUEST, $year);
             $number = NumberingService::formatNumber(NumberingService::SCOPE_REQUEST, $year, $seq);
 
-            if (!$req->update([
-                'id'             => $id,
-                'number'         => $number,
-                'number_seq'     => $seq,
-                'number_scope'   => NumberingService::SCOPE_REQUEST,
-                'number_year'    => $year,
-                'domain_state'   => Request::STATE_PENDING,
-                'scopes_version' => $scopesVersion,
-                'lock_version'   => (int) $req->fields['lock_version'] + 1,
-                'date_mod'       => $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s'),
-            ])) {
-                throw new \RuntimeException('no se pudo enviar la solicitud');
+            // FRONTERA ATÓMICA (D): DRAFT→PENDING + evento REQUEST_SUBMITTED confirman JUNTOS (ambos sobre
+            // tablas propias del plugin). Si el evento no persiste, se hace ROLLBACK y la solicitud NO
+            // queda PENDING (garantía: PENDING ⇔ existe exactamente un REQUEST_SUBMITTED durable).
+            $DB->beginTransaction();
+            try {
+                $ok = $req->update([
+                    'id'             => $id,
+                    'number'         => $number,
+                    'number_seq'     => $seq,
+                    'number_scope'   => NumberingService::SCOPE_REQUEST,
+                    'number_year'    => $year,
+                    'domain_state'   => Request::STATE_PENDING,
+                    'scopes_version' => $scopesVersion,
+                    'lock_version'   => (int) $req->fields['lock_version'] + 1,
+                    'date_mod'       => $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s'),
+                ]);
+                if (!$ok) {
+                    throw new \RuntimeException('no se pudo actualizar la solicitud');
+                }
+                // Idempotencia durable del evento: UNIQUE(idempotency_key). Un retry/recovery jamás duplica.
+                $this->audit->record(
+                    $id,
+                    PurchasingEvent::EV_REQUEST_SUBMITTED,
+                    $entity,
+                    ['number' => $number, 'seq' => $seq, 'scopes_version' => $scopesVersion],
+                    (string) $req->fields['correlation_id'],
+                    'request-submit:' . $id
+                );
+                $DB->commit();
+            } catch (\Throwable $e) {
+                $this->safeRollback($DB);
+                throw $e;
             }
-            $this->audit->record($id, PurchasingEvent::EV_REQUEST_SUBMITTED, $entity, ['number' => $number, 'seq' => $seq, 'scopes_version' => $scopesVersion], (string) $req->fields['correlation_id']);
             return $seq;
-        } finally {
-            $this->lock->release($lockName);
-        }
+        });
     }
 
     // ---------------------------------------------------------------- READ / helpers
@@ -368,6 +415,36 @@ final class RequestManager
     }
 
     // ---------------------------------------------------------------- internals
+
+    /**
+     * Ejecuta `$fn` bajo el LOCK COMÚN de la solicitud (`request_<id>`): serializa todas las mutaciones.
+     *
+     * @return mixed lo que devuelva `$fn`
+     */
+    private function withRequestLock(int $reqId, \Closure $fn): mixed
+    {
+        if ($reqId <= 0) {
+            throw new \RuntimeException('solicitud inválida');
+        }
+        $name = AdvisoryLock::name('request_' . $reqId);
+        if (!$this->lock->acquire($name, 10)) {
+            throw new \RuntimeException('no se pudo obtener el lock de la solicitud (reintente)');
+        }
+        try {
+            return $fn();
+        } finally {
+            $this->lock->release($name);
+        }
+    }
+
+    private function lineRequestId(int $lineId): int
+    {
+        $item = new RequestItem();
+        if (!$item->getFromDB($lineId)) {
+            throw new \RuntimeException('línea inexistente');
+        }
+        return (int) $item->fields['requests_id'];
+    }
 
     private function loadForEdit(int $id): Request
     {
@@ -465,9 +542,9 @@ final class RequestManager
     }
 
     /**
-     * Valida una referencia a un maestro NATIVO de GLPI (Supplier/Budget) por su modelo soportado:
+     * Valida una referencia a un maestro NATIVO de GLPI (Group/Supplier/Budget) por su modelo soportado:
      *   - `0` = sin referencia (OK).
-     *   - `>0` debe EXISTIR y ser VISIBLE en su entidad para la sesión actual (fail-closed).
+     *   - `>0` debe EXISTIR y ser VISIBLE en su entidad (respetando recursividad) para la sesión actual.
      * No se duplican maestros ni se consulta el core saltando su modelo.
      */
     private function assertReference(string $itemtype, int $id): void
@@ -487,6 +564,17 @@ final class RequestManager
             && !Session::haveAccessToEntity((int) $obj->fields['entities_id'], (bool) ($obj->fields['is_recursive'] ?? false))
         ) {
             throw new \RuntimeException("referencia no visible en la entidad: {$itemtype}#{$id}");
+        }
+    }
+
+    private function safeRollback(\DBmysql $DB): void
+    {
+        try {
+            if (!method_exists($DB, 'inTransaction') || $DB->inTransaction()) {
+                $DB->rollBack();
+            }
+        } catch (\Throwable) {
+            // best-effort
         }
     }
 }

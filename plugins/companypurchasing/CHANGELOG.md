@@ -4,7 +4,32 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
 ## [0.2.0] — Fase 2D · P2D-1 (núcleo de compras)
-### Hardening — consistencia/concurrencia (última pasada P2D-1)
+### Hardening — invariantes A/B/C/D (última pasada acotada P2D-1)
+- **A · Lock COMÚN por solicitud (todas las mutaciones):** `updateDraft`/`addLine`/`updateLine`/
+  `removeLine`/`submitDraft` se serializan ahora bajo el MISMO advisory lock `request_<id>` (antes el
+  lock era sólo del submit). Cada mutación: adquirir lock → **recargar FRESCO** → entidad+ACL → DRAFT
+  si corresponde → mutar → recomputar total → auditar → liberar. Impide "editar un DRAFT que otro
+  worker ya envió" (efecto parcial tras quedar PENDING) y los **totales stale** por mutaciones de líneas
+  simultáneas. Probado con procesos REALES en paralelo: edit-vs-submit, addline-vs-submit y dos
+  `addLine` simultáneos (line_no serializado, total siempre cuadra).
+- **B · Validación SEMÁNTICA de approval scopes:** vocabulario explícito `ScopeCatalog::ALLOWED_KEYS`
+  (incluye las claves comerciales futuras de P2D-2). `assertVersionComplete()` rechaza clave
+  desconocida/typo, duplicada, `REQUEST_SCOPE` contaminado con claves comerciales, incumplir baseline
+  (`requester`,`lines`) y scope vacío. `ScopeSnapshotBuilder::selectFields()` es **fail-closed**: una
+  clave protegida que el builder NO puede producir **lanza** (jamás un snapshot parcial que luego se firma).
+- **C · Identidad del solicitante y departamento cerrados:** `users_id_requester` = usuario autenticado
+  SIEMPRE; declarar otro solicitante se **rechaza** (no hay "crear en nombre de" en P2D-1).
+  `is_recursive` no queda bajo control del solicitante (baseline 0). `groups_id_department > 0` exige un
+  `Group` existente y **visible desde la entidad** de la solicitud (fail-closed).
+- **D · Frontera submit + auditoría ATÓMICA y DURABLE:** la reserva de número sigue en su transacción
+  independiente (hueco permitido si lo posterior falla, nunca reciclado); luego, en UNA transacción
+  local sobre tablas propias: `DRAFT→PENDING` + INSERT `REQUEST_SUBMITTED` confirman JUNTOS. `Audit::record()`
+  comprueba el resultado de `PurchasingEvent::add()` y **lanza** si el evento no persiste (→ ROLLBACK: la
+  solicitud NO queda PENDING). Nuevo `events.idempotency_key` **UNIQUE** (`request-submit:<id>`) hace el
+  evento idempotente durable. Invariante: `PENDING ⇔ existe exactamente un REQUEST_SUBMITTED durable`.
+  Probado con inyección de fallo determinista (crash entre UPDATE e INSERT) + reintento que completa.
+
+### Hardening — consistencia/concurrencia (pasada previa P2D-1)
 - **Numeración multi-entidad:** se elimina el `UNIQUE` GLOBAL de `requests.number` (hacía colisionar
   A#1 con B#1) y se reemplaza por **`UNIQUE(entities_id, number)`** + **`UNIQUE(entities_id, number_scope,
   number_year, number_seq)`**. El texto visible `REQUEST-<año>-<seq>` puede coexistir ENTRE entidades y

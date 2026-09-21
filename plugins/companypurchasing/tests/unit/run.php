@@ -84,11 +84,13 @@ ok('REQUEST_SCOPE NO contiene claves comerciales', ScopeCatalog::isFreeOfCommerc
 ok('COMMERCIAL_FINANCIAL_SCOPE SÍ contiene claves comerciales', ScopeCatalog::isFreeOfCommercialKeys($comFields) === false);
 ok('REQUEST_SCOPE incluye líneas y solicitante', in_array('lines', $reqFields, true) && in_array('requester', $reqFields, true));
 
-// Record semántico de ejemplo (como lo produciría el builder) con campos comerciales presentes.
+// Record semántico de ejemplo (todas las claves de `ALLOWED_KEYS` producibles): cada scope SELECCIONA
+// su subconjunto. Incluye las claves comerciales (P2D-2) para poder ejercitar COMMERCIAL_FINANCIAL_SCOPE.
 $full = [
     'requester' => 7, 'department' => 3, 'category' => 'IT', 'destination' => 'Depósito',
     'reason' => 'motivo', 'observations' => 'obs', 'budget' => 0,
-    'currency' => 'PYG', 'total' => '5000', 'suppliers_id_selected' => 99, 'final_prices' => ['a'],
+    'currency' => 'PYG', 'total' => '5000', 'suppliers_id_selected' => 99, 'selected_quote' => 12,
+    'final_prices' => ['a'], 'discounts' => '0', 'taxes' => '0', 'freight' => '0',
     'lines' => [['description' => 'x', 'category' => 'IT', 'quantity' => '2', 'unit' => 'u', 'is_inventoriable' => 1]],
 ];
 $req1 = ScopeSnapshotBuilder::selectFields($full, $reqFields);
@@ -100,6 +102,9 @@ ok('campos comerciales NO contaminan el payload REQUEST_SCOPE', $commercialLeak 
 ok('REQUEST_SCOPE sí incluye las líneas', isset($req1['lines']) && $req1['lines'][0]['description'] === 'x');
 $com1 = ScopeSnapshotBuilder::selectFields($full, $comFields);
 ok('COMMERCIAL_FINANCIAL_SCOPE incluye proveedor/total', isset($com1['suppliers_id_selected'], $com1['total']));
+// FAIL-CLOSED: una clave protegida que el record NO puede producir jamás se ignora en silencio.
+ok('selectFields con clave no producible → lanza (fail-closed)', throws(fn() => ScopeSnapshotBuilder::selectFields(['requester' => 1], ['requester', 'suppliers_id_selected'])));
+ok('selectFields con typo → lanza (no snapshot parcial)', throws(fn() => ScopeSnapshotBuilder::selectFields($full, ['requester', 'quantitty'])));
 
 echo "== Numeración (formato estable) ==\n";
 ok('formato "REQUEST-2026-000007"', NumberingService::formatNumber('request', 2026, 7) === 'REQUEST-2026-000007');

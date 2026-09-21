@@ -110,9 +110,11 @@ function plugin_companypurchasing_install() {
         `actor_users_id` INT UNSIGNED NOT NULL DEFAULT 0,
         `entities_id` INT UNSIGNED NOT NULL DEFAULT 0,
         `correlation_id` VARCHAR(64) NOT NULL DEFAULT '',
+        `idempotency_key` VARCHAR(190) DEFAULT NULL,
         `detail` LONGTEXT DEFAULT NULL,
         `date_creation` TIMESTAMP NULL DEFAULT NULL,
         PRIMARY KEY (`id`),
+        UNIQUE KEY `idempotency_key` (`idempotency_key`),
         KEY `requests_id` (`requests_id`),
         KEY `event` (`event`),
         KEY `entities_id` (`entities_id`)

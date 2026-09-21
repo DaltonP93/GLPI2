@@ -13,8 +13,12 @@
  *   [ACL]         crear/editar sin permiso → denegado (fail-closed).
  *   [MULTI-ENT]   solicitud de la entidad A no visible desde sesión en la entidad B.
  *   [REUSE]       Supplier/Budget nativos referenciados (no se duplican maestros).
+ *   [IDENTITY]    (C) solicitante = usuario autenticado; is_recursive baseline 0; departamento visible.
+ *   [SCOPE-*]     (B) pinning fail-closed + validación semántica del vocabulario de scopes.
  *   [NEG]         line_no duplicado; reordenar cambia line_no no identidad; decimal inválido;
  *                 PYG con fracción; cantidad inválida.
+ *   [CONCURRENCY] (A) procesos REALES en paralelo: numeración, doble submit, edit/addline vs submit.
+ *   [CRASH-SAFE]  (D) submit + auditoría atómicos/durables: fallo del evento → rollback (no PENDING).
  *   [MIGRATE]     install/uninstall/reinstall reversible (al final, tras limpiar objetos core).
  *
  * @license GPL-3.0-or-later
@@ -32,6 +36,7 @@ use GlpiPlugin\Companypurchasing\Model\PurchasingEvent;
 use GlpiPlugin\Companypurchasing\Model\Request;
 use GlpiPlugin\Companypurchasing\Model\RequestItem;
 use GlpiPlugin\Companypurchasing\Model\ScopeDef;
+use GlpiPlugin\Companypurchasing\Service\Audit;
 use GlpiPlugin\Companypurchasing\Service\NumberingService;
 use GlpiPlugin\Companypurchasing\Service\RequestManager;
 use GlpiPlugin\Companypurchasing\Service\ScopeCatalog;
@@ -50,12 +55,14 @@ final class SelftestCommand extends Command
     /** @var array<int,int> */
     private array $createdEntities = [];
     private array $createdUsers = [];
+    private array $createdGroups = [];
     private array $createdSuppliers = [];
     private array $createdBudgets = [];
 
     private int $entityA = 0;
     private int $entityB = 0;
     private int $uOwner = 0;
+    private int $gDept = 0;
 
     /** Bits activos en P2D-1. */
     private const FULL = READ
@@ -84,10 +91,14 @@ final class SelftestCommand extends Command
             $this->scenarioAcl();
             $this->scenarioMultiEntity();
             $this->scenarioSupplierBudget();
+            $this->scenarioRequesterIdentity();
             $this->scenarioScopeFailClosed();
+            $this->scenarioScopeSemantic();
             $this->scenarioNegatives();
             $this->scenarioConcurrentNumbering();
             $this->scenarioConcurrentSubmit();
+            $this->scenarioConcurrentMutations();
+            $this->scenarioSubmitCrashSafe();
         } catch (\Throwable $e) {
             $this->out->writeln('<error>EXCEPCIÓN: ' . $e->getMessage() . '</error>');
             $this->failures++;
@@ -114,7 +125,8 @@ final class SelftestCommand extends Command
         $this->entityA = $this->makeEntity('A');
         $this->entityB = $this->makeEntity('B');
         $this->uOwner  = $this->makeUser('owner');
-        $this->check('[SETUP] entidades + usuario', $this->entityA > 0 && $this->entityB > 0 && $this->uOwner > 0);
+        $this->gDept   = $this->makeGroup('dept', $this->entityA);
+        $this->check('[SETUP] entidades + usuario + grupo', $this->entityA > 0 && $this->entityB > 0 && $this->uOwner > 0 && $this->gDept > 0);
     }
 
     // ---------------------------------------------------------------- [PERSIST]
@@ -195,7 +207,7 @@ final class SelftestCommand extends Command
 
         $reqId = $rm->createDraft([
             'entities_id' => $this->entityA, 'currency_code' => 'PYG',
-            'groups_id_department' => 5, 'category' => 'IT', 'destination' => 'Depósito', 'reason' => 'e2e',
+            'groups_id_department' => $this->gDept, 'category' => 'IT', 'destination' => 'Depósito', 'reason' => 'e2e',
         ]);
         $l1 = $rm->addLine($reqId, ['description' => 'Notebook', 'quantity' => '2', 'unit' => 'u', 'estimated_unit_price' => '5000000', 'is_inventoriable' => 1]);
         $rm->addLine($reqId, ['description' => 'Cable', 'quantity' => '10', 'unit' => 'u', 'estimated_unit_price' => '15000', 'is_inventoriable' => 0]);
@@ -434,6 +446,196 @@ final class SelftestCommand extends Command
         $this->check('[CONCURRENCY] un solo evento REQUEST_SUBMITTED', $this->countEvents($reqId, PurchasingEvent::EV_REQUEST_SUBMITTED) === 1);
     }
 
+    // ---------------------------------------------------------------- [IDENTITY]
+
+    /**
+     * Invariante C: el solicitante es SIEMPRE el usuario autenticado (no hay "crear en nombre de" en
+     * P2D-1); `is_recursive` no queda bajo control del solicitante; el departamento debe existir y ser
+     * visible desde la entidad de la solicitud.
+     */
+    private function scenarioRequesterIdentity(): void
+    {
+        $this->out->writeln('== [IDENTITY] solicitante = usuario autenticado; departamento válido/visible ==');
+        // Grupo en la entidad B (creado con una sesión amplia) para probar el cruce de entidad.
+        $this->applySession($this->uOwner, [$this->entityA, $this->entityB], ['plugin_companypurchasing' => self::FULL], 1);
+        $gB = $this->makeGroup('deptB', $this->entityB);
+
+        // Sesión de trabajo: SÓLO entidad A; usuario autenticado = uOwner.
+        $this->applySession($this->uOwner, [$this->entityA], ['plugin_companypurchasing' => self::FULL]);
+        $rm = new RequestManager();
+
+        // (1) Declarar OTRO solicitante → rechazado (CREATE_REQUEST no concede "en nombre de").
+        $this->check('[IDENTITY] declarar OTRO solicitante → rechazado', $this->throws(fn() => $rm->createDraft([
+            'entities_id' => $this->entityA, 'users_id_requester' => 999999, 'reason' => 'spoof',
+        ])));
+
+        // (2) Solicitante = usuario autenticado; (3) is_recursive forzado a 0 aunque el input pida 1.
+        $reqId = $rm->createDraft(['entities_id' => $this->entityA, 'is_recursive' => 1, 'reason' => 'identity']);
+        $req = new Request();
+        $req->getFromDB($reqId);
+        $this->check('[IDENTITY] users_id_requester = usuario autenticado', (int) $req->fields['users_id_requester'] === $this->uOwner);
+        $this->check('[IDENTITY] is_recursive fuera del control del solicitante (baseline 0)', (int) $req->fields['is_recursive'] === 0);
+
+        // (4) Departamento inexistente → rechazado.
+        $this->check('[IDENTITY] groups_id_department inexistente → rechazado', $this->throws(fn() => $rm->createDraft([
+            'entities_id' => $this->entityA, 'groups_id_department' => 99999999, 'reason' => 'nogrp',
+        ])));
+
+        // (5) Departamento de OTRA entidad (no visible desde A) → rechazado.
+        $this->check('[IDENTITY] groups_id_department de otra entidad → rechazado', $this->throws(fn() => $rm->createDraft([
+            'entities_id' => $this->entityA, 'groups_id_department' => $gB, 'reason' => 'crossgrp',
+        ])));
+
+        // Departamento válido y visible → aceptado.
+        $reqOk = $rm->createDraft(['entities_id' => $this->entityA, 'groups_id_department' => $this->gDept, 'reason' => 'okgrp']);
+        $reqO = new Request();
+        $reqO->getFromDB($reqOk);
+        $this->check('[IDENTITY] departamento válido/visible → aceptado', (int) $reqO->fields['groups_id_department'] === $this->gDept);
+    }
+
+    // ---------------------------------------------------------------- [SCOPE-SEMANTIC]
+
+    /**
+     * Invariante B: validación SEMÁNTICA del vocabulario de scopes. `assertVersionComplete()` rechaza
+     * typo/clave desconocida, duplicados, REQUEST_SCOPE contaminado con claves comerciales, incumplir
+     * baseline y scope vacío; `selectFields()` es fail-closed ante una clave protegida no producible.
+     */
+    private function scenarioScopeSemantic(): void
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $this->out->writeln('== [SCOPE-SEMANTIC] validación semántica del vocabulario de scopes ==');
+        $table  = ScopeDef::getTable();
+        $reqKey = ScopeCatalog::SCOPE_REQUEST;
+        $orig   = json_encode(ScopeCatalog::defaultFields($reqKey, 1));
+
+        $setReq = static function (array $fields) use ($DB, $table, $reqKey): void {
+            $DB->update($table, ['fields_json' => json_encode($fields)], ['scopes_version' => 1, 'scope_key' => $reqKey]);
+        };
+
+        $setReq(['requester', 'quantitty', 'lines']); // typo
+        $this->check('[SCOPE-SEMANTIC] clave typo/desconocida → assertVersionComplete lanza', $this->throws(fn() => ScopeCatalog::assertVersionComplete(1)));
+
+        $setReq(['requester', 'requester', 'lines']); // duplicada
+        $this->check('[SCOPE-SEMANTIC] clave duplicada → lanza', $this->throws(fn() => ScopeCatalog::assertVersionComplete(1)));
+
+        $setReq(['requester', 'lines', 'total']); // clave comercial en REQUEST_SCOPE
+        $this->check('[SCOPE-SEMANTIC] REQUEST_SCOPE con clave comercial → lanza', $this->throws(fn() => ScopeCatalog::assertVersionComplete(1)));
+
+        $setReq(['lines', 'category']); // incumple baseline (falta requester)
+        $this->check('[SCOPE-SEMANTIC] REQUEST_SCOPE sin baseline (requester) → lanza', $this->throws(fn() => ScopeCatalog::assertVersionComplete(1)));
+
+        $setReq([]); // vacío
+        $this->check('[SCOPE-SEMANTIC] scope vacío → lanza', $this->throws(fn() => ScopeCatalog::assertVersionComplete(1)));
+
+        // Restaurar la definición válida y confirmar que vuelve a validar (no queda envenenada).
+        $DB->update($table, ['fields_json' => $orig], ['scopes_version' => 1, 'scope_key' => $reqKey]);
+        $restored = false;
+        try {
+            ScopeCatalog::assertVersionComplete(1);
+            $restored = true;
+        } catch (\Throwable) {
+        }
+        $this->check('[SCOPE-SEMANTIC] definición restaurada → válida de nuevo', $restored);
+
+        // selectFields fail-closed: una clave protegida que el builder NO produce → lanza (no snapshot parcial).
+        $this->check('[SCOPE-SEMANTIC] selectFields con clave no producible → lanza (fail-closed)', $this->throws(fn() => ScopeSnapshotBuilder::selectFields(['requester' => 1], ['requester', 'suppliers_id_selected'])));
+    }
+
+    // ---------------------------------------------------------------- [CONCURRENCY-MUT]
+
+    /**
+     * Invariante A: TODAS las mutaciones de una solicitud se serializan bajo el lock común `request_<id>`.
+     * Nunca se edita un DRAFT que otro worker ya envió (efecto parcial post-PENDING) ni queda un total
+     * stale respecto de las líneas. Procesos REALES en paralelo.
+     */
+    private function scenarioConcurrentMutations(): void
+    {
+        $this->out->writeln('== [CONCURRENCY-MUT] mutaciones serializadas por el lock común de la solicitud ==');
+        $this->applySession($this->uOwner, [$this->entityA], ['plugin_companypurchasing' => self::FULL]);
+        $rm = new RequestManager();
+
+        // (1) editar-vs-enviar en PARALELO.
+        $r1 = $rm->createDraft(['entities_id' => $this->entityA, 'reason' => 'edit-vs-submit', 'observations' => 'orig']);
+        $rm->addLine($r1, ['description' => 'x', 'quantity' => '1', 'estimated_unit_price' => '1000', 'is_inventoriable' => 0]);
+        $editCmd = 'php bin/console plugins:companypurchasing:concurrency-probe --op=edit --request=' . $r1 . ' --no-interaction';
+        $subCmd1 = 'php bin/console plugins:companypurchasing:concurrency-probe --op=submit --request=' . $r1 . ' --no-interaction';
+        $o1 = $this->runParallel([$editCmd, $subCmd1]);
+        $this->out->writeln('  edit|submit: ' . implode(' | ', $o1));
+        $req1 = new Request();
+        $req1->getFromDB($r1);
+        $this->check('[CONCURRENCY-MUT] edit-vs-submit: termina PENDING con número', (string) $req1->fields['domain_state'] === Request::STATE_PENDING && (int) $req1->fields['number_seq'] > 0);
+        $this->check('[CONCURRENCY-MUT] edit-vs-submit: un solo REQUEST_SUBMITTED', $this->countEvents($r1, PurchasingEvent::EV_REQUEST_SUBMITTED) === 1);
+        // Si el edit fue OK (ganó el lock antes del submit), su efecto es COMPLETO; si perdió, el DRAFT ya
+        // no era editable (ERR) y no dejó rastro parcial. Jamás un edit a medias tras quedar PENDING.
+        $editOk = str_contains($o1[0] ?? '', 'OK:edited');
+        $this->check('[CONCURRENCY-MUT] edit-vs-submit: si el edit fue OK, su efecto es completo (no parcial)', !$editOk || str_starts_with((string) $req1->fields['observations'], 'edited-'));
+        $this->check('[CONCURRENCY-MUT] edit-vs-submit: si el edit perdió, no hubo cambio parcial', $editOk || (string) $req1->fields['observations'] === 'orig');
+
+        // (2) agregar-línea-vs-enviar: el total nunca queda stale respecto de las líneas.
+        $r2 = $rm->createDraft(['entities_id' => $this->entityA, 'reason' => 'addline-vs-submit']);
+        $rm->addLine($r2, ['description' => 'base', 'quantity' => '1', 'estimated_unit_price' => '1000', 'is_inventoriable' => 0]);
+        $addCmd  = 'php bin/console plugins:companypurchasing:concurrency-probe --op=addline --request=' . $r2 . ' --no-interaction';
+        $subCmd2 = 'php bin/console plugins:companypurchasing:concurrency-probe --op=submit --request=' . $r2 . ' --no-interaction';
+        $o2 = $this->runParallel([$addCmd, $subCmd2]);
+        $this->out->writeln('  addline|submit: ' . implode(' | ', $o2));
+        $this->check('[CONCURRENCY-MUT] addline-vs-submit: total consistente con las líneas', $this->totalMatchesLines($r2));
+        $this->check('[CONCURRENCY-MUT] addline-vs-submit: un solo REQUEST_SUBMITTED', $this->countEvents($r2, PurchasingEvent::EV_REQUEST_SUBMITTED) === 1);
+
+        // (3) dos addLine SIMULTÁNEOS: ambas líneas persisten (line_no serializado) y el total cuadra.
+        $r3 = $rm->createDraft(['entities_id' => $this->entityA, 'reason' => 'addline-x2']);
+        $rm->addLine($r3, ['description' => 'base', 'quantity' => '1', 'estimated_unit_price' => '1000', 'is_inventoriable' => 0]);
+        $addC = 'php bin/console plugins:companypurchasing:concurrency-probe --op=addline --request=' . $r3 . ' --no-interaction';
+        $o3 = $this->runParallel([$addC, $addC]);
+        $this->out->writeln('  addline x2: ' . implode(' | ', $o3));
+        $bothOk = count(array_filter($o3, static fn($o) => str_starts_with((string) $o, 'OK:'))) === 2;
+        $this->check('[CONCURRENCY-MUT] dos addLine simultáneos: ambos OK (line_no serializado)', $bothOk);
+        $this->check('[CONCURRENCY-MUT] dos addLine simultáneos: 3 líneas persistidas', count($rm->loadItems($r3)) === 3);
+        $this->check('[CONCURRENCY-MUT] dos addLine simultáneos: total cuadra con líneas', $this->totalMatchesLines($r3));
+    }
+
+    // ---------------------------------------------------------------- [CRASH-SAFE]
+
+    /**
+     * Invariante D: la frontera submit + auditoría es ATÓMICA y DURABLE (PENDING ⇔ existe exactamente un
+     * REQUEST_SUBMITTED durable). Si el evento no persiste, ROLLBACK: la solicitud NO queda PENDING. El
+     * reintento completa y deja exactamente un REQUEST_SUBMITTED (idempotency_key durable).
+     */
+    private function scenarioSubmitCrashSafe(): void
+    {
+        $this->out->writeln('== [CRASH-SAFE] submit + auditoría atómicos y durables ==');
+        $this->applySession($this->uOwner, [$this->entityA], ['plugin_companypurchasing' => self::FULL]);
+        $rm = new RequestManager();
+        $reqId = $rm->createDraft(['entities_id' => $this->entityA, 'reason' => 'crashsafe']);
+        $rm->addLine($reqId, ['description' => 'x', 'quantity' => '1', 'estimated_unit_price' => '1000', 'is_inventoriable' => 0]);
+
+        // Auditoría que FALLA deliberadamente SÓLO al registrar REQUEST_SUBMITTED (simula una caída entre
+        // el UPDATE DRAFT→PENDING y el INSERT del evento). La frontera atómica debe hacer ROLLBACK.
+        $failingAudit = new class extends Audit {
+            public function record(int $requestsId, string $event, int $entitiesId, array $detail = [], string $correlationId = '', ?string $idempotencyKey = null): void
+            {
+                if ($event === PurchasingEvent::EV_REQUEST_SUBMITTED) {
+                    throw new \RuntimeException('fallo deliberado al registrar REQUEST_SUBMITTED (crash simulado)');
+                }
+                parent::record($requestsId, $event, $entitiesId, $detail, $correlationId, $idempotencyKey);
+            }
+        };
+        $rmFail = new RequestManager(null, $failingAudit);
+        $this->check('[CRASH-SAFE] submit lanza si el evento no persiste', $this->throws(fn() => $rmFail->submitDraft($reqId)));
+
+        $req = new Request();
+        $req->getFromDB($reqId);
+        $this->check('[CRASH-SAFE] la solicitud NO queda PENDING (rollback)', $req->isDraft() && $req->fields['number'] === null && (int) ($req->fields['number_seq'] ?? 0) === 0);
+        $this->check('[CRASH-SAFE] 0 eventos REQUEST_SUBMITTED tras el fallo', $this->countEvents($reqId, PurchasingEvent::EV_REQUEST_SUBMITTED) === 0);
+
+        // Reintento con auditoría normal: completa y deja EXACTAMENTE un REQUEST_SUBMITTED durable.
+        $seq = $rm->submitDraft($reqId);
+        $req2 = new Request();
+        $req2->getFromDB($reqId);
+        $this->check('[CRASH-SAFE] reintento → PENDING con número', (string) $req2->fields['domain_state'] === Request::STATE_PENDING && (int) $req2->fields['number_seq'] === $seq && $seq > 0);
+        $this->check('[CRASH-SAFE] exactamente un REQUEST_SUBMITTED tras recuperar', $this->countEvents($reqId, PurchasingEvent::EV_REQUEST_SUBMITTED) === 1);
+    }
+
     // ---------------------------------------------------------------- [MIGRATE]
 
     private function scenarioReinstall(): void
@@ -563,6 +765,15 @@ final class SelftestCommand extends Command
         return $id;
     }
 
+    private function makeGroup(string $tag, int $entity): int
+    {
+        $id = (int) (new \Group())->add(['name' => 'CP-GRP-' . $tag . '-' . $this->suffix, 'entities_id' => $entity, 'is_recursive' => 0]);
+        if ($id > 0) {
+            $this->createdGroups[] = $id;
+        }
+        return $id;
+    }
+
     /**
      * @param array<int>        $entities
      * @param array<string,int> $rights
@@ -601,6 +812,9 @@ final class SelftestCommand extends Command
             }
             foreach ($this->createdBudgets as $b) {
                 (new Budget())->delete(['id' => $b], true);
+            }
+            foreach ($this->createdGroups as $g) {
+                (new \Group())->delete(['id' => $g], true);
             }
             foreach ($this->createdUsers as $u) {
                 (new User())->delete(['id' => $u], true);

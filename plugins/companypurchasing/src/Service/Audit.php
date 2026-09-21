@@ -16,16 +16,25 @@ namespace GlpiPlugin\Companypurchasing\Service;
 use Session;
 use GlpiPlugin\Companypurchasing\Model\PurchasingEvent;
 
-final class Audit
+// No es `final`: los tests deterministas de crash-safety pueden subclasearla para forzar el fallo del
+// registro del evento de submit (verificar que la solicitud NO queda PENDING si el evento no persiste).
+class Audit
 {
     /** Claves que NUNCA se registran (evita filtrar secretos por accidente). */
     private const REDACT = ['password', 'passwd', 'token', 'secret', 'api_key', 'apikey', 'authorization'];
 
-    /** @param array<string,mixed> $detail */
-    public function record(int $requestsId, string $event, int $entitiesId, array $detail = [], string $correlationId = ''): void
+    /**
+     * Registra un evento de negocio. FAIL-CLOSED: comprueba el resultado de `PurchasingEvent::add()` y
+     * LANZA si no pudo persistir (un evento de auditoría perdido es un problema real). `idempotencyKey`
+     * (opcional) fija la identidad idempotente durable del evento (UNIQUE en la tabla).
+     *
+     * @param array<string,mixed> $detail
+     * @throws \RuntimeException
+     */
+    public function record(int $requestsId, string $event, int $entitiesId, array $detail = [], string $correlationId = '', ?string $idempotencyKey = null): void
     {
         $now = $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s');
-        (new PurchasingEvent())->add([
+        $input = [
             'requests_id'    => $requestsId,
             'event'          => substr($event, 0, 60),
             'actor_users_id' => (int) (Session::getLoginUserID() ?: 0),
@@ -33,7 +42,14 @@ final class Audit
             'correlation_id' => substr($correlationId, 0, 64),
             'detail'         => json_encode($this->sanitize($detail), JSON_UNESCAPED_UNICODE),
             'date_creation'  => $now,
-        ]);
+        ];
+        if ($idempotencyKey !== null && $idempotencyKey !== '') {
+            $input['idempotency_key'] = substr($idempotencyKey, 0, 190);
+        }
+        $eventId = (int) (new PurchasingEvent())->add($input);
+        if ($eventId <= 0) {
+            throw new \RuntimeException('no se pudo persistir el evento de auditoría: ' . $event);
+        }
     }
 
     /**

@@ -52,20 +52,36 @@ final class ConcurrencyProbeCommand extends Command
                 $output->writeln('OK:' . $seq);
                 return Command::SUCCESS;
             }
-            if ($op === 'submit') {
-                $reqId = (int) $input->getOption('request');
-                $req = new Request();
-                if (!$req->getFromDB($reqId)) {
-                    $output->writeln('ERR:inexistente');
-                    return Command::SUCCESS;
-                }
-                $this->applySession((int) $req->fields['users_id_creator'], (int) $req->fields['entities_id']);
-                $seq = (new RequestManager())->submitDraft($reqId);
-                $output->writeln('OK:' . $seq);
+
+            // Operaciones sobre una solicitud existente (submit / edit / addline): se aplica una sesión
+            // con los derechos del creador en la entidad de la solicitud.
+            $reqId = (int) $input->getOption('request');
+            $req = new Request();
+            if (!$req->getFromDB($reqId)) {
+                $output->writeln('ERR:inexistente');
                 return Command::SUCCESS;
             }
-            $output->writeln('ERR:op-desconocida');
-            return Command::SUCCESS;
+            $this->applySession((int) $req->fields['users_id_creator'], (int) $req->fields['entities_id']);
+            $rm = new RequestManager();
+            switch ($op) {
+                case 'submit':
+                    $output->writeln('OK:' . $rm->submitDraft($reqId));
+                    return Command::SUCCESS;
+                case 'edit':
+                    $rm->updateDraft($reqId, ['observations' => 'edited-' . getmypid()]);
+                    $output->writeln('OK:edited');
+                    return Command::SUCCESS;
+                case 'addline':
+                    $lineId = $rm->addLine($reqId, [
+                        'description' => 'conc-' . getmypid(), 'quantity' => '1',
+                        'estimated_unit_price' => '1000', 'is_inventoriable' => 0,
+                    ]);
+                    $output->writeln('OK:' . $lineId);
+                    return Command::SUCCESS;
+                default:
+                    $output->writeln('ERR:op-desconocida');
+                    return Command::SUCCESS;
+            }
         } catch (\Throwable $e) {
             $output->writeln('ERR:' . $e->getMessage());
             return Command::SUCCESS;
