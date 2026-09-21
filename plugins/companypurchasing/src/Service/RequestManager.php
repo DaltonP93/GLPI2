@@ -664,9 +664,15 @@ final class RequestManager
      * `$requestEntity`, según la semántica NATIVA del árbol de entidades de GLPI?
      *   - misma entidad → siempre aplicable;
      *   - recursivo → aplicable si `$refEntity` es la propia o un ANCESTRO de `$requestEntity` (se hereda
-     *     hacia abajo). Se resuelve con las utilidades nativas del árbol (`getSonsOf`/`getAncestorsOf`);
+     *     hacia abajo);
      *   - de otra RAMA (ni misma entidad ni ancestro recursivo) → NO aplicable.
-     * Fail-closed: si no hubiera utilidad nativa del árbol, sólo se admite la misma entidad.
+     *
+     * Se consultan AMBAS vistas nativas del árbol y basta con que UNA confirme la relación: los ancestros
+     * de la SOLICITUD (`getAncestorsOf`, que se computa desde su cadena `entities_id` viva) y los
+     * descendientes de la REFERENCIA (`getSonsOf`). Esto es robusto ante una caché de árbol recién
+     * actualizada (p. ej. una entidad creada en el mismo proceso): una caché obsoleta sólo puede OMITIR un
+     * vínculo nuevo (falso negativo), nunca inventar uno cross-branch (falso positivo). Fail-closed: sin
+     * utilidad nativa del árbol, sólo se admite la misma entidad.
      */
     private static function isEntityApplicable(int $refEntity, bool $refRecursive, int $requestEntity): bool
     {
@@ -676,20 +682,21 @@ final class RequestManager
         if (!$refRecursive) {
             return false; // no recursivo: sólo su propia entidad
         }
-        // Recursivo hacia ABAJO: la referencia aplica si su entidad es ancestro de la de la solicitud.
-        if (function_exists('getSonsOf')) {
-            $sons = getSonsOf('glpi_entities', $refEntity); // incluye $refEntity + descendientes
-            if (is_array($sons)) {
-                return in_array($requestEntity, array_map('intval', array_values($sons)), true);
-            }
-        }
+        // (a) Ancestros de la SOLICITUD: fresco incluso para una entidad recién creada (cadena viva).
         if (function_exists('getAncestorsOf')) {
-            $ancestors = getAncestorsOf('glpi_entities', $requestEntity); // ancestros de la solicitud
-            if (is_array($ancestors)) {
-                return in_array($refEntity, array_map('intval', array_values($ancestors)), true);
+            $ancestors = getAncestorsOf('glpi_entities', $requestEntity);
+            if (is_array($ancestors) && in_array($refEntity, array_map('intval', array_values($ancestors)), true)) {
+                return true;
             }
         }
-        return false; // sin utilidad nativa del árbol → fail-closed (sólo misma entidad, ya cubierta)
+        // (b) Descendientes de la REFERENCIA (segunda vista; incluye $refEntity + descendientes).
+        if (function_exists('getSonsOf')) {
+            $sons = getSonsOf('glpi_entities', $refEntity);
+            if (is_array($sons) && in_array($requestEntity, array_map('intval', array_values($sons)), true)) {
+                return true;
+            }
+        }
+        return false; // ninguna vista nativa lo confirma → no aplicable (otra rama)
     }
 
     private function safeRollback(\DBmysql $DB): void
