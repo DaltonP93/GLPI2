@@ -166,7 +166,7 @@ jobs:
           # aleatoriamente un comando EXISTENTE: `grep -q` cierra el pipe al primer match y
           # `bin/console list` recibe SIGPIPE (exit 141), que pipefail propaga como fallo del `if`. Eso
           # producía un FALSO VERDE que jamás ejecutaba estos selftests. Ver tests/ci/verify-selftests-mandatory.sh.
-          for p in companyworkflow companyintegrations companysignature; do
+          for p in companyworkflow companyintegrations companysignature companypurchasing; do
             echo "== selftest ${p} =="
             docker compose exec -T -u www-data glpi php bin/console "plugins:${p}:selftest" --no-interaction
           done

@@ -1,0 +1,61 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: companypurchasing 0.2.0\n"
+"Report-Msgid-Bugs-To: \n"
+"Language: es_ES\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Purchase request"
+msgid_plural "Purchase requests"
+msgstr[0] "Solicitud de compra"
+msgstr[1] "Solicitudes de compra"
+
+msgid "Request line"
+msgid_plural "Request lines"
+msgstr[0] "Línea de solicitud"
+msgstr[1] "Líneas de solicitud"
+
+msgid "Purchasing event"
+msgid_plural "Purchasing events"
+msgstr[0] "Evento de compras"
+msgstr[1] "Eventos de compras"
+
+msgid "Numbering sequence"
+msgid_plural "Numbering sequences"
+msgstr[0] "Secuencia de numeración"
+msgstr[1] "Secuencias de numeración"
+
+msgid "Approval scope"
+msgid_plural "Approval scopes"
+msgstr[0] "Scope de aprobación"
+msgstr[1] "Scopes de aprobación"
+
+msgid "Create purchase request"
+msgstr "Crear solicitud de compra"
+
+msgid "View own requests"
+msgstr "Ver solicitudes propias"
+
+msgid "View entity requests"
+msgstr "Ver solicitudes de la entidad"
+
+msgid "Edit draft request"
+msgstr "Editar solicitud en borrador"
+
+msgid "Manage purchasing configuration"
+msgstr "Administrar configuración de compras"
+
+msgid "Manage purchasing (quotes/selection)"
+msgstr "Gestionar compras (cotizaciones/selección)"
+
+msgid "Receive goods"
+msgstr "Registrar recepción"
+
+msgid "Deliver goods"
+msgstr "Registrar entrega"
+
+msgid "View purchasing metrics"
+msgstr "Ver métricas de compras"
