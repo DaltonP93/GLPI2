@@ -13,6 +13,8 @@
  *   [ACL]         crear/editar sin permiso → denegado (fail-closed).
  *   [MULTI-ENT]   solicitud de la entidad A no visible desde sesión en la entidad B.
  *   [REUSE]       Supplier/Budget nativos referenciados (no se duplican maestros).
+ *   [REF-ENTITY]  referencias válidas PARA la entidad de la solicitud (misma/ancestro recursivo; no cross-branch).
+ *   [ROLLBACK]    mutación + auditoría atómicas: fallo de Audit → rollback (sin dato/evento parcial).
  *   [IDENTITY]    (C) solicitante = usuario autenticado; is_recursive baseline 0; departamento visible.
  *   [SCOPE-*]     (B) pinning fail-closed + validación semántica del vocabulario de scopes.
  *   [NEG]         line_no duplicado; reordenar cambia line_no no identidad; decimal inválido;
@@ -91,6 +93,7 @@ final class SelftestCommand extends Command
             $this->scenarioAcl();
             $this->scenarioMultiEntity();
             $this->scenarioSupplierBudget();
+            $this->scenarioReferenceEntityScope();
             $this->scenarioRequesterIdentity();
             $this->scenarioScopeFailClosed();
             $this->scenarioScopeSemantic();
@@ -99,6 +102,7 @@ final class SelftestCommand extends Command
             $this->scenarioConcurrentSubmit();
             $this->scenarioConcurrentMutations();
             $this->scenarioSubmitCrashSafe();
+            $this->scenarioMutationRollback();
         } catch (\Throwable $e) {
             $this->out->writeln('<error>EXCEPCIÓN: ' . $e->getMessage() . '</error>');
             $this->failures++;
@@ -636,6 +640,149 @@ final class SelftestCommand extends Command
         $this->check('[CRASH-SAFE] exactamente un REQUEST_SUBMITTED tras recuperar', $this->countEvents($reqId, PurchasingEvent::EV_REQUEST_SUBMITTED) === 1);
     }
 
+    // ---------------------------------------------------------------- [REF-ENTITY]
+
+    /**
+     * Punto 3: las referencias nativas se validan contra la ENTIDAD de la solicitud (no contra la
+     * sesión). Un usuario con acceso a A+B NO puede adjuntar a una solicitud de A un maestro exclusivo de
+     * la rama B; un maestro RECURSIVO de una entidad ANCESTRO sí aplica a una solicitud de la entidad hija.
+     */
+    private function scenarioReferenceEntityScope(): void
+    {
+        $this->out->writeln('== [REF-ENTITY] referencias válidas PARA la entidad de la solicitud ==');
+        // Entidad HIJA de A (para el caso recursivo/ancestro permitido). El mock de sesión no expande
+        // descendientes, así que la incluimos explícitamente en la sesión de trabajo.
+        $this->applySession($this->uOwner, [$this->entityA, $this->entityB], ['plugin_companypurchasing' => self::FULL], 1);
+        $childA = (int) (new Entity())->add(['name' => 'CP-ENT-AC-' . $this->suffix, 'entities_id' => $this->entityA]);
+        if ($childA > 0) {
+            $this->createdEntities[] = $childA;
+        }
+        $this->applySession($this->uOwner, [$this->entityA, $this->entityB, $childA], ['plugin_companypurchasing' => self::FULL], 1);
+
+        $supArec  = (int) (new Supplier())->add(['name' => 'CP-SUPAR-' . $this->suffix, 'entities_id' => $this->entityA, 'is_recursive' => 1]); // A, recursivo
+        $supAflat = (int) (new Supplier())->add(['name' => 'CP-SUPAF-' . $this->suffix, 'entities_id' => $this->entityA, 'is_recursive' => 0]); // A, no recursivo
+        $supBrec  = (int) (new Supplier())->add(['name' => 'CP-SUPBR-' . $this->suffix, 'entities_id' => $this->entityB, 'is_recursive' => 1]); // B, recursivo (otra rama)
+        foreach ([$supArec, $supAflat, $supBrec] as $s) {
+            if ($s > 0) {
+                $this->createdSuppliers[] = $s;
+            }
+        }
+        $this->check('[REF-ENTITY] fixtures (entidad hija + suppliers A/B) creados', $childA > 0 && $supArec > 0 && $supAflat > 0 && $supBrec > 0);
+
+        $rm = new RequestManager();
+
+        // (1) Sesión con acceso A+B; solicitud en A; Supplier EXCLUSIVO de la rama B (aunque el usuario ve
+        // B) → RECHAZO. Esto es lo que `haveAccessToEntity` sola no distinguía.
+        $this->check('[REF-ENTITY] Supplier de OTRA rama (B) para solicitud en A, con sesión A+B → rechazo', $this->throws(fn() => $rm->createDraft([
+            'entities_id' => $this->entityA, 'suppliers_id_suggested' => $supBrec, 'reason' => 'refent-b',
+        ])));
+
+        // (2) Solicitud en A; Supplier de la MISMA entidad A → aceptado.
+        $okSame = false;
+        try {
+            $okSame = $rm->createDraft(['entities_id' => $this->entityA, 'suppliers_id_suggested' => $supArec, 'reason' => 'refent-a']) > 0;
+        } catch (\Throwable) {
+        }
+        $this->check('[REF-ENTITY] Supplier de la MISMA entidad (A) → aceptado', $okSame);
+
+        // (3) Solicitud en la entidad HIJA de A; Supplier RECURSIVO del ANCESTRO (A) → aceptado (hereda).
+        $okAncestor = false;
+        try {
+            $okAncestor = $rm->createDraft(['entities_id' => $childA, 'suppliers_id_suggested' => $supArec, 'reason' => 'refent-anc']) > 0;
+        } catch (\Throwable) {
+        }
+        $this->check('[REF-ENTITY] Supplier RECURSIVO del ancestro (A) para solicitud en la hija → aceptado', $okAncestor);
+
+        // (4) Solicitud en la hija; Supplier NO recursivo del ancestro (A) → RECHAZO (no se hereda).
+        $this->check('[REF-ENTITY] Supplier NO recursivo del ancestro para solicitud en la hija → rechazo', $this->throws(fn() => $rm->createDraft([
+            'entities_id' => $childA, 'suppliers_id_suggested' => $supAflat, 'reason' => 'refent-flat',
+        ])));
+
+        // (5) updateDraft también valida contra la entidad de la solicitud: solicitud en A, referenciar B → rechazo.
+        $base = $rm->createDraft(['entities_id' => $this->entityA, 'reason' => 'refent-upd']);
+        $this->check('[REF-ENTITY] updateDraft con Supplier de otra rama (B) → rechazo', $this->throws(fn() => $rm->updateDraft($base, ['suppliers_id_suggested' => $supBrec])));
+    }
+
+    // ---------------------------------------------------------------- [ROLLBACK]
+
+    /**
+     * Punto 5: cada mutación + su auditoría son ATÓMICAS. Forzando un fallo determinista de `Audit` en el
+     * evento de cada operación se demuestra: la operación LANZA, el dato anterior queda intacto y NO queda
+     * un evento parcial. Para líneas se verifica además que `amount_estimated` no cambió tras el rollback.
+     */
+    private function scenarioMutationRollback(): void
+    {
+        $this->out->writeln('== [ROLLBACK] mutación + auditoría atómicas (fallo de Audit → rollback) ==');
+        $this->applySession($this->uOwner, [$this->entityA], ['plugin_companypurchasing' => self::FULL]);
+
+        $mkFail = static function (string $failEvent): Audit {
+            return new class($failEvent) extends Audit {
+                private string $failEvent;
+                public function __construct(string $failEvent)
+                {
+                    $this->failEvent = $failEvent;
+                }
+                public function record(int $requestsId, string $event, int $entitiesId, array $detail = [], string $correlationId = '', ?string $idempotencyKey = null): void
+                {
+                    if ($event === $this->failEvent) {
+                        throw new \RuntimeException('fallo deliberado de auditoría: ' . $event);
+                    }
+                    parent::record($requestsId, $event, $entitiesId, $detail, $correlationId, $idempotencyKey);
+                }
+            };
+        };
+        $rmOk = new RequestManager();
+
+        // (A) createDraft: fallo en REQUEST_CREATED → no debe quedar una solicitud huérfana.
+        $marker = 'rollback-create-' . $this->suffix;
+        $rmC = new RequestManager(null, $mkFail(PurchasingEvent::EV_REQUEST_CREATED));
+        $this->check('[ROLLBACK] createDraft con Audit fallando → lanza', $this->throws(fn() => $rmC->createDraft(['entities_id' => $this->entityA, 'reason' => $marker])));
+        $this->check('[ROLLBACK] createDraft: NO quedó solicitud huérfana', $this->countRequestsByReason($marker) === 0);
+
+        // Base para las mutaciones sobre una solicitud existente (2 × 1000 = 2000).
+        $reqId = $rmOk->createDraft(['entities_id' => $this->entityA, 'observations' => 'obs-orig', 'reason' => 'rollback-base']);
+        $l1 = $rmOk->addLine($reqId, ['description' => 'base', 'quantity' => '2', 'estimated_unit_price' => '1000', 'is_inventoriable' => 0]);
+        $baseTotal = $this->reqAmount($reqId);
+        $this->check('[ROLLBACK] base: total inicial = 2000', $baseTotal === 2000);
+
+        // (B) updateDraft: fallo en REQUEST_UPDATED → observations intacto, sin evento parcial.
+        $updBaseline = $this->countEvents($reqId, PurchasingEvent::EV_REQUEST_UPDATED);
+        $rmU = new RequestManager(null, $mkFail(PurchasingEvent::EV_REQUEST_UPDATED));
+        $this->check('[ROLLBACK] updateDraft con Audit fallando → lanza', $this->throws(fn() => $rmU->updateDraft($reqId, ['observations' => 'obs-cambiado'])));
+        $req = new Request();
+        $req->getFromDB($reqId);
+        $this->check('[ROLLBACK] updateDraft: dato anterior intacto (observations)', (string) $req->fields['observations'] === 'obs-orig');
+        $this->check('[ROLLBACK] updateDraft: sin evento REQUEST_UPDATED parcial', $this->countEvents($reqId, PurchasingEvent::EV_REQUEST_UPDATED) === $updBaseline);
+
+        // (C) addLine: fallo en LINE_ADDED → línea no persiste, total intacto, sin evento parcial.
+        $addBaseline = $this->countEvents($reqId, PurchasingEvent::EV_LINE_ADDED);
+        $linesBefore = count($rmOk->loadItems($reqId));
+        $rmA = new RequestManager(null, $mkFail(PurchasingEvent::EV_LINE_ADDED));
+        $this->check('[ROLLBACK] addLine con Audit fallando → lanza', $this->throws(fn() => $rmA->addLine($reqId, ['description' => 'x', 'quantity' => '5', 'estimated_unit_price' => '1000', 'is_inventoriable' => 0])));
+        $this->check('[ROLLBACK] addLine: línea NO persistida', count($rmOk->loadItems($reqId)) === $linesBefore);
+        $this->check('[ROLLBACK] addLine: amount_estimated intacto (2000)', $this->reqAmount($reqId) === $baseTotal);
+        $this->check('[ROLLBACK] addLine: sin evento LINE_ADDED parcial', $this->countEvents($reqId, PurchasingEvent::EV_LINE_ADDED) === $addBaseline);
+
+        // (D) updateLine: fallo en LINE_UPDATED → cantidad/total intactos, sin evento parcial.
+        $updLineBaseline = $this->countEvents($reqId, PurchasingEvent::EV_LINE_UPDATED);
+        $rmUL = new RequestManager(null, $mkFail(PurchasingEvent::EV_LINE_UPDATED));
+        $this->check('[ROLLBACK] updateLine con Audit fallando → lanza', $this->throws(fn() => $rmUL->updateLine($l1, ['quantity' => '9'])));
+        $it = new RequestItem();
+        $it->getFromDB($l1);
+        $this->check('[ROLLBACK] updateLine: cantidad intacta (2)', (int) $it->fields['quantity'] === 2);
+        $this->check('[ROLLBACK] updateLine: amount_estimated intacto (2000)', $this->reqAmount($reqId) === $baseTotal);
+        $this->check('[ROLLBACK] updateLine: sin evento LINE_UPDATED parcial', $this->countEvents($reqId, PurchasingEvent::EV_LINE_UPDATED) === $updLineBaseline);
+
+        // (E) removeLine: fallo en LINE_REMOVED → la línea sigue, total intacto, sin evento parcial.
+        $rmvBaseline = $this->countEvents($reqId, PurchasingEvent::EV_LINE_REMOVED);
+        $rmR = new RequestManager(null, $mkFail(PurchasingEvent::EV_LINE_REMOVED));
+        $this->check('[ROLLBACK] removeLine con Audit fallando → lanza', $this->throws(fn() => $rmR->removeLine($l1)));
+        $it2 = new RequestItem();
+        $this->check('[ROLLBACK] removeLine: la línea sigue existiendo', $it2->getFromDB($l1) && (int) $it2->fields['requests_id'] === $reqId);
+        $this->check('[ROLLBACK] removeLine: amount_estimated intacto (2000)', $this->reqAmount($reqId) === $baseTotal);
+        $this->check('[ROLLBACK] removeLine: sin evento LINE_REMOVED parcial', $this->countEvents($reqId, PurchasingEvent::EV_LINE_REMOVED) === $rmvBaseline);
+    }
+
     // ---------------------------------------------------------------- [MIGRATE]
 
     private function scenarioReinstall(): void
@@ -688,6 +835,28 @@ final class SelftestCommand extends Command
             $n++;
         }
         return $n;
+    }
+
+    /** Cuenta las solicitudes con un `reason` dado (marcador único para pruebas de rollback de create). */
+    private function countRequestsByReason(string $reason): int
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $n = 0;
+        foreach ($DB->request(['FROM' => Request::getTable(), 'WHERE' => ['reason' => $reason]]) as $ignored) {
+            $n++;
+        }
+        return $n;
+    }
+
+    /** `amount_estimated` de una solicitud como entero (exacto para PYG escala 0); -1 si no existe. */
+    private function reqAmount(int $reqId): int
+    {
+        $req = new Request();
+        if (!$req->getFromDB($reqId)) {
+            return -1;
+        }
+        return (int) $req->fields['amount_estimated'];
     }
 
     /**

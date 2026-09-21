@@ -4,10 +4,13 @@
  * Orquestador del NÚCLEO de compras (P2D-1): CRUD controlado de borrador, numeración al abandonar
  * DRAFT, importes exactos y auditoría. Fail-closed en ACL y multi-entidad.
  *
- * CONCURRENCIA: TODAS las mutaciones de una solicitud (updateDraft/addLine/updateLine/removeLine/
- * submitDraft) se serializan bajo un **lock común por solicitud** (`request_<id>`): adquirir → recargar
- * FRESCO → entidad+ACL → DRAFT si corresponde → mutar → recomputar total → audit → liberar. Esto impide
- * "edito un DRAFT que otro worker ya envió" y los totales stale por mutaciones simultáneas de líneas.
+ * CONCURRENCIA + ATOMICIDAD: TODAS las mutaciones de una solicitud (createDraft/updateDraft/addLine/
+ * updateLine/removeLine/submitDraft) confirman su cambio de datos Y su evento de auditoría JUNTOS, en una
+ * transacción local sobre tablas propias del plugin (si la auditoría o un write fallan → ROLLBACK, sin
+ * estado parcial). Las mutaciones sobre una solicitud EXISTENTE se serializan además bajo un **lock común
+ * por solicitud** (`request_<id>`): adquirir → recargar FRESCO → entidad+ACL → DRAFT si corresponde →
+ * BEGIN {mutar → recomputar total → audit} COMMIT → liberar. Esto impide "edito un DRAFT que otro worker
+ * ya envió", los totales stale por mutaciones simultáneas de líneas, y solicitudes/líneas huérfanas.
  *
  * NO integra `companyworkflow` (P2D-2): el `domain_state` es un snapshot/cache local; DRAFT es el
  * estado inicial y `submitDraft()` es el evento local "abandona DRAFT". La AUTORIDAD de estados será
@@ -49,6 +52,9 @@ final class RequestManager
      */
     public function createDraft(array $in): int
     {
+        /** @var \DBmysql $DB */
+        global $DB;
+
         $entity = (int) ($in['entities_id'] ?? ($_SESSION['glpiactive_entity'] ?? 0));
         $this->assertRight(Request::RIGHT_CREATE_REQUEST);
         $this->assertEntity($entity);
@@ -69,49 +75,60 @@ final class RequestManager
             throw new \RuntimeException('no se permite crear en nombre de otro solicitante en P2D-1');
         }
 
-        // Departamento: 0 = sin departamento; >0 el Group debe existir y ser visible desde la entidad.
+        // Departamento: 0 = sin departamento; >0 el Group debe existir y ser APLICABLE a la entidad de
+        // la solicitud (misma entidad o ancestro recursivo), no sólo "visible por la sesión".
         $deptId = (int) ($in['groups_id_department'] ?? 0);
-        $this->assertReference(\Group::class, $deptId);
+        $this->assertReferenceForEntity(\Group::class, $deptId, $entity);
 
-        // Referencias a maestros NATIVOS: 0 = sin referencia; >0 debe existir y ser visible en la entidad.
+        // Referencias a maestros NATIVOS: 0 = sin referencia; >0 debe existir y ser aplicable a la entidad.
         $supplierId = (int) ($in['suppliers_id_suggested'] ?? 0);
         $budgetId   = (int) ($in['budgets_id'] ?? 0);
-        $this->assertReference(\Supplier::class, $supplierId);
-        $this->assertReference(\Budget::class, $budgetId);
+        $this->assertReferenceForEntity(\Supplier::class, $supplierId, $entity);
+        $this->assertReferenceForEntity(\Budget::class, $budgetId, $entity);
 
         $now = $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s');
         $corr = bin2hex(random_bytes(16));
 
-        $req = new Request();
-        // `number`/`number_seq` se OMITEN: toman el DEFAULT NULL (varios borradores conviven sin chocar
-        // con los UNIQUE; MySQL admite múltiples NULL). Se asignan en submitDraft().
-        $id = (int) $req->add([
-            'entities_id'          => $entity,
-            // `is_recursive` NO queda bajo control libre del solicitante (C): baseline de dominio = 0.
-            'is_recursive'         => 0,
-            'users_id_requester'   => $me,
-            'groups_id_department' => $deptId,
-            'category'             => substr((string) ($in['category'] ?? ''), 0, 190),
-            'destination'          => substr((string) ($in['destination'] ?? ''), 0, 255),
-            'reason'               => (string) ($in['reason'] ?? ''),
-            'observations'         => (string) ($in['observations'] ?? ''),
-            'suppliers_id_suggested' => $supplierId,
-            'budgets_id'           => $budgetId,
-            'currency_code'        => $currency,
-            'amount_estimated'     => Money::zero($currency, PluginConfig::currencyScaleOverrides())->amount(),
-            'domain_state'         => Request::STATE_DRAFT,
-            'scopes_version'       => 0,
-            'workflow_instances_id' => 0,
-            'correlation_id'       => $corr,
-            'users_id_creator'     => $me,
-            'lock_version'         => 0,
-            'date_creation'        => $now,
-            'date_mod'             => $now,
-        ]);
-        if ($id <= 0) {
-            throw new \RuntimeException('no se pudo crear la solicitud');
+        // ATÓMICO: la solicitud y su evento REQUEST_CREATED confirman JUNTOS (ambos en tablas propias).
+        // Si la auditoría no persiste → ROLLBACK: no queda una solicitud huérfana que el caller creería
+        // no haber creado.
+        $DB->beginTransaction();
+        try {
+            $req = new Request();
+            // `number`/`number_seq` se OMITEN: toman el DEFAULT NULL (varios borradores conviven sin chocar
+            // con los UNIQUE; MySQL admite múltiples NULL). Se asignan en submitDraft().
+            $id = (int) $req->add([
+                'entities_id'          => $entity,
+                // `is_recursive` NO queda bajo control libre del solicitante (C): baseline de dominio = 0.
+                'is_recursive'         => 0,
+                'users_id_requester'   => $me,
+                'groups_id_department' => $deptId,
+                'category'             => substr((string) ($in['category'] ?? ''), 0, 190),
+                'destination'          => substr((string) ($in['destination'] ?? ''), 0, 255),
+                'reason'               => (string) ($in['reason'] ?? ''),
+                'observations'         => (string) ($in['observations'] ?? ''),
+                'suppliers_id_suggested' => $supplierId,
+                'budgets_id'           => $budgetId,
+                'currency_code'        => $currency,
+                'amount_estimated'     => Money::zero($currency, PluginConfig::currencyScaleOverrides())->amount(),
+                'domain_state'         => Request::STATE_DRAFT,
+                'scopes_version'       => 0,
+                'workflow_instances_id' => 0,
+                'correlation_id'       => $corr,
+                'users_id_creator'     => $me,
+                'lock_version'         => 0,
+                'date_creation'        => $now,
+                'date_mod'             => $now,
+            ]);
+            if ($id <= 0) {
+                throw new \RuntimeException('no se pudo crear la solicitud');
+            }
+            $this->audit->record($id, PurchasingEvent::EV_REQUEST_CREATED, $entity, ['currency' => $currency], $corr);
+            $DB->commit();
+        } catch (\Throwable $e) {
+            $this->safeRollback($DB);
+            throw $e;
         }
-        $this->audit->record($id, PurchasingEvent::EV_REQUEST_CREATED, $entity, ['currency' => $currency], $corr);
         return $id;
     }
 
@@ -121,10 +138,24 @@ final class RequestManager
     public function updateDraft(int $id, array $in): void
     {
         $this->withRequestLock($id, function () use ($id, $in): void {
+            /** @var \DBmysql $DB */
+            global $DB;
+
             $req = $this->loadForEdit($id); // recarga FRESCA bajo lock + checks (isDraft)
             $entity = (int) $req->fields['entities_id'];
 
-            // `users_id_requester` NO es editable en P2D-1 (identidad cerrada); se ignora si viniera.
+            // IDENTIDAD INMUTABLE (P2D-1): un intento de cambiar el solicitante se RECHAZA explícitamente
+            // (no se ignora en silencio). No existe "editar en nombre de otro".
+            if (array_key_exists('users_id_requester', $in)
+                && (int) $in['users_id_requester'] !== (int) $req->fields['users_id_requester']
+            ) {
+                throw new \RuntimeException('users_id_requester es inmutable en P2D-1');
+            }
+            // `is_recursive` no está bajo control del solicitante: un intento != 0 se RECHAZA (baseline 0).
+            if (array_key_exists('is_recursive', $in) && (int) $in['is_recursive'] !== 0) {
+                throw new \RuntimeException('is_recursive no está bajo control del solicitante (baseline 0)');
+            }
+
             $fields = [];
             foreach ([
                 'groups_id_department' => 'int',
@@ -148,18 +179,27 @@ final class RequestManager
             if ($fields === []) {
                 return;
             }
-            // Validar referencias nativas si cambian (0 = sin referencia; >0 debe existir y ser visible).
+            // Validar referencias nativas si cambian (0 = sin referencia; >0 debe existir y ser APLICABLE a
+            // la entidad de la solicitud, no sólo visible por la sesión).
             if (array_key_exists('groups_id_department', $fields)) {
-                $this->assertReference(\Group::class, (int) $fields['groups_id_department']);
+                $this->assertReferenceForEntity(\Group::class, (int) $fields['groups_id_department'], $entity);
             }
             if (array_key_exists('suppliers_id_suggested', $fields)) {
-                $this->assertReference(\Supplier::class, (int) $fields['suppliers_id_suggested']);
+                $this->assertReferenceForEntity(\Supplier::class, (int) $fields['suppliers_id_suggested'], $entity);
             }
             if (array_key_exists('budgets_id', $fields)) {
-                $this->assertReference(\Budget::class, (int) $fields['budgets_id']);
+                $this->assertReferenceForEntity(\Budget::class, (int) $fields['budgets_id'], $entity);
             }
-            $this->applyUpdate($req, $fields);
-            $this->audit->record($id, PurchasingEvent::EV_REQUEST_UPDATED, $entity, ['fields' => array_keys($fields)], (string) $req->fields['correlation_id']);
+            // ATÓMICO: la mutación de cabecera y su evento REQUEST_UPDATED confirman JUNTOS.
+            $DB->beginTransaction();
+            try {
+                $this->applyUpdate($req, $fields);
+                $this->audit->record($id, PurchasingEvent::EV_REQUEST_UPDATED, $entity, ['fields' => array_keys($fields)], (string) $req->fields['correlation_id']);
+                $DB->commit();
+            } catch (\Throwable $e) {
+                $this->safeRollback($DB);
+                throw $e;
+            }
         });
     }
 
@@ -172,10 +212,14 @@ final class RequestManager
     public function addLine(int $reqId, array $line): int
     {
         return (int) $this->withRequestLock($reqId, function () use ($reqId, $line): int {
+            /** @var \DBmysql $DB */
+            global $DB;
+
             $req = $this->loadForEdit($reqId);
             $currency = (string) $req->fields['currency_code'];
             $overrides = PluginConfig::currencyScaleOverrides();
 
+            // Validaciones puras ANTES de abrir transacción (pueden lanzar sin dejar nada a medias).
             $isInv = (int) (($line['is_inventoriable'] ?? 0) ? 1 : 0);
             $qty   = $this->validateQuantity($line['quantity'] ?? null, $isInv === 1);
             $unitPrice = Money::of((string) ($line['estimated_unit_price'] ?? '0'), $currency, $overrides);
@@ -185,28 +229,37 @@ final class RequestManager
             $this->assertLineNoFree($reqId, $lineNo, 0);
 
             $now = $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s');
-            $item = new RequestItem();
-            $lineId = (int) $item->add([
-                'requests_id'          => $reqId,
-                'line_no'              => $lineNo,
-                'description'          => substr((string) ($line['description'] ?? ''), 0, 255),
-                'category'             => substr((string) ($line['category'] ?? ''), 0, 190),
-                'quantity'             => $qty,
-                'unit'                 => substr((string) ($line['unit'] ?? ''), 0, 30),
-                'is_inventoriable'     => $isInv,
-                'currency_code'        => $currency,
-                'estimated_unit_price' => $unitPrice->amount(),
-                'estimated_line_total' => $lineTotal->amount(),
-                'notes'                => (string) ($line['notes'] ?? ''),
-                'date_creation'        => $now,
-                'date_mod'             => $now,
-            ]);
-            if ($lineId <= 0) {
-                throw new \RuntimeException('no se pudo crear la línea');
+
+            // ATÓMICO: alta de línea + recálculo del total + evento LINE_ADDED confirman JUNTOS.
+            $DB->beginTransaction();
+            try {
+                $item = new RequestItem();
+                $lineId = (int) $item->add([
+                    'requests_id'          => $reqId,
+                    'line_no'              => $lineNo,
+                    'description'          => substr((string) ($line['description'] ?? ''), 0, 255),
+                    'category'             => substr((string) ($line['category'] ?? ''), 0, 190),
+                    'quantity'             => $qty,
+                    'unit'                 => substr((string) ($line['unit'] ?? ''), 0, 30),
+                    'is_inventoriable'     => $isInv,
+                    'currency_code'        => $currency,
+                    'estimated_unit_price' => $unitPrice->amount(),
+                    'estimated_line_total' => $lineTotal->amount(),
+                    'notes'                => (string) ($line['notes'] ?? ''),
+                    'date_creation'        => $now,
+                    'date_mod'             => $now,
+                ]);
+                if ($lineId <= 0) {
+                    throw new \RuntimeException('no se pudo crear la línea');
+                }
+                $this->recomputeEstimated($req);
+                $this->audit->record($reqId, PurchasingEvent::EV_LINE_ADDED, (int) $req->fields['entities_id'], ['line_id' => $lineId, 'line_no' => $lineNo], (string) $req->fields['correlation_id']);
+                $DB->commit();
+                return $lineId;
+            } catch (\Throwable $e) {
+                $this->safeRollback($DB);
+                throw $e;
             }
-            $this->recomputeEstimated($req);
-            $this->audit->record($reqId, PurchasingEvent::EV_LINE_ADDED, (int) $req->fields['entities_id'], ['line_id' => $lineId, 'line_no' => $lineNo], (string) $req->fields['correlation_id']);
-            return $lineId;
         });
     }
 
@@ -215,6 +268,9 @@ final class RequestManager
     {
         $reqId = $this->lineRequestId($lineId);
         $this->withRequestLock($reqId, function () use ($reqId, $lineId, $line): void {
+            /** @var \DBmysql $DB */
+            global $DB;
+
             $req = $this->loadForEdit($reqId);
             // Recargar la línea FRESCA bajo lock y confirmar que pertenece a esta solicitud.
             $item = new RequestItem();
@@ -224,6 +280,7 @@ final class RequestManager
             $currency = (string) $req->fields['currency_code'];
             $overrides = PluginConfig::currencyScaleOverrides();
 
+            // Cálculo/validación pura ANTES de abrir transacción (puede lanzar sin dejar nada a medias).
             $isInv = array_key_exists('is_inventoriable', $line)
                 ? (int) (($line['is_inventoriable'] ? 1 : 0))
                 : (int) $item->fields['is_inventoriable'];
@@ -259,11 +316,19 @@ final class RequestManager
                 $this->assertLineNoFree($reqId, $newNo, $lineId);
                 $fields['line_no'] = $newNo;
             }
-            if (!$item->update($fields)) {
-                throw new \RuntimeException('no se pudo actualizar la línea');
+            // ATÓMICO: actualización de línea + recálculo del total + evento LINE_UPDATED confirman JUNTOS.
+            $DB->beginTransaction();
+            try {
+                if (!$item->update($fields)) {
+                    throw new \RuntimeException('no se pudo actualizar la línea');
+                }
+                $this->recomputeEstimated($req);
+                $this->audit->record($reqId, PurchasingEvent::EV_LINE_UPDATED, (int) $req->fields['entities_id'], ['line_id' => $lineId], (string) $req->fields['correlation_id']);
+                $DB->commit();
+            } catch (\Throwable $e) {
+                $this->safeRollback($DB);
+                throw $e;
             }
-            $this->recomputeEstimated($req);
-            $this->audit->record($reqId, PurchasingEvent::EV_LINE_UPDATED, (int) $req->fields['entities_id'], ['line_id' => $lineId], (string) $req->fields['correlation_id']);
         });
     }
 
@@ -271,14 +336,28 @@ final class RequestManager
     {
         $reqId = $this->lineRequestId($lineId);
         $this->withRequestLock($reqId, function () use ($reqId, $lineId): void {
+            /** @var \DBmysql $DB */
+            global $DB;
+
             $req = $this->loadForEdit($reqId);
             $item = new RequestItem();
             if (!$item->getFromDB($lineId) || (int) $item->fields['requests_id'] !== $reqId) {
                 throw new \RuntimeException('línea inexistente');
             }
-            $item->delete(['id' => $lineId], true);
-            $this->recomputeEstimated($req);
-            $this->audit->record($reqId, PurchasingEvent::EV_LINE_REMOVED, (int) $req->fields['entities_id'], ['line_id' => $lineId], (string) $req->fields['correlation_id']);
+            // ATÓMICO: baja de línea + recálculo del total + evento LINE_REMOVED confirman JUNTOS.
+            $DB->beginTransaction();
+            try {
+                // Ningún write fallido puede volverse éxito en silencio: se comprueba el resultado de delete().
+                if (!$item->delete(['id' => $lineId], true)) {
+                    throw new \RuntimeException('no se pudo eliminar la línea');
+                }
+                $this->recomputeEstimated($req);
+                $this->audit->record($reqId, PurchasingEvent::EV_LINE_REMOVED, (int) $req->fields['entities_id'], ['line_id' => $lineId], (string) $req->fields['correlation_id']);
+                $DB->commit();
+            } catch (\Throwable $e) {
+                $this->safeRollback($DB);
+                throw $e;
+            }
         });
     }
 
@@ -482,11 +561,15 @@ final class RequestManager
         foreach ($this->loadItems((int) $req->getID()) as $it) {
             $total = $total->plus(Money::ofStored((string) $it->fields['estimated_line_total'], $currency, $overrides));
         }
-        $req->update([
+        // Ningún write fallido puede volverse éxito en silencio: se comprueba el resultado del update.
+        $ok = $req->update([
             'id'               => (int) $req->getID(),
             'amount_estimated' => $total->amount(),
             'date_mod'         => $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s'),
         ]);
+        if (!$ok) {
+            throw new \RuntimeException('no se pudo recalcular el total estimado de la solicitud');
+        }
     }
 
     private function validateQuantity(mixed $raw, bool $inventoriable): int
@@ -542,12 +625,17 @@ final class RequestManager
     }
 
     /**
-     * Valida una referencia a un maestro NATIVO de GLPI (Group/Supplier/Budget) por su modelo soportado:
+     * Valida una referencia a un maestro NATIVO de GLPI (Group/Supplier/Budget) contra la entidad de la
+     * SOLICITUD (no contra la sesión):
      *   - `0` = sin referencia (OK).
-     *   - `>0` debe EXISTIR y ser VISIBLE en su entidad (respetando recursividad) para la sesión actual.
-     * No se duplican maestros ni se consulta el core saltando su modelo.
+     *   - `>0` debe EXISTIR y ser APLICABLE a la entidad de la solicitud según la semántica NATIVA de
+     *     entidades/recursividad de GLPI (misma entidad, o entidad ANCESTRO con `is_recursive`).
+     *
+     * No alcanza con `Session::haveAccessToEntity($refEntity)`: un usuario con acceso simultáneo a A y B
+     * NO debe poder adjuntar a una solicitud de A un objeto exclusivo de la rama B. No se duplican
+     * maestros ni se consulta el core por SQL directo saltando sus reglas.
      */
-    private function assertReference(string $itemtype, int $id): void
+    private function assertReferenceForEntity(string $itemtype, int $id, int $requestEntityId): void
     {
         if ($id <= 0) {
             return;
@@ -560,11 +648,48 @@ final class RequestManager
         if (!$obj->getFromDB($id)) {
             throw new \InvalidArgumentException("referencia inexistente: {$itemtype}#{$id}");
         }
-        if (isset($obj->fields['entities_id'])
-            && !Session::haveAccessToEntity((int) $obj->fields['entities_id'], (bool) ($obj->fields['is_recursive'] ?? false))
-        ) {
-            throw new \RuntimeException("referencia no visible en la entidad: {$itemtype}#{$id}");
+        // Un maestro sin dimensión de entidad (no esperado para Group/Supplier/Budget) no se restringe.
+        if (!isset($obj->fields['entities_id'])) {
+            return;
         }
+        $refEntity    = (int) $obj->fields['entities_id'];
+        $refRecursive = (bool) ($obj->fields['is_recursive'] ?? false);
+        if (!self::isEntityApplicable($refEntity, $refRecursive, $requestEntityId)) {
+            throw new \RuntimeException("referencia no aplicable a la entidad de la solicitud: {$itemtype}#{$id}");
+        }
+    }
+
+    /**
+     * ¿Un objeto en la entidad `$refEntity` (con recursividad `$refRecursive`) es APLICABLE a la entidad
+     * `$requestEntity`, según la semántica NATIVA del árbol de entidades de GLPI?
+     *   - misma entidad → siempre aplicable;
+     *   - recursivo → aplicable si `$refEntity` es la propia o un ANCESTRO de `$requestEntity` (se hereda
+     *     hacia abajo). Se resuelve con las utilidades nativas del árbol (`getSonsOf`/`getAncestorsOf`);
+     *   - de otra RAMA (ni misma entidad ni ancestro recursivo) → NO aplicable.
+     * Fail-closed: si no hubiera utilidad nativa del árbol, sólo se admite la misma entidad.
+     */
+    private static function isEntityApplicable(int $refEntity, bool $refRecursive, int $requestEntity): bool
+    {
+        if ($refEntity === $requestEntity) {
+            return true; // misma entidad: siempre aplicable
+        }
+        if (!$refRecursive) {
+            return false; // no recursivo: sólo su propia entidad
+        }
+        // Recursivo hacia ABAJO: la referencia aplica si su entidad es ancestro de la de la solicitud.
+        if (function_exists('getSonsOf')) {
+            $sons = getSonsOf('glpi_entities', $refEntity); // incluye $refEntity + descendientes
+            if (is_array($sons)) {
+                return in_array($requestEntity, array_map('intval', array_values($sons)), true);
+            }
+        }
+        if (function_exists('getAncestorsOf')) {
+            $ancestors = getAncestorsOf('glpi_entities', $requestEntity); // ancestros de la solicitud
+            if (is_array($ancestors)) {
+                return in_array($refEntity, array_map('intval', array_values($ancestors)), true);
+            }
+        }
+        return false; // sin utilidad nativa del árbol → fail-closed (sólo misma entidad, ya cubierta)
     }
 
     private function safeRollback(\DBmysql $DB): void

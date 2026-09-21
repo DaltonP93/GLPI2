@@ -4,7 +4,32 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
 ## [0.2.0] — Fase 2D · P2D-1 (núcleo de compras)
-### Hardening — invariantes A/B/C/D (última pasada acotada P2D-1)
+### Hardening — atomicidad de mutaciones (pasada final acotada P2D-1)
+- **Mutación + auditoría atómicas (todas las mutaciones):** además de `submitDraft`, ahora `createDraft`,
+  `updateDraft`, `addLine`, `updateLine` y `removeLine` confirman su cambio de datos **y** su evento de
+  auditoría JUNTOS, en una transacción local sobre tablas propias (`BEGIN {mutar → recomputar total →
+  Audit::record()} COMMIT`; ante cualquier excepción → `ROLLBACK` + rethrow, sin estado parcial). El lock
+  común `request_<id>` queda igual. `createDraft` es atómico respecto de `REQUEST_CREATED`: si la auditoría
+  no persiste, no queda una **solicitud huérfana**.
+- **Ningún write fallido se vuelve éxito en silencio:** `recomputeEstimated()` comprueba el resultado del
+  `Request::update()` y lanza si falla; `removeLine()` comprueba el resultado de `RequestItem::delete()`.
+  Se mantienen los checks de add/update previos.
+- **Referencias nativas válidas PARA la entidad de la solicitud:** `assertReference()` pasa a
+  `assertReferenceForEntity(itemtype, id, requestEntityId)`. Ya **no** alcanza con
+  `Session::haveAccessToEntity()` (un usuario con acceso a A y B podía adjuntar un maestro de B a una
+  solicitud de A). Se valida con la semántica NATIVA del árbol de entidades de GLPI (`getSonsOf`/
+  `getAncestorsOf`): el objeto existe y es de la **misma entidad** o de un **ancestro recursivo**; una
+  referencia de otra RAMA no se adjunta aunque el usuario vea ambas. Aplica a `Group`/`Supplier`/`Budget`
+  en create y update. Sin SQL directo al core.
+- **Campos de identidad inmutables en update:** un intento de cambiar `users_id_requester` en `updateDraft`
+  se **rechaza explícitamente** (ya no se ignora en silencio); `is_recursive != 0` enviado por el
+  solicitante se **rechaza** (baseline 0). No hay "crear/editar en nombre de otro".
+- **Tests de rollback deterministas:** inyección de fallo de `Audit` por evento para `createDraft`,
+  `updateDraft`, `addLine`, `updateLine`, `removeLine` → la operación lanza, el dato anterior queda intacto,
+  no queda evento parcial y `amount_estimated` no cambia. Se mantienen y re-ejecutan los tests concurrentes
+  (numeración, doble submit, edit/addline vs submit, mutaciones simultáneas).
+
+### Hardening — invariantes A/B/C/D (pasada acotada previa P2D-1)
 - **A · Lock COMÚN por solicitud (todas las mutaciones):** `updateDraft`/`addLine`/`updateLine`/
   `removeLine`/`submitDraft` se serializan ahora bajo el MISMO advisory lock `request_<id>` (antes el
   lock era sólo del submit). Cada mutación: adquirir lock → **recargar FRESCO** → entidad+ACL → DRAFT
