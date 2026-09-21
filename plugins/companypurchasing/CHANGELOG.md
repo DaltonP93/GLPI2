@@ -17,10 +17,11 @@ y versionado [SemVer](https://semver.org/lang/es/).
 - **Referencias nativas válidas PARA la entidad de la solicitud:** `assertReference()` pasa a
   `assertReferenceForEntity(itemtype, id, requestEntityId)`. Ya **no** alcanza con
   `Session::haveAccessToEntity()` (un usuario con acceso a A y B podía adjuntar un maestro de B a una
-  solicitud de A). Se valida con la semántica NATIVA del árbol de entidades de GLPI (`getSonsOf`/
-  `getAncestorsOf`): el objeto existe y es de la **misma entidad** o de un **ancestro recursivo**; una
-  referencia de otra RAMA no se adjunta aunque el usuario vea ambas. Aplica a `Group`/`Supplier`/`Budget`
-  en create y update. Sin SQL directo al core.
+  solicitud de A). Se valida con la semántica NATIVA de entidades/recursividad recorriendo la cadena de
+  padres (`entities_id`) con el modelo `Entity` (dato vivo, sin depender de la caché del árbol): el objeto
+  existe y es de la **misma entidad** o de un **ancestro recursivo**; una referencia de otra RAMA no se
+  adjunta aunque el usuario vea ambas. Aplica a `Group`/`Supplier`/`Budget` en create y update. Sin SQL
+  directo al core (se usa el modelo soportado).
 - **Campos de identidad inmutables en update:** un intento de cambiar `users_id_requester` en `updateDraft`
   se **rechaza explícitamente** (ya no se ignora en silencio); `is_recursive != 0` enviado por el
   solicitante se **rechaza** (baseline 0). No hay "crear/editar en nombre de otro".

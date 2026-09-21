@@ -661,18 +661,16 @@ final class RequestManager
 
     /**
      * ¿Un objeto en la entidad `$refEntity` (con recursividad `$refRecursive`) es APLICABLE a la entidad
-     * `$requestEntity`, según la semántica NATIVA del árbol de entidades de GLPI?
+     * `$requestEntity`, según la semántica NATIVA de entidades/recursividad de GLPI?
      *   - misma entidad → siempre aplicable;
-     *   - recursivo → aplicable si `$refEntity` es la propia o un ANCESTRO de `$requestEntity` (se hereda
-     *     hacia abajo);
+     *   - recursivo en la RAÍZ (0) → aplica a todo el árbol;
+     *   - recursivo → aplicable si `$refEntity` es un ANCESTRO de `$requestEntity` (se hereda hacia abajo);
      *   - de otra RAMA (ni misma entidad ni ancestro recursivo) → NO aplicable.
      *
-     * Se consultan AMBAS vistas nativas del árbol y basta con que UNA confirme la relación: los ancestros
-     * de la SOLICITUD (`getAncestorsOf`, que se computa desde su cadena `entities_id` viva) y los
-     * descendientes de la REFERENCIA (`getSonsOf`). Esto es robusto ante una caché de árbol recién
-     * actualizada (p. ej. una entidad creada en el mismo proceso): una caché obsoleta sólo puede OMITIR un
-     * vínculo nuevo (falso negativo), nunca inventar uno cross-branch (falso positivo). Fail-closed: sin
-     * utilidad nativa del árbol, sólo se admite la misma entidad.
+     * Se recorre la cadena de padres (`entities_id`) de la SOLICITUD con el modelo nativo `Entity`
+     * (`getFromDB`, dato SIEMPRE vivo). No se depende de la caché del árbol (`getSonsOf`/`getAncestorsOf`),
+     * que puede estar desactualizada para una entidad creada en el mismo proceso. No es SQL directo al
+     * core: se usa el modelo soportado. Guarda de ciclos por profundidad máxima. Fail-closed.
      */
     private static function isEntityApplicable(int $refEntity, bool $refRecursive, int $requestEntity): bool
     {
@@ -682,21 +680,27 @@ final class RequestManager
         if (!$refRecursive) {
             return false; // no recursivo: sólo su propia entidad
         }
-        // (a) Ancestros de la SOLICITUD: fresco incluso para una entidad recién creada (cadena viva).
-        if (function_exists('getAncestorsOf')) {
-            $ancestors = getAncestorsOf('glpi_entities', $requestEntity);
-            if (is_array($ancestors) && in_array($refEntity, array_map('intval', array_values($ancestors)), true)) {
-                return true;
-            }
+        if ($refEntity === 0) {
+            return true; // recursivo en la raíz: aplica a todo el árbol
         }
-        // (b) Descendientes de la REFERENCIA (segunda vista; incluye $refEntity + descendientes).
-        if (function_exists('getSonsOf')) {
-            $sons = getSonsOf('glpi_entities', $refEntity);
-            if (is_array($sons) && in_array($requestEntity, array_map('intval', array_values($sons)), true)) {
-                return true;
+        // Recursivo hacia ABAJO: `$refEntity` debe ser ANCESTRO de `$requestEntity`. Se sube por la cadena
+        // `entities_id` leída del modelo nativo (viva, sin caché de árbol).
+        $current = $requestEntity;
+        for ($guard = 0; $current > 0 && $guard < 100; $guard++) {
+            $ent = new \Entity();
+            if (!$ent->getFromDB($current)) {
+                return false;
             }
+            $parent = (int) ($ent->fields['entities_id'] ?? 0);
+            if ($parent === $refEntity) {
+                return true; // ancestro directo o indirecto: aplica
+            }
+            if ($parent === $current) {
+                return false; // ciclo defensivo
+            }
+            $current = $parent;
         }
-        return false; // ninguna vista nativa lo confirma → no aplicable (otra rama)
+        return false; // se alcanzó la raíz sin encontrar `$refEntity` → otra rama, no aplicable
     }
 
     private function safeRollback(\DBmysql $DB): void
