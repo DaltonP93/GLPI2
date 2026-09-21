@@ -14,6 +14,7 @@
  *   [MULTI-ENT]   solicitud de la entidad A no visible desde sesión en la entidad B.
  *   [REUSE]       Supplier/Budget nativos referenciados (no se duplican maestros).
  *   [REF-ENTITY]  referencias válidas PARA la entidad de la solicitud (misma/ancestro recursivo; no cross-branch).
+ *   [REF-MOVE]    autoridad por cadena viva: mover una entidad invalida la caché stale (best-effort e2e).
  *   [ROLLBACK]    mutación + auditoría atómicas: fallo de Audit → rollback (sin dato/evento parcial).
  *   [IDENTITY]    (C) solicitante = usuario autenticado; is_recursive baseline 0; departamento visible.
  *   [SCOPE-*]     (B) pinning fail-closed + validación semántica del vocabulario de scopes.
@@ -94,6 +95,7 @@ final class SelftestCommand extends Command
             $this->scenarioMultiEntity();
             $this->scenarioSupplierBudget();
             $this->scenarioReferenceEntityScope();
+            $this->scenarioEntityMoveAuthoritative();
             $this->scenarioRequesterIdentity();
             $this->scenarioScopeFailClosed();
             $this->scenarioScopeSemantic();
@@ -698,6 +700,66 @@ final class SelftestCommand extends Command
         // (5) updateDraft también valida contra la entidad de la solicitud: solicitud en A, referenciar B → rechazo.
         $base = $rm->createDraft(['entities_id' => $this->entityA, 'reason' => 'refent-upd']);
         $this->check('[REF-ENTITY] updateDraft con Supplier de otra rama (B) → rechazo', $this->throws(fn() => $rm->updateDraft($base, ['suppliers_id_suggested' => $supBrec])));
+    }
+
+    // ---------------------------------------------------------------- [REF-MOVE]
+
+    /**
+     * Prueba de autoridad end-to-end: mover una entidad entre ramas invalida la relación aunque la CACHÉ
+     * del árbol de GLPI (`getSonsOf`/`getAncestorsOf`) quede stale. Se precargan las cachés, se mueve la
+     * entidad por el modelo soportado y se comprueba que el resolver AUTORITATIVO (cadena viva
+     * `entities_id`) rechaza al padre viejo y acepta al nuevo. Best-effort y NO flaky: la aserción fuerte
+     * sólo corre si GLPI reparentó de verdad (fuera de la raíz); si no, la propiedad ya está cubierta por el
+     * unit test determinista de `isEntityApplicableInChain`.
+     */
+    private function scenarioEntityMoveAuthoritative(): void
+    {
+        $this->out->writeln('== [REF-MOVE] autoridad por cadena viva: mover una entidad invalida la caché ==');
+        $this->applySession($this->uOwner, [$this->entityA, $this->entityB], ['plugin_companypurchasing' => self::FULL], 1);
+
+        // Resolver AUTORITATIVO idéntico al del plugin: padre ACTUAL vía Entity::getFromDB (columna viva).
+        $liveParent = static function (int $id): ?int {
+            $e = new Entity();
+            if (!$e->getFromDB($id)) {
+                return null;
+            }
+            if (!array_key_exists('entities_id', $e->fields)) {
+                return null;
+            }
+            return (int) $e->fields['entities_id'];
+        };
+
+        $X = $this->makeChildEntity($this->entityA);
+        $this->applySession($this->uOwner, [$this->entityA, $this->entityB, $X], ['plugin_companypurchasing' => self::FULL], 1);
+        $xr = new Entity();
+        $xr->getFromDB($X);
+        $p1 = (int) ($xr->fields['entities_id'] ?? 0);
+        $this->check('[REF-MOVE] entidad X creada', $X > 0);
+
+        // Precargar las cachés del árbol de GLPI para la posición ACTUAL de X (si las utilidades existen).
+        if (function_exists('getSonsOf')) {
+            getSonsOf('glpi_entities', $p1);
+        }
+        if (function_exists('getAncestorsOf')) {
+            getAncestorsOf('glpi_entities', $X);
+        }
+
+        // Mover X a la rama B por el modelo soportado (no SQL directo).
+        (new Entity())->update(['id' => $X, 'entities_id' => $this->entityB]);
+        $xr2 = new Entity();
+        $xr2->getFromDB($X);
+        $p2 = (int) ($xr2->fields['entities_id'] ?? 0);
+
+        // La aserción fuerte sólo aplica si GLPI reparentó de verdad a B saliendo de una rama NO-raíz.
+        $reparented = ($p2 === $this->entityB) && ($p2 !== $p1) && ($p1 !== 0);
+        if ($reparented) {
+            $this->check('[REF-MOVE] X movida A→B: el padre VIEJO (A) ya NO autoriza (cadena viva, no caché)', RequestManager::isEntityApplicableInChain($p1, true, $X, $liveParent) === false);
+            $this->check('[REF-MOVE] X movida A→B: el padre NUEVO (B) sí autoriza recursivo', RequestManager::isEntityApplicableInChain($this->entityB, true, $X, $liveParent) === true);
+        } else {
+            $this->out->writeln('  [REF-MOVE] nota: el árbol de GLPI no reparentó en este stack (p1=' . $p1 . ', p2=' . $p2 . '); propiedad cubierta por el unit test determinista de isEntityApplicableInChain.');
+            // Consistencia mínima: el resolver autoritativo concuerda con la cadena viva ACTUAL de X.
+            $this->check('[REF-MOVE] resolver autoritativo consistente con la cadena viva de X', RequestManager::isEntityApplicableInChain($p2, true, $X, $liveParent) === true || $p2 === $X);
+        }
     }
 
     // ---------------------------------------------------------------- [ROLLBACK]

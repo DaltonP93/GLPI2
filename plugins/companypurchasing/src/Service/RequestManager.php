@@ -659,20 +659,56 @@ final class RequestManager
         }
     }
 
+    /** Profundidad máxima del árbol de entidades al resolver aplicabilidad (guarda dura). */
+    private const ENTITY_TREE_MAX_DEPTH = 1000;
+
     /**
      * ¿Un objeto en la entidad `$refEntity` (con recursividad `$refRecursive`) es APLICABLE a la entidad
-     * `$requestEntity`, según la semántica NATIVA de entidades/recursividad de GLPI?
+     * `$requestEntity`, según la relación AUTORITATIVA de entidades/recursividad de GLPI?
      *   - misma entidad → siempre aplicable;
-     *   - recursivo en la RAÍZ (0) → aplica a todo el árbol;
-     *   - recursivo → aplicable si `$refEntity` es un ANCESTRO de `$requestEntity` (se hereda hacia abajo);
-     *   - de otra RAMA (ni misma entidad ni ancestro recursivo) → NO aplicable.
+     *   - recursivo → aplicable si `$refEntity` es la RAÍZ (0) o un ANCESTRO ACTUAL de `$requestEntity`
+     *     (la recursividad se hereda hacia abajo);
+     *   - de otra RAMA (ni misma entidad ni ancestro recursivo actual) → NO aplicable.
      *
-     * Se recorre la cadena de padres (`entities_id`) de la SOLICITUD con el modelo nativo `Entity`
-     * (`getFromDB`, dato SIEMPRE vivo). No se depende de la caché del árbol (`getSonsOf`/`getAncestorsOf`),
-     * que puede estar desactualizada para una entidad creada en el mismo proceso. No es SQL directo al
-     * core: se usa el modelo soportado. Guarda de ciclos por profundidad máxima. Fail-closed.
+     * FUENTE DE VERDAD: se recorre la cadena de padres (`entities_id`) de la SOLICITUD con el modelo nativo
+     * `Entity` (`getFromDB`), que lee el valor ACTUAL de la columna `entities_id`. Se decide de forma
+     * AUTORITATIVA, sin usar NUNCA la caché del árbol de GLPI (`getSonsOf()`/`getAncestorsOf()`): en GLPI 11
+     * ambas usan `$GLPI_CACHE` y las columnas `ancestors_cache`/`sons_cache`, que pueden quedar
+     * DESACTUALIZADAS tras mover una entidad entre ramas. Una caché stale podría autorizar una referencia
+     * cross-branch que ya NO existe (FAIL-OPEN); por eso la autorización se resuelve sólo por la cadena viva.
+     *
+     * No es SQL directo al core (usa el modelo soportado). FAIL-CLOSED ante ciclo, profundidad excesiva,
+     * `entities_id` inválido o entidad inexistente. `visited` evita bucles.
      */
     private static function isEntityApplicable(int $refEntity, bool $refRecursive, int $requestEntity): bool
+    {
+        // Resolver de padre ACTUAL vía modelo nativo `Entity` (lee la columna `entities_id` viva, NO la
+        // caché del árbol). Devuelve null ⇒ entidad inexistente o sin dimensión de árbol ⇒ fail-closed.
+        $parentOf = static function (int $id): ?int {
+            $ent = new \Entity();
+            if (!$ent->getFromDB($id)) {
+                return null;
+            }
+            if (!array_key_exists('entities_id', $ent->fields)) {
+                return null;
+            }
+            return (int) $ent->fields['entities_id'];
+        };
+        return self::isEntityApplicableInChain($refEntity, $refRecursive, $requestEntity, $parentOf);
+    }
+
+    /**
+     * Núcleo PURO y AUTORITATIVO de la aplicabilidad de entidad: dado `$parentOf` que devuelve el padre
+     * ACTUAL de una entidad (o `null` si no existe / es inconsistente), decide si `$refEntity` (recursivo)
+     * es la raíz o un ANCESTRO ACTUAL de `$requestEntity`. La fuente de verdad es `$parentOf` (la cadena
+     * viva `entities_id`), JAMÁS una caché de árbol que pueda quedar stale tras mover una entidad. Recorrido
+     * fail-closed: `visited` corta ciclos, `ENTITY_TREE_MAX_DEPTH` acota, y `null`/entidad inválida rechaza.
+     * Es `public static` sólo para poder verificarlo de forma DETERMINISTA (unit tests) contra cadenas de
+     * padres controladas —incluida una "movida" a otra rama— sin depender del árbol real de GLPI.
+     *
+     * @param callable(int):?int $parentOf
+     */
+    public static function isEntityApplicableInChain(int $refEntity, bool $refRecursive, int $requestEntity, callable $parentOf): bool
     {
         if ($refEntity === $requestEntity) {
             return true; // misma entidad: siempre aplicable
@@ -680,27 +716,27 @@ final class RequestManager
         if (!$refRecursive) {
             return false; // no recursivo: sólo su propia entidad
         }
-        if ($refEntity === 0) {
-            return true; // recursivo en la raíz: aplica a todo el árbol
-        }
-        // Recursivo hacia ABAJO: `$refEntity` debe ser ANCESTRO de `$requestEntity`. Se sube por la cadena
-        // `entities_id` leída del modelo nativo (viva, sin caché de árbol).
+        $visited = [];
         $current = $requestEntity;
-        for ($guard = 0; $current > 0 && $guard < 100; $guard++) {
-            $ent = new \Entity();
-            if (!$ent->getFromDB($current)) {
-                return false;
+        for ($depth = 0; $depth < self::ENTITY_TREE_MAX_DEPTH; $depth++) {
+            if ($current < 0 || isset($visited[$current])) {
+                return false; // entidad inválida o ciclo → fail-closed
             }
-            $parent = (int) ($ent->fields['entities_id'] ?? 0);
+            $visited[$current] = true;
+            $parent = $parentOf($current);
+            if ($parent === null) {
+                return false; // entidad inexistente / sin dimensión de árbol → fail-closed
+            }
+            $parent = (int) $parent;
             if ($parent === $refEntity) {
-                return true; // ancestro directo o indirecto: aplica
+                return true; // `$refEntity` es ancestro ACTUAL (o la raíz 0) de la solicitud: aplica
             }
-            if ($parent === $current) {
-                return false; // ciclo defensivo
+            if ($parent < 0 || $parent === $current) {
+                return false; // raíz auto-referencial / sin padre válido: refEntity no está en la cadena
             }
             $current = $parent;
         }
-        return false; // se alcanzó la raíz sin encontrar `$refEntity` → otra rama, no aplicable
+        return false; // profundidad máxima sin encontrar `$refEntity` → fail-closed
     }
 
     private function safeRollback(\DBmysql $DB): void

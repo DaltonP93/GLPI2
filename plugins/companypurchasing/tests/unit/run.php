@@ -21,11 +21,15 @@ require $svc . 'ScopeCatalog.php';
 require $svc . 'ScopeSnapshotBuilder.php';
 require $svc . 'NumberingService.php';
 require $svc . 'QuantityPolicy.php';
+// RequestManager sólo se CARGA (no se instancia): permite verificar de forma pura y determinista el núcleo
+// autoritativo `isEntityApplicableInChain()` sin bootstrap de GLPI (las dependencias GLPI son sólo `use`).
+require $svc . 'RequestManager.php';
 
 use GlpiPlugin\Companypurchasing\Service\CurrencyPolicy;
 use GlpiPlugin\Companypurchasing\Service\Money;
 use GlpiPlugin\Companypurchasing\Service\NumberingService;
 use GlpiPlugin\Companypurchasing\Service\QuantityPolicy;
+use GlpiPlugin\Companypurchasing\Service\RequestManager;
 use GlpiPlugin\Companypurchasing\Service\ScopeCatalog;
 use GlpiPlugin\Companypurchasing\Service\ScopeSnapshotBuilder;
 
@@ -127,6 +131,28 @@ ok('cero → inválido', throws(fn() => QuantityPolicy::validate('0', true)));
 ok('negativo → inválido', throws(fn() => QuantityPolicy::validate('-1', false)));
 ok('no numérico → inválido', throws(fn() => QuantityPolicy::validate('abc', false)));
 ok('vacío → inválido', throws(fn() => QuantityPolicy::validate('', true)));
+
+echo "== Aplicabilidad de entidad AUTORITATIVA (cadena viva, NUNCA caché de árbol) ==\n";
+// `$parentOf` = padre ACTUAL por id (null = inexistente). La decisión se toma SÓLO por la cadena viva,
+// nunca por `getSonsOf()`/`getAncestorsOf()` (cacheadas y potencialmente stale → fail-open).
+$underA   = static fn(int $id): ?int => [30 => 10, 10 => 0][$id] ?? null; // X(30) → A(10) → raíz(0)
+$movedToB = static fn(int $id): ?int => [30 => 20, 20 => 0][$id] ?? null; // X(30) → B(20) → raíz(0)  (X MOVIDA)
+ok('misma entidad → aplicable', RequestManager::isEntityApplicableInChain(30, true, 30, $underA) === true);
+ok('no recursivo en otra entidad → NO aplicable', RequestManager::isEntityApplicableInChain(10, false, 30, $underA) === false);
+ok('recursivo del ANCESTRO actual (A) → aplicable', RequestManager::isEntityApplicableInChain(10, true, 30, $underA) === true);
+ok('recursivo de otra RAMA (B) → NO aplicable', RequestManager::isEntityApplicableInChain(20, true, 30, $underA) === false);
+ok('recursivo en la RAÍZ (0) → aplicable (raíz es ancestro)', RequestManager::isEntityApplicableInChain(0, true, 30, $underA) === true);
+// CLAVE — fail-open evitado: X fue MOVIDA de A a B. Una caché de árbol vieja aún diría "X bajo A", pero la
+// cadena VIVA dice "X bajo B": un supplier recursivo de A ya NO puede autorizar la referencia cross-branch.
+ok('MOVIDA A→B: recursivo de A ya NO autoriza (cadena viva, no caché)', RequestManager::isEntityApplicableInChain(10, true, 30, $movedToB) === false);
+ok('MOVIDA A→B: recursivo de B (nuevo ancestro) sí aplica', RequestManager::isEntityApplicableInChain(20, true, 30, $movedToB) === true);
+// Fail-closed ante inconsistencias del árbol:
+$cycle = static fn(int $id): ?int => [30 => 31, 31 => 30][$id] ?? null; // ciclo 30↔31
+ok('ciclo en la cadena → fail-closed (NO aplicable)', RequestManager::isEntityApplicableInChain(10, true, 30, $cycle) === false);
+$ascending = static fn(int $id): ?int => $id + 1; // cadena infinita ascendente (nunca llega a refEntity)
+ok('profundidad excesiva → fail-closed (NO aplicable)', RequestManager::isEntityApplicableInChain(5, true, 100, $ascending) === false);
+$missing = static fn(int $id): ?int => null; // entidad inexistente
+ok('entidad inexistente en la cadena → fail-closed (NO aplicable)', RequestManager::isEntityApplicableInChain(10, true, 30, $missing) === false);
 
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"
