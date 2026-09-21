@@ -659,15 +659,22 @@ final class SelftestCommand extends Command
         }
         $this->applySession($this->uOwner, [$this->entityA, $this->entityB, $childA], ['plugin_companypurchasing' => self::FULL], 1);
 
-        $supArec  = (int) (new Supplier())->add(['name' => 'CP-SUPAR-' . $this->suffix, 'entities_id' => $this->entityA, 'is_recursive' => 1]); // A, recursivo
-        $supAflat = (int) (new Supplier())->add(['name' => 'CP-SUPAF-' . $this->suffix, 'entities_id' => $this->entityA, 'is_recursive' => 0]); // A, no recursivo
-        $supBrec  = (int) (new Supplier())->add(['name' => 'CP-SUPBR-' . $this->suffix, 'entities_id' => $this->entityB, 'is_recursive' => 1]); // B, recursivo (otra rama)
-        foreach ([$supArec, $supAflat, $supBrec] as $s) {
-            if ($s > 0) {
-                $this->createdSuppliers[] = $s;
-            }
-        }
+        $supArec  = $this->makeSupplier('CP-SUPAR-' . $this->suffix, $this->entityA, true);  // A, recursivo
+        $supAflat = $this->makeSupplier('CP-SUPAF-' . $this->suffix, $this->entityA, false); // A, no recursivo
+        $supBrec  = $this->makeSupplier('CP-SUPBR-' . $this->suffix, $this->entityB, true);  // B, recursivo (otra rama)
         $this->check('[REF-ENTITY] fixtures (entidad hija + suppliers A/B) creados', $childA > 0 && $supArec > 0 && $supAflat > 0 && $supBrec > 0);
+
+        // Diagnóstico del estado REAL de las entidades/refs (GLPI puede no honrar is_recursive en add()).
+        $dChild = new Entity();
+        $dChild->getFromDB($childA);
+        $dSup = new Supplier();
+        $dSup->getFromDB($supArec);
+        $this->out->writeln(sprintf(
+            '    [REF-ENTITY][diag] childA=%d childA.entities_id=%s | supArec=%d sup.entities_id=%s sup.is_recursive=%s | haveAccess(childA)=%s',
+            $childA, (string) ($dChild->fields['entities_id'] ?? 'NULL'),
+            $supArec, (string) ($dSup->fields['entities_id'] ?? 'NULL'), (string) ($dSup->fields['is_recursive'] ?? 'NULL'),
+            \Session::haveAccessToEntity($childA) ? 'yes' : 'no'
+        ));
 
         $rm = new RequestManager();
 
@@ -957,6 +964,27 @@ final class SelftestCommand extends Command
         $id = (int) (new \Group())->add(['name' => 'CP-GRP-' . $tag . '-' . $this->suffix, 'entities_id' => $entity, 'is_recursive' => 0]);
         if ($id > 0) {
             $this->createdGroups[] = $id;
+        }
+        return $id;
+    }
+
+    /**
+     * Crea un Supplier fixture con el `is_recursive` EXACTO pedido. GLPI puede no honrar `is_recursive` en
+     * `add()` según el contexto de recursión de la sesión, así que se FUERZA el estado por la interfaz
+     * SOPORTADA del modelo (`Supplier::update()`, no SQL directo) y se re-lee para dejarlo consistente.
+     */
+    private function makeSupplier(string $name, int $entity, bool $recursive): int
+    {
+        $want = $recursive ? 1 : 0;
+        $sup = new Supplier();
+        $id = (int) $sup->add(['name' => $name, 'entities_id' => $entity, 'is_recursive' => $want]);
+        if ($id <= 0) {
+            return 0;
+        }
+        $this->createdSuppliers[] = $id;
+        $cur = new Supplier();
+        if ($cur->getFromDB($id) && (int) ($cur->fields['is_recursive'] ?? 0) !== $want) {
+            $cur->update(['id' => $id, 'is_recursive' => $want]);
         }
         return $id;
     }
