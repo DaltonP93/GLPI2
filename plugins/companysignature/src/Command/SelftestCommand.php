@@ -19,6 +19,9 @@
  *   [INVALIDATE]  §4: idempotency_key obligatoria; actor DURABLE reconstruido; exacta A/B.
  *   [INVALIDATE-CHECKPOINT] reabrir S2 anula sólo lo decidido desde la entrada a S2 (S1 sigue válida).
  *   [INVALIDATE-LEDGER-FAIL] history() caído ⇒ PENDING y cero invalidaciones; al volver, exacta.
+ *   [UPGRADE]     0.4.0 → 0.5.0: install() sobre una instalación EXISTENTE (×2) no falla por UNIQUE, deja el
+ *                 derecho una vez por perfil, PRESERVA configuración/derechos/frecuencia personalizados,
+ *                 agrega sólo defaults ausentes, no duplica la Acción automática ni toca evidencias.
  *
  * @license GPL-3.0-or-later
  */
@@ -29,6 +32,7 @@ namespace GlpiPlugin\Companysignature\Command;
 
 use Computer;
 use Config;
+use CronTask;
 use Document;
 use Document_Item;
 use Entity;
@@ -52,7 +56,9 @@ use GlpiPlugin\Companyworkflow\Model\Step;
 use GlpiPlugin\Companyworkflow\Model\WorkflowDef;
 use Group;
 use Group_User;
+use Profile;
 use Profile_User;
+use ProfileRight;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -117,6 +123,14 @@ final class SelftestCommand extends Command
         $this->scenarioMaterializerFailClosed();
         $this->scenarioPdfLockFailClosed();
         $this->scenarioNoStarvation();
+
+        // Upgrade al final (con evidencias/versiones de esta corrida todavía presentes). Una excepción se
+        // reporta como comprobación FALLIDA (fail-closed) en vez de abortar sin resumen.
+        try {
+            $this->scenarioUpgradeReinstall();
+        } catch (\Throwable $e) {
+            $this->check('[UPGRADE] sin excepción: ' . $e->getMessage(), false);
+        }
 
         $this->cleanup();
 
@@ -999,6 +1013,148 @@ final class SelftestCommand extends Command
             $m = (int) ($row['id'] ?? 0);
         }
         return $m;
+    }
+
+    // ------------------------------------------------------------------ [UPGRADE]
+
+    /**
+     * [UPGRADE] 0.4.0 → 0.5.0 sobre una instalación EXISTENTE. El esquema de 0.5.0 es idéntico al de 0.4.0,
+     * así que el upgrade real es exactamente lo que hace GLPI al actualizar el plugin: volver a llamar
+     * `plugin_companysignature_install()` con tablas, derecho, configuración, Acción automática y evidencias ya
+     * presentes. Se ejecuta DOS veces (idempotencia) y al final se restaura el estado previo (config, derecho,
+     * frecuencia) para no afectar a los pasos siguientes de CI.
+     */
+    private function scenarioUpgradeReinstall(): void
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $this->out->writeln('== [UPGRADE] 0.4.0 → 0.5.0: install() sobre una instalación existente ==');
+        if (!function_exists('plugin_companysignature_install')) {
+            include_once dirname(__DIR__, 2) . '/hook.php';
+        }
+        if (!function_exists('plugin_companysignature_install')) {
+            $this->check('[UPGRADE] plugin_companysignature_install() disponible', false);
+            return;
+        }
+        $right = 'plugin_companysignature';
+
+        // --- Instalación existente: derecho, evidencias y Acción automática ya presentes.
+        $profiles = countElementsInTable(Profile::getTable());
+        $this->check('[UPGRADE] precondición: derecho ya existente (una fila por perfil)', $profiles > 0 && countElementsInTable(ProfileRight::getTable(), ['name' => $right]) === $profiles);
+        $before = $this->dataFingerprint();
+        $this->check(sprintf('[UPGRADE] precondición: datos existentes (evidencias=%d versiones=%d cola=%d)', $before['evidences']['count'], $before['document_versions']['count'], $before['reconcile_queue']['count']), $before['evidences']['count'] > 0 && $before['document_versions']['count'] > 0);
+
+        // Configuración administrativa personalizada (incluye el high-watermark durable: un upgrade no debe reiniciarlo).
+        $orig = Config::getConfigurationValues(PluginConfig::CONTEXT);
+        $custom = [
+            'presentation_timezone' => 'America/Montevideo',
+            'compose_pdf'           => '0',
+            'reconcile_work_batch'  => '37',
+            'last_seen_history_id'  => (string) max(1, (int) ($orig['last_seen_history_id'] ?? 0)),
+        ];
+        Config::setConfigurationValues(PluginConfig::CONTEXT, $custom);
+        // Default AUSENTE en la instalación existente (lo que ocurre cuando una versión nueva agrega una clave).
+        Config::deleteConfigurationValues(PluginConfig::CONTEXT, ['reconcile_harvest_batch']);
+
+        // Derecho personalizado por el administrador en un perfil que NO es Super-Admin.
+        $otherProfile = 0;
+        foreach ($DB->request(['SELECT' => 'id', 'FROM' => Profile::getTable(), 'WHERE' => ['NOT' => ['id' => 4]], 'ORDER' => 'id', 'LIMIT' => 1]) as $row) {
+            $otherProfile = (int) $row['id'];
+        }
+        $otherOrig = $this->profileRight($otherProfile);
+        ProfileRight::updateProfileRights($otherProfile, [$right => ApprovalEvidence::RIGHT_VERIFY]);
+
+        // Acción automática existente con frecuencia ajustada por el administrador.
+        $cron = new CronTask();
+        $cronId = $cron->getFromDBbyName(ReconcileTask::class, 'reconcile') ? (int) $cron->getID() : 0;
+        $cronFreqOrig = (int) ($cron->fields['frequency'] ?? 0);
+        $this->check('[UPGRADE] precondición: Acción automática registrada (una)', $cronId > 0 && countElementsInTable(CronTask::getTable(), ['itemtype' => ReconcileTask::class]) === 1);
+        $cron->update(['id' => $cronId, 'frequency' => 600]);
+
+        try {
+            $errors = [];
+            foreach ([1, 2] as $pass) {
+                try {
+                    if (plugin_companysignature_install() !== true) {
+                        $errors[] = "pasada {$pass}: install() no devolvió true";
+                    }
+                } catch (\Throwable $e) {
+                    $errors[] = "pasada {$pass}: " . $e->getMessage();
+                }
+            }
+            $this->check('[UPGRADE] install() ×2 sin excepción ni violación UNIQUE' . ($errors !== [] ? ' — ' . implode(' | ', $errors) : ''), $errors === []);
+
+            $perProfile = [];
+            foreach ($DB->request(['SELECT' => 'profiles_id', 'FROM' => ProfileRight::getTable(), 'WHERE' => ['name' => $right]]) as $row) {
+                $perProfile[(int) $row['profiles_id']] = ($perProfile[(int) $row['profiles_id']] ?? 0) + 1;
+            }
+            $this->check(sprintf('[UPGRADE] el derecho sigue EXACTAMENTE una vez por perfil (%d perfiles, %d filas)', $profiles, array_sum($perProfile)), count($perProfile) === $profiles && $perProfile !== [] && max($perProfile) === 1);
+            $this->check('[UPGRADE] derecho personalizado de un perfil PRESERVADO', $this->profileRight($otherProfile) === ApprovalEvidence::RIGHT_VERIFY);
+            $full = READ | ApprovalEvidence::RIGHT_RECORD | ApprovalEvidence::RIGHT_VERIFY | ApprovalEvidence::RIGHT_CONFIG;
+            $this->check('[UPGRADE] Super-Admin conserva todos los bits', $this->profileRight(4) === $full);
+
+            $now = Config::getConfigurationValues(PluginConfig::CONTEXT);
+            $kept = array_filter($custom, static fn (string $v, string $k): bool => (string) ($now[$k] ?? '') === $v, ARRAY_FILTER_USE_BOTH);
+            $this->check('[UPGRADE] configuración personalizada PRESERVADA (' . implode(', ', array_keys($custom)) . ')', count($kept) === count($custom));
+            $this->check('[UPGRADE] default ausente agregado (reconcile_harvest_batch=' . PluginConfig::DEFAULTS['reconcile_harvest_batch'] . ')', (string) ($now['reconcile_harvest_batch'] ?? '') === PluginConfig::DEFAULTS['reconcile_harvest_batch']);
+            $this->check('[UPGRADE] ninguna clave por defecto falta tras el upgrade', array_diff_key(PluginConfig::DEFAULTS, $now) === []);
+
+            $cron2 = new CronTask();
+            $this->check('[UPGRADE] Acción automática NO duplicada (una sola, mismo id)', countElementsInTable(CronTask::getTable(), ['itemtype' => ReconcileTask::class]) === 1
+                && $cron2->getFromDBbyName(ReconcileTask::class, 'reconcile') && (int) $cron2->getID() === $cronId);
+            $this->check('[UPGRADE] frecuencia ajustada de la Acción automática PRESERVADA', (int) ($cron2->fields['frequency'] ?? 0) === 600);
+
+            $tables = ['document_versions', 'evidences', 'reconcile_queue'];
+            $this->check('[UPGRADE] tablas propias siguen existiendo', array_reduce($tables, static fn (bool $c, string $t): bool => $c && $DB->tableExists("glpi_plugin_companysignature_{$t}"), true));
+            $after = $this->dataFingerprint();
+            $this->check(sprintf('[UPGRADE] evidencias/versiones/cola INTACTAS (conteo + huella sha256: %d/%d/%d)', $after['evidences']['count'], $after['document_versions']['count'], $after['reconcile_queue']['count']), $after === $before);
+        } finally {
+            // Restaurar el estado previo (el stack de CI sigue con otros selftests y reconciles).
+            Config::setConfigurationValues(PluginConfig::CONTEXT, $orig);
+            if ($otherProfile > 0 && $otherOrig >= 0) {
+                ProfileRight::updateProfileRights($otherProfile, [$right => $otherOrig]);
+            }
+            if ($cronId > 0) {
+                (new CronTask())->update(['id' => $cronId, 'frequency' => $cronFreqOrig]);
+            }
+        }
+    }
+
+    /**
+     * Huella de los datos probatorios propios: conteo + sha256 de las columnas relevantes en orden de id.
+     * @return array<string,array{count:int,sha:string}>
+     */
+    private function dataFingerprint(): array
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $spec = [
+            'evidences'         => ['id', 'idempotency_key', 'verification_token', 'content_sha256', 'event_type', 'decision', 'document_versions_id'],
+            'document_versions' => ['id', 'subject_itemtype', 'subject_items_id', 'version', 'content_sha256', 'pdf_sha256', 'documents_id', 'pdf_status'],
+            'reconcile_queue'   => ['id', 'workflow_history_id', 'status', 'attempts'],
+        ];
+        $out = [];
+        foreach ($spec as $t => $cols) {
+            $ctx = hash_init('sha256');
+            $n = 0;
+            foreach ($DB->request(['SELECT' => $cols, 'FROM' => "glpi_plugin_companysignature_{$t}", 'ORDER' => 'id']) as $row) {
+                hash_update($ctx, json_encode(array_values($row)) . "\n");
+                $n++;
+            }
+            $out[$t] = ['count' => $n, 'sha' => hash_final($ctx)];
+        }
+        return $out;
+    }
+
+    /** Bits del derecho del plugin para un perfil (-1 si la fila no existe). */
+    private function profileRight(int $profileId): int
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        foreach ($DB->request(['SELECT' => 'rights', 'FROM' => ProfileRight::getTable(), 'WHERE' => ['profiles_id' => $profileId, 'name' => 'plugin_companysignature']]) as $row) {
+            return (int) $row['rights'];
+        }
+        return -1;
     }
 
     /**

@@ -115,8 +115,11 @@ function plugin_companysignature_install() {
         $DB->doQuery($sql);
     }
 
-    // Derecho propio del plugin en todos los perfiles (valor 0 por defecto).
-    if (class_exists('ProfileRight')) {
+    // Derecho propio del plugin en todos los perfiles (valor 0 por defecto). Sólo si FALTA: GLPI vuelve a
+    // llamar install() al ACTUALIZAR el plugin (p. ej. 0.4.0 → 0.5.0); re-agregarlo violaría el UNIQUE
+    // (profiles_id, name) de glpi_profilerights y abortaría el upgrade.
+    if (class_exists('ProfileRight')
+        && countElementsInTable(ProfileRight::getTable(), ['name' => 'plugin_companysignature']) === 0) {
         ProfileRight::addProfileRights(['plugin_companysignature']);
     }
 
@@ -128,11 +131,19 @@ function plugin_companysignature_install() {
         ['profiles_id' => 4, 'name' => 'plugin_companysignature']
     );
 
-    // Configuración por defecto (contexto plugin:companysignature). Sin secretos.
-    Config::setConfigurationValues(PluginConfig::CONTEXT, PluginConfig::DEFAULTS);
+    // Configuración por defecto (contexto plugin:companysignature). Sin secretos. Sólo se siembran las
+    // claves AUSENTES: un reinstall/upgrade NO pisa lo que un administrador ajustó ni el high-watermark
+    // durable de la reconciliación (`last_seen_history_id`).
+    $current = Config::getConfigurationValues(PluginConfig::CONTEXT);
+    $missing = array_diff_key(PluginConfig::DEFAULTS, is_array($current) ? $current : []);
+    if ($missing !== []) {
+        Config::setConfigurationValues(PluginConfig::CONTEXT, $missing);
+    }
 
     // CronTask NATIVA: reconciliación durable automática (harvest + worker). NUNCA aprueba/rechaza;
     // sólo materializa evidencia YA comprometida en el ledger. Frecuencia configurable desde GLPI.
+    // Idempotente: CronTask::register() no inserta si ya existe (itemtype, name), así que un upgrade
+    // conserva la Acción automática (y su frecuencia/estado ajustados) sin duplicarla.
     if (class_exists('CronTask')) {
         CronTask::register(
             \GlpiPlugin\Companysignature\Model\ReconcileTask::class,
