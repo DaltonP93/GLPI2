@@ -12,19 +12,25 @@
  *
  * Reglas de la saga:
  *   1. NINGUNA llamada a companyworkflow/companysignature ocurre dentro de una transacción LOCAL; cada
- *      paso local (allocator, ledger, auditoría, proyección) confirma por sí mismo.
+ *      paso local (allocator, ledger, marcas, auditoría, proyección) confirma por sí mismo.
  *   2. Serialización por el lock común de la solicitud (`request_<id>`) — no es una transacción de BD.
  *   3. Idempotencia: la versión se REUTILIZA si el contenido del scope no cambió; `recordDocumentVersion`
- *      es idempotente; la transición usa `expected_lock_version`; la invalidación usa `idempotency_key`
- *      derivada de la versión; los eventos de auditoría de la saga usan `recordOnce`.
- *   4. Recuperación: un reintento converge; `reconcile()` corrige la proyección (el motor gana).
- *   5. Integridad por scope (fail-closed): antes de CADA decisión se verifica, contra el LEDGER del motor,
- *      que las aprobaciones VIVAS de cada scope correspondan al contenido ACTUAL; si no → nueva versión +
- *      `invalidateApprovals(reopen_to_code = checkpoint del scope)`. Nunca se aprueba sobre una
- *      aprobación obsoleta.
+ *      es idempotente; la transición usa `expected_lock_version`; toda decisión declara la ETAPA sobre la
+ *      que se cree actuar (`expectedState`, obligatoria: un reintento tras una caída posterior a la
+ *      transición devuelve `stage_changed` y jamás decide en la etapa siguiente); la invalidación usa
+ *      `idempotency_key` derivada de la versión; los eventos de la saga usan `recordOnce`.
+ *   4. Política PINNEADA por solicitud (`PolicyStore`): etapa→scope, checkpoints, PDF y estados comerciales
+ *      no cambian retroactivamente si un administrador edita la configuración.
+ *   5. Integridad por scope (fail-closed): una mutación sustantiva escribe una MARCA DURABLE en su misma
+ *      transacción; la marca sólo se resuelve tras una invalidación CONFIRMADA o tras verificar contra el
+ *      ledger del motor. Antes de CADA decisión se repara (o se falla cerrado): las aprobaciones VIVAS de
+ *      cada scope deben coincidir EXACTAMENTE ({document_versions_id, document_version, content_sha256} +
+ *      scope) con el ledger de Compras y con el contenido ACTUAL. Mientras haya marcas o deriva, la
+ *      solicitud NO está íntegramente aprobada (`integrityStatus()`), aunque el motor diga APPROVED.
+ *   6. Proyección: `reconcile()`/`reconcileAll()` (cursor con wrap-around) + Acción automática nativa.
  *
- * No es `final`: los tests deterministas de caída inyectan fallos en los puntos `beforeTransition()` /
- * `afterTransition()`.
+ * No es `final`: los tests deterministas de caída inyectan fallos en `beforeStartInstance()`,
+ * `beforeTransition()` y `afterTransition()`.
  *
  * @license GPL-3.0-or-later
  */
@@ -33,6 +39,7 @@ declare(strict_types=1);
 
 namespace GlpiPlugin\Companypurchasing\Service;
 
+use Config;
 use Session;
 use GlpiPlugin\Companypurchasing\Model\DocVersion;
 use GlpiPlugin\Companypurchasing\Model\PurchasingEvent;
@@ -59,6 +66,8 @@ class ApprovalOrchestrator
     protected QuoteManager $quotes;
     protected StateProjection $projection;
     protected ScopeSnapshotBuilder $builder;
+    protected PolicyStore $policies;
+    protected IntegrityLedger $integrity;
 
     public function __construct(
         ?WorkflowGateway $wf = null,
@@ -76,6 +85,8 @@ class ApprovalOrchestrator
         $this->quotes     = new QuoteManager($this->audit, $this->lock, null, $this->wf);
         $this->projection = new StateProjection($this->wf, $this->audit);
         $this->builder    = new ScopeSnapshotBuilder();
+        $this->policies   = new PolicyStore();
+        $this->integrity  = new IntegrityLedger();
     }
 
     // ================================================================ definición (administración)
@@ -91,7 +102,7 @@ class ApprovalOrchestrator
         if (!Session::haveRight(Request::$rightname, Request::RIGHT_MANAGE_CONFIG)) {
             throw new \RuntimeException('permiso denegado (MANAGE_CONFIG)');
         }
-        PurchasingWorkflow::validateMaps(PluginConfig::stageScopes(), PluginConfig::scopeCheckpoints(), [ScopeCatalog::SCOPE_REQUEST, ScopeCatalog::SCOPE_COMMERCIAL_FINANCIAL]);
+        ApprovalPolicy::fromArray($this->policies->currentRaw()); // la política vigente debe ser válida
         $cfg = PluginConfig::stageConfig();
         foreach ($cfg['groups'] as $stage => $groupId) {
             if ($groupId > 0 && !(new \Group())->getFromDB($groupId)) {
@@ -109,12 +120,19 @@ class ApprovalOrchestrator
     // ================================================================ submit
 
     /**
-     * Envía la solicitud al circuito: (1) paso LOCAL de P2D-1 (número + scopes pinneados, idempotente);
-     * (2) inicia/enlaza la instancia del motor; (3) `submit` desde DRAFT/RETURNED; (4) proyecta.
-     * Idempotente y reanudable tras una caída en cualquier punto. Devuelve el estado actual del motor.
+     * Envía la solicitud al circuito: (0) exige definición ACTIVA antes de tocar nada local; (1) paso LOCAL
+     * de P2D-1 (número + scopes + política pinneados, idempotente); (2) inicia/enlaza la instancia del
+     * motor; (3) `submit` desde DRAFT/RETURNED; (4) proyecta. Un reintento tras una caída entre (1) y (2)
+     * converge (y `reconcile` reporta la solicitud enviada-sin-instancia mientras tanto).
      */
     public function submit(int $requestId, string $comment = ''): string
     {
+        // (0) FAIL-CLOSED antes de cualquier cambio local: sin definición activa la solicitud sigue en DRAFT
+        // (no consume número ni queda "enviada" sin instancia).
+        if ($this->wf->activeDefinition(PluginConfig::workflowCode()) === null) {
+            throw new \RuntimeException('definición de workflow de compras no publicada (fail-closed)');
+        }
+
         // (1) Local P2D-1 (toma y libera su propio lock; valida EDIT_DRAFT + entidad + visibilidad).
         $this->requests->submitDraft($requestId);
 
@@ -128,9 +146,20 @@ class ApprovalOrchestrator
             // (2) Instancia: enlazada, o existente por (itemtype, items_id) tras una caída, o nueva.
             $inst = $this->instanceFor($req, false);
             if ($inst === null) {
+                if ((int) ($req->fields['policies_id'] ?? 0) <= 0) {
+                    // Enviada antes de existir la política pinneada y SIN instancia aún: se pinnea ahora (todavía
+                    // no hay ninguna decisión: no es un cambio retroactivo).
+                    if (!$req->update(['id' => $requestId, 'policies_id' => $this->policies->pinCurrent()])) {
+                        throw new \RuntimeException('no se pudo pinnear la política de aprobación');
+                    }
+                    $req->getFromDB($requestId);
+                }
+                $this->policies->forRequest($req); // fail-closed si no es válida
+                $this->beforeStartInstance($requestId);
                 $inst = $this->wf->startInstance($def, Request::class, $requestId, (int) $req->fields['entities_id']);
                 $this->audit->recordOnce($requestId, PurchasingEvent::EV_WORKFLOW_STARTED, (int) $req->fields['entities_id'], [
                     'instances_id' => (int) $inst->getID(), 'workflowdefs_id' => (int) $def->getID(),
+                    'policies_id'  => (int) $req->fields['policies_id'],
                 ], (string) $req->fields['correlation_id'], 'wf-start:' . $requestId);
             }
             $this->projection->sync($req);
@@ -156,24 +185,34 @@ class ApprovalOrchestrator
         });
     }
 
+    /** Punto de inyección de caída para tests (envío local confirmado, antes de `startInstance()`). */
+    protected function beforeStartInstance(int $requestId): void
+    {
+    }
+
     // ================================================================ decisiones
 
     /**
-     * approve | reject | return en la etapa ACTUAL, ligada a evidencia del scope de la etapa.
+     * approve | reject | return en la etapa `$expectedState` (OBLIGATORIA), ligada a evidencia del scope.
      *
-     * Saga: integridad de scopes → snapshot del scope → versión (reutilizada si no cambió) →
-     * `recordDocumentVersion` → `evidence_ref` → `transition(expected_lock_version)` → auditoría →
-     * proyección → (fuera del lock) PDF si la etapa lo exige.
+     * Si la instancia ya no está en `$expectedState` (p. ej. reintento tras una caída posterior a una
+     * transición confirmada) ⇒ `stage_changed`, SIN crear otra decisión: un mismo usuario que pertenece a dos
+     * etapas jamás "aprueba de más" por reintentar. Dentro de la misma etapa un reintento es `duplicate`.
      *
-     * `$expectedState`: si se indica y la etapa ya cambió (p. ej. reintento tras una caída posterior a la
-     * transición) ⇒ no-op idempotente `stage_changed`.
+     * Saga: reparación de integridad (marcas + deriva; fail-closed) → snapshot del scope → versión (reusada
+     * si no cambió) → `recordDocumentVersion` → `evidence_ref` → `transition(expected_lock_version)` →
+     * auditoría → proyección → (fuera del lock) PDF si la política pinneada lo exige.
      *
      * @return array<string,mixed>
      */
-    public function decide(int $requestId, string $action, string $comment = '', ?string $expectedState = null): array
+    public function decide(int $requestId, string $action, string $expectedState, string $comment = ''): array
     {
         if (!in_array($action, self::ACTIONS, true)) {
             throw new \InvalidArgumentException("acción inválida: {$action}");
+        }
+        $expectedState = trim($expectedState);
+        if ($expectedState === '') {
+            throw new \InvalidArgumentException('expectedState es obligatorio: toda decisión declara la etapa sobre la que actúa');
         }
         $result = (array) $this->lock->withRequestLock($requestId, function () use ($requestId, $action, $comment, $expectedState): array {
             $req  = $this->loadRequest($requestId);
@@ -182,17 +221,19 @@ class ApprovalOrchestrator
             if (!$this->wf->isOpen($inst)) {
                 throw new \RuntimeException('la instancia de workflow no está abierta');
             }
+            $policy = $this->policies->forRequest($req);
             $state = $this->wf->stateCode($inst);
-            if ($expectedState !== null && $state !== $expectedState) {
+            if ($state !== $expectedState) {
                 $this->projection->sync($req);
                 return ['status' => 'stage_changed', 'state' => $state, 'advanced' => false, 'pdf' => false];
             }
-            $scope = PluginConfig::stageScopes()[$state] ?? null;
+            $scope = $policy->stageScopes()[$state] ?? null;
             if ($scope === null) {
                 throw new \RuntimeException("el estado {$state} no es una etapa de aprobación (fail-closed)");
             }
 
-            // Red de seguridad (fail-closed): invalidar aprobaciones obsoletas ANTES de decidir.
+            // Reparación de integridad ANTES de decidir (marcas durables + deriva exacta). Si no se puede
+            // reparar, lanza: nunca se decide sobre una aprobación obsoleta.
             $invalidated = $this->enforceIntegrityLocked($req, $inst);
             if ($invalidated !== []) {
                 $inst = $this->instanceFor($req, true);
@@ -200,6 +241,9 @@ class ApprovalOrchestrator
                 if ($now !== $state) {
                     return ['status' => 'reopened', 'state' => $now, 'advanced' => false, 'pdf' => false, 'invalidated' => $invalidated];
                 }
+            }
+            if ($this->integrity->pending($requestId) !== []) {
+                throw new \RuntimeException('integridad de aprobación pendiente: no se decide (fail-closed)');
             }
 
             // Evidencia de la decisión: una APROBACIÓN siempre se liga al scope de su etapa (no producible ⇒
@@ -257,7 +301,7 @@ class ApprovalOrchestrator
                 'content_sha256'       => $cp['content_sha256'],
                 'ledger_id'            => $cp['ledger_id'],
                 'invalidated'          => $invalidated,
-                'pdf'                  => $action === 'approve' && $advanced && in_array($state, PluginConfig::pdfStages(), true),
+                'pdf'                  => $action === 'approve' && $advanced && in_array($state, $policy->pdfStages(), true),
             ];
         });
 
@@ -322,9 +366,9 @@ class ApprovalOrchestrator
     // ================================================================ integridad por scope
 
     /**
-     * Re-evalúa la integridad de los scopes aprobados tras una mutación (no lanza: la mutación local ya
-     * está confirmada; si no se pudo invalidar ahora —p. ej. la sesión carece de RIGHT_ACT— la red de
-     * seguridad de `decide()` lo hará antes de la próxima decisión).
+     * Repara la integridad (marcas durables + deriva). No lanza: la mutación local ya está confirmada y su
+     * marca PERSISTE si la reparación falla; `decide()` la reparará (o fallará cerrado) antes de cualquier
+     * decisión, y `integrityStatus()` la reporta como NO íntegramente aprobada mientras tanto.
      *
      * @return array{invalidated:array<int,array<string,mixed>>, error:?string}
      */
@@ -346,56 +390,79 @@ class ApprovalOrchestrator
     }
 
     /**
-     * Núcleo (bajo el lock de la solicitud). Recorre los scopes del checkpoint MÁS TEMPRANO al más tardío;
-     * al invalidar uno se detiene (reabrir un checkpoint anterior reinicia los posteriores).
+     * Estado de integridad SIN efectos (sólo lectura): marcas durables pendientes + deriva exacta respecto
+     * del ledger del motor. `fully_approved` exige APPROVED en el motor Y ausencia de marcas y de deriva.
+     *
+     * Servicio INTERNO sin ACL propia (sólo devuelve códigos de estado/scope, ningún dato de negocio): un
+     * controlador/UI que lo exponga debe aplicar antes la ACL de vista de la solicitud (`canView`).
+     *
+     * @return array{state:string, dirty_scopes:array<int,string>, drift:array<string,string>, clean:bool, fully_approved:bool}
+     */
+    public function integrityStatus(int $requestId): array
+    {
+        $req = $this->loadRequest($requestId);
+        $inst = $this->instanceFor($req, false);
+        $marks = $this->integrity->pending($requestId);
+        $state = $inst !== null ? $this->wf->stateCode($inst) : '';
+        $drift = [];
+        if ($inst !== null) {
+            foreach ($this->analyze($req, $inst, $this->policies->forRequest($req)) as $scope => $a) {
+                if ($a['drift']) {
+                    $drift[$scope] = $a['reason'];
+                }
+            }
+        }
+        $clean = $marks === [] && $drift === [] && (string) ($req->fields['integrity_state'] ?? IntegrityLedger::CLEAN) === IntegrityLedger::CLEAN;
+        return [
+            'state'          => $state,
+            'dirty_scopes'   => array_keys($marks),
+            'drift'          => $drift,
+            'clean'          => $clean,
+            'fully_approved' => $clean && $inst !== null && $this->wf->isOpen($inst) && $state === PurchasingWorkflow::S_APPROVED,
+        ];
+    }
+
+    public function isFullyApproved(int $requestId): bool
+    {
+        return $this->integrityStatus($requestId)['fully_approved'];
+    }
+
+    /**
+     * Núcleo (bajo el lock de la solicitud). Recorre los scopes del checkpoint MÁS TEMPRANO al más tardío
+     * (REQUEST_SCOPE primero). Sin deriva ⇒ resuelve sus marcas como verificadas. Con deriva ⇒ nueva versión
+     * (si es producible) + `invalidateApprovals()`; sólo si el motor la CONFIRMA se resuelven las marcas del
+     * scope y de los posteriores (reabrir un checkpoint anterior los reinicia). Si falla ⇒ lanza y las marcas
+     * persisten.
      *
      * @return array<int,array<string,mixed>> invalidaciones aplicadas
      */
     protected function enforceIntegrityLocked(Request $req, Instance $inst): array
     {
-        $requestId   = (int) $req->getID();
-        $stageScopes = PluginConfig::stageScopes();
-        $checkpoints = PluginConfig::scopeCheckpoints();
-        uasort($checkpoints, static fn (string $a, string $b): int => PurchasingWorkflow::stageIndex($a) <=> PurchasingWorkflow::stageIndex($b));
-        $history = $this->wf->history((int) $inst->getID());
+        $requestId = (int) $req->getID();
+        $policy    = $this->policies->forRequest($req);
+        $marks     = $this->integrity->pending($requestId); // snapshot: scope → id máximo visto
+        $maxMark   = $marks === [] ? 0 : max($marks);
+        $ordered   = $policy->orderedCheckpoints();
 
-        foreach ($checkpoints as $scope => $checkpoint) {
-            $live = PurchasingWorkflow::liveDecisions($history, $scope, $checkpoint, $stageScopes);
-            if ($live === []) {
-                continue;
-            }
-            // Contenido ACTUAL del scope (no producible ⇒ deriva, fail-closed).
-            $semantic = null;
-            $currentSha = '';
-            try {
-                $semantic = $this->semantic($req, $scope);
-                $currentSha = DocumentVersionAllocator::payloadHash($semantic);
-            } catch (\Throwable) {
-                $semantic = null;
-            }
-            $drift = $semantic === null;
-            foreach ($live as $d) {
-                $ver = (int) ($d['meta']['evidence_ref']['document_version'] ?? 0);
-                $row = $ver > 0 ? $this->alloc->findByVersion($requestId, $ver) : null;
-                if ($row === null || (string) $row['scope_key'] !== $scope || !hash_equals((string) $row['payload_sha256'], $currentSha)) {
-                    $drift = true;
-                    break;
+        foreach ($this->analyze($req, $inst, $policy) as $scope => $a) {
+            if (!$a['drift']) {
+                if (isset($marks[$scope])) {
+                    $this->integrity->resolve($requestId, [$scope], $marks[$scope], 'verified:' . $a['reason']);
                 }
-            }
-            if (!$drift) {
                 continue;
             }
 
             // Deriva ⇒ nueva versión del scope (si es producible) + invalidación idempotente.
+            $checkpoint = $a['checkpoint'];
             $version = 0;
-            if ($semantic !== null) {
-                $cp = $this->recordCheckpointLocked($req, $scope, $semantic);
+            if ($a['semantic'] !== null) {
+                $cp = $this->recordCheckpointLocked($req, $scope, $a['semantic']);
                 $version = $cp['document_version'];
                 $key = 'cpur:' . $requestId . ':' . $scope . ':v' . $version;
             } else {
-                $key = 'cpur:' . $requestId . ':' . $scope . ':unbuildable:h' . (int) end($live)['id'];
+                $key = 'cpur:' . $requestId . ':' . $scope . ':unbuildable:h' . $a['last_live_id'];
             }
-            $res = $this->wf->invalidate((int) $inst->getID(), "scope {$scope} changed after approval", [
+            $res = $this->wf->invalidate((int) $inst->getID(), "scope {$scope} changed after approval ({$a['reason']})", [
                 'idempotency_key'  => $key,
                 'reopen_to_code'   => $checkpoint,
                 'subject_type'     => Request::class,
@@ -405,14 +472,70 @@ class ApprovalOrchestrator
             if (!$res->success) {
                 throw new \RuntimeException('no se pudo invalidar el scope ' . $scope . ': ' . $res->code . ' — ' . $res->message);
             }
+            // Invalidación CONFIRMADA ⇒ recién ahora se resuelven las marcas (este scope y los posteriores).
+            $cpIndex = PurchasingWorkflow::stageIndex($checkpoint);
+            $reset = array_keys(array_filter($ordered, static fn (string $c): bool => PurchasingWorkflow::stageIndex($c) >= $cpIndex));
+            $this->integrity->resolve($requestId, $reset, $maxMark, 'invalidated:' . $key);
             $this->audit->recordOnce($requestId, PurchasingEvent::EV_SCOPE_INVALIDATED, (int) $req->fields['entities_id'], [
-                'scope' => $scope, 'reopen_to' => $checkpoint, 'document_version' => $version,
+                'scope' => $scope, 'reopen_to' => $checkpoint, 'document_version' => $version, 'reason' => $a['reason'],
                 'idempotency_key' => $key, 'idempotent' => (bool) ($res->data['idempotent'] ?? false),
             ], (string) $req->fields['correlation_id'], 'invalidated:' . $key);
             $this->projection->sync($req);
-            return [['scope' => $scope, 'reopen_to' => $checkpoint, 'document_version' => $version, 'idempotency_key' => $key]];
+            return [['scope' => $scope, 'reopen_to' => $checkpoint, 'document_version' => $version, 'idempotency_key' => $key, 'reason' => $a['reason']]];
         }
         return [];
+    }
+
+    /**
+     * Análisis SIN efectos de cada scope (orden de prioridad): aprobaciones vivas según el ledger del motor y
+     * si alguna NO coincide EXACTAMENTE con el ledger de Compras y con el contenido actual.
+     *
+     * @return array<string,array{checkpoint:string, drift:bool, reason:string, semantic:?array, last_live_id:int}>
+     */
+    protected function analyze(Request $req, Instance $inst, ApprovalPolicy $policy): array
+    {
+        $requestId = (int) $req->getID();
+        $history = $this->wf->history((int) $inst->getID());
+        $out = [];
+        foreach ($policy->orderedCheckpoints() as $scope => $checkpoint) {
+            $live = PurchasingWorkflow::liveDecisions($history, $scope, $checkpoint, $policy->stageScopes());
+            if ($live === []) {
+                $out[$scope] = ['checkpoint' => $checkpoint, 'drift' => false, 'reason' => 'no_live_approvals', 'semantic' => null, 'last_live_id' => 0];
+                continue;
+            }
+            $semantic = null;
+            $currentSha = '';
+            try {
+                $semantic = $this->semantic($req, $scope);
+                $currentSha = DocumentVersionAllocator::payloadHash($semantic);
+            } catch (\Throwable) {
+                $semantic = null; // contenido NO producible (p. ej. proveedor ya no aplicable) ⇒ deriva
+            }
+            $reason = $semantic === null ? 'unbuildable' : 'consistent';
+            foreach ($live as $d) {
+                $ref = $d['meta']['evidence_ref'] ?? null;
+                $ver = is_array($ref) ? (int) ($ref['document_version'] ?? 0) : 0;
+                $row = $ver > 0 ? $this->alloc->findByVersion($requestId, $ver) : null;
+                // La referencia de la aprobación debe coincidir EXACTAMENTE con la del ledger propio (tres claves
+                // + scope); si no, la aprobación no es íntegra (evidencia alterada/incompleta/ajena).
+                if (!PurchasingWorkflow::evidenceRefMatches($ref, $row, $scope, $row !== null ? (string) $row['payload_sha256'] : '')) {
+                    $reason = 'evidence_mismatch';
+                    break;
+                }
+                if ($semantic !== null && !hash_equals((string) $row['payload_sha256'], $currentSha)) {
+                    $reason = 'content_changed';
+                    break;
+                }
+            }
+            $out[$scope] = [
+                'checkpoint'   => $checkpoint,
+                'drift'        => $reason !== 'consistent',
+                'reason'       => $reason,
+                'semantic'     => $semantic,
+                'last_live_id' => (int) end($live)['id'],
+            ];
+        }
+        return $out;
     }
 
     // ================================================================ checkpoint / snapshot
@@ -525,41 +648,98 @@ class ApprovalOrchestrator
     // ================================================================ reconciliación
 
     /**
-     * Converge la proyección con el motor (el motor gana) y REPORTA derivas de scope (no invalida: eso
-     * exige una sesión con RIGHT_ACT y lo hace `decide()`/`enforceIntegrity()`). Idempotente.
+     * Converge la proyección con el motor (el motor gana) y REPORTA anomalías que no puede reparar sin una
+     * sesión con RIGHT_ACT: solicitud ENVIADA sin instancia (`orphan`) e integridad pendiente (`dirty`).
+     * Idempotente.
      *
-     * @return array{state:string, corrected:bool, linked:bool}
+     * @return array{state:string, corrected:bool, linked:bool, orphan:bool, dirty:bool}
      */
     public function reconcile(int $requestId): array
     {
         $req = $this->loadRequest($requestId);
         $r = $this->projection->sync($req, 'reconcile');
-        return ['state' => $r['to'], 'corrected' => $r['changed'] && $r['from'] !== $r['to'], 'linked' => $r['linked']];
+        $req->getFromDB($requestId);
+        $submitted = (int) ($req->fields['number_seq'] ?? 0) > 0;
+        return [
+            'state'     => $r['to'],
+            'corrected' => $r['changed'] && $r['from'] !== $r['to'],
+            'linked'    => $r['linked'],
+            'orphan'    => $submitted && !$r['instance'],
+            'dirty'     => $this->integrity->pending($requestId) !== [],
+        ];
     }
 
-    /** Reconciliación masiva (comando/cron): solicitudes ya enviadas. @return array{checked:int, corrected:int, errors:int} */
+    /**
+     * Reconciliación por LOTES sin starvation: recorre las solicitudes no-DRAFT en orden de id a partir de un
+     * CURSOR persistido, con wrap-around al llegar al final (cada ejecución avanza; ninguna solicitud queda
+     * eternamente sin revisar aunque haya más que `$limit`).
+     *
+     * @return array{checked:int, corrected:int, errors:int, orphans:array<int,int>, dirty:array<int,int>, cursor:int, wrapped:bool}
+     */
     public function reconcileAll(int $limit = 500): array
     {
-        /** @var \DBmysql $DB */
-        global $DB;
-        $stats = ['checked' => 0, 'corrected' => 0, 'errors' => 0];
-        foreach ($DB->request([
-            'SELECT' => 'id',
-            'FROM'   => Request::getTable(),
-            'WHERE'  => ['NOT' => ['domain_state' => Request::STATE_DRAFT]],
-            'ORDER'  => 'id ASC',
-            'LIMIT'  => max(1, $limit),
-        ]) as $row) {
+        $limit = max(1, $limit);
+        $cursor = max(0, (int) PluginConfig::get('reconcile_cursor', '0'));
+        $after = $this->candidateIds($cursor, PHP_INT_MAX, $limit);
+        $fromStart = count($after) < $limit ? $this->candidateIds(0, $cursor, $limit - count($after)) : [];
+        $plan = self::planBatch($after, $fromStart, $cursor);
+
+        $stats = ['checked' => 0, 'corrected' => 0, 'errors' => 0, 'orphans' => [], 'dirty' => [], 'cursor' => $plan['cursor'], 'wrapped' => $plan['wrapped']];
+        foreach ($plan['ids'] as $id) {
             $stats['checked']++;
             try {
-                if ($this->reconcile((int) $row['id'])['corrected']) {
+                $r = $this->reconcile($id);
+                if ($r['corrected']) {
                     $stats['corrected']++;
+                }
+                if ($r['orphan']) {
+                    $stats['orphans'][] = $id;
+                }
+                if ($r['dirty']) {
+                    $stats['dirty'][] = $id;
                 }
             } catch (\Throwable) {
                 $stats['errors']++;
             }
         }
+        Config::setConfigurationValues(PluginConfig::CONTEXT, ['reconcile_cursor' => (string) $plan['cursor']]);
         return $stats;
+    }
+
+    /**
+     * PURO: compone el lote a partir de los ids posteriores al cursor y (si no alcanzaron) los del inicio
+     * hasta el cursor (wrap-around). El nuevo cursor es el último id revisado (0 si no hubo ninguno).
+     *
+     * @param array<int,int> $afterCursor  ids > cursor, ascendentes
+     * @param array<int,int> $fromStart    ids ≤ cursor, ascendentes (wrap-around)
+     * @return array{ids:array<int,int>, cursor:int, wrapped:bool}
+     */
+    public static function planBatch(array $afterCursor, array $fromStart, int $cursor): array
+    {
+        $ids = array_values(array_merge($afterCursor, array_filter($fromStart, static fn (int $i): bool => $i <= $cursor && !in_array($i, $afterCursor, true))));
+        return ['ids' => $ids, 'cursor' => $ids === [] ? 0 : (int) end($ids), 'wrapped' => $fromStart !== []];
+    }
+
+    /** @return array<int,int> ids de solicitudes no-DRAFT con `$from < id <= $to`, ascendentes */
+    private function candidateIds(int $from, int $to, int $limit): array
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        if ($limit <= 0) {
+            return [];
+        }
+        $where = [
+            'NOT' => ['domain_state' => Request::STATE_DRAFT],
+            ['id' => ['>', $from]],
+        ];
+        if ($to < PHP_INT_MAX) {
+            $where[] = ['id' => ['<=', $to]];
+        }
+        $out = [];
+        foreach ($DB->request(['SELECT' => 'id', 'FROM' => Request::getTable(), 'WHERE' => $where, 'ORDER' => 'id ASC', 'LIMIT' => $limit]) as $row) {
+            $out[] = (int) $row['id'];
+        }
+        return $out;
     }
 
     // ================================================================ internals

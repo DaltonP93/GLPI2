@@ -21,6 +21,14 @@
  *   [CRASH-2]       caída tras transition y antes de la proyección → reconcile corrige (motor gana).
  *   [PDF] [PDF-FAIL] fallo de PDF: aprobación/evidencia permanecen; retry → ready.
  *   [MULTI-ENT] [ACL] [XBRANCH] [MONEY-P2D2]
+ *   Pasada de integridad de la saga:
+ *   [INTEGRITY-DIRTY]   (1) cambio sustantivo + invalidación fallida ⇒ marca DURABLE; nunca "limpia"; retry
+ *                       la resuelve; decide() repara o falla cerrado; prioridad REQUEST_SCOPE.
+ *   [REOPEN-CAPABILITY] (1) sin RIGHT_ACT no se aceptan cambios que exigirían reabrir.
+ *   [EXPECTED-STATE]    (2) etapa obligatoria; mismo usuario Compras+Finanzas: reintento ⇒ stage_changed.
+ *   [POLICY]            (3) política pinneada: R1 conserva A, R2 usa B.
+ *   [CRASH-0] [RECONCILE-CURSOR] [SUBMIT-PRECHECK] (5)
+ *   [EVIDENCE-TAMPER] [SUPPLIER-MOVED] (6)
  *
  * @license GPL-3.0-or-later
  */
@@ -103,6 +111,15 @@ trait ApprovalSelftestScenarios
             $this->scenarioPdfFailure();
             $this->scenarioApprovalMultiEntityAcl();
             $this->scenarioCrossBranchAndMoney();
+            // Pasada de integridad de la saga (6 puntos).
+            $this->scenarioIntegrityDirtyDurable();
+            $this->scenarioReopenCapability();
+            $this->scenarioExpectedStateMandatory();
+            $this->scenarioPolicyPinned();
+            $this->scenarioSubmitCrashBeforeStart();
+            $this->scenarioReconcileCursor();
+            $this->scenarioEvidenceRefTampered();
+            $this->scenarioSupplierMovedAfterSelection();
             // Al final: republica con quórum 2 (las instancias ya creadas conservan su versión).
             $this->scenarioQuorum();
         } finally {
@@ -116,7 +133,8 @@ trait ApprovalSelftestScenarios
     {
         $this->asAdmin();
         foreach (['workflow_code', 'approver_group_area_head', 'approver_group_purchasing', 'approver_group_finance',
-                  'quorum_area_head', 'quorum_purchasing', 'quorum_finance', 'sync_on_workflow_events'] as $k) {
+                  'quorum_area_head', 'quorum_purchasing', 'quorum_finance', 'sync_on_workflow_events',
+                  'pdf_stages', 'quote_states', 'reconcile_cursor'] as $k) {
             $this->savedConfig[$k] = PluginConfig::get($k);
         }
         $this->uHead1    = $this->makeActor('head1');
@@ -248,10 +266,11 @@ trait ApprovalSelftestScenarios
         ]);
     }
 
-    private function approveAs(int $user, int $reqId, bool $buyer = false): array
+    /** Aprueba declarando la etapa (por defecto: la que el actor "ve" ahora). */
+    private function approveAs(int $user, int $reqId, bool $buyer = false, ?string $stage = null): array
     {
         $buyer ? $this->asBuyer($user) : $this->asApprover($user);
-        return $this->orch()->decide($reqId, 'approve', 'ok ' . $user);
+        return $this->orch()->decide($reqId, 'approve', $stage ?? $this->wfState($reqId), 'ok ' . $user);
     }
 
     /** Lleva una solicitud recién enviada hasta PENDING_FINANCE (jefe aprueba; Compras cotiza+selecciona+aprueba). */
@@ -335,13 +354,17 @@ trait ApprovalSelftestScenarios
         /** @var \DBmysql $DB */
         global $DB;
         $this->out->writeln('== [P2D2-PERSIST] esquema P2D-2 + contrato con el motor ==');
-        foreach (['quotes', 'quote_items', 'doc_versions', 'docseq'] as $t) {
+        foreach (['quotes', 'quote_items', 'doc_versions', 'docseq', 'policies', 'integrity'] as $t) {
             $this->check("[P2D2-PERSIST] tabla glpi_plugin_companypurchasing_{$t}", $this->tableExistsLive("glpi_plugin_companypurchasing_{$t}"));
         }
-        foreach (['quotes_id_selected', 'workflow_lock_version', 'workflow_synced_at'] as $c) {
+        foreach (['quotes_id_selected', 'workflow_lock_version', 'workflow_synced_at', 'policies_id', 'integrity_state'] as $c) {
             $this->check("[P2D2-PERSIST] requests.{$c}", $DB->fieldExists(Request::getTable(), $c, false));
         }
         $this->check('[P2D2-PERSIST] quotes SIN is_selected (única fuente: requests.quotes_id_selected)', !$DB->fieldExists(Quote::getTable(), 'is_selected', false));
+        $ct = new \CronTask();
+        $this->check('[P2D2-PERSIST] Acción automática NATIVA registrada (reconcileprojection)',
+            $ct->getFromDBbyName(\GlpiPlugin\Companypurchasing\Model\ProjectionTask::class, \GlpiPlugin\Companypurchasing\Model\ProjectionTask::CRON_NAME)
+            && is_array(\GlpiPlugin\Companypurchasing\Model\ProjectionTask::cronInfo(\GlpiPlugin\Companypurchasing\Model\ProjectionTask::CRON_NAME)));
         // Los literales PUROS de PurchasingWorkflow deben coincidir con las constantes REALES del motor.
         $this->check('[P2D2-PERSIST] literales == constantes del motor (StateDef/Step/WorkflowDef/HistoryEvent/Assignment)',
             PurchasingWorkflow::WF_KIND_INITIAL === StateDef::KIND_INITIAL
@@ -384,6 +407,11 @@ trait ApprovalSelftestScenarios
         $rm->addLine($orphan, ['description' => 'x', 'quantity' => '1', 'estimated_unit_price' => '1000', 'is_inventoriable' => 0]);
         $this->check('[DEFINITION] submit sin definición publicada → fail-closed', $this->throws(fn () => $this->orch()->submit($orphan)));
         $this->check('[DEFINITION] … sin instancia de workflow', (new WorkflowGateway())->findInstance(Request::class, $orphan) === null);
+        $ro = new Request();
+        $ro->getFromDB($orphan);
+        $this->check('[SUBMIT-PRECHECK] sin definición la solicitud SIGUE en DRAFT (sin número, sin REQUEST_SUBMITTED)',
+            (string) $ro->fields['domain_state'] === Request::STATE_DRAFT && (int) ($ro->fields['number_seq'] ?? 0) === 0
+            && $this->countEvents($orphan, PurchasingEvent::EV_REQUEST_SUBMITTED) === 0);
 
         $this->asAdmin();
         $defId = $this->orch()->publishDefinition();
@@ -483,8 +511,8 @@ trait ApprovalSelftestScenarios
         $this->out->writeln('== [REJECT] el jefe rechaza → REJECTED (final) ==');
         $req = $this->newSubmitted('reject');
         $this->asApprover($this->uHead1);
-        $this->check('[REJECT] rechazar exige comentario (motor)', $this->throws(fn () => $this->orch()->decide($req, 'reject', '')));
-        $r = $this->orch()->decide($req, 'reject', 'fuera de presupuesto');
+        $this->check('[REJECT] rechazar exige comentario (motor)', $this->throws(fn () => $this->orch()->decide($req, 'reject', PurchasingWorkflow::S_PENDING_AREA_HEAD, '')));
+        $r = $this->orch()->decide($req, 'reject', PurchasingWorkflow::S_PENDING_AREA_HEAD, 'fuera de presupuesto');
         $inst = new Instance();
         $inst->getFromDB($this->instanceId($req));
         $this->check('[REJECT] estado REJECTED + instancia cerrada + proyección', ($r['state'] ?? '') === PurchasingWorkflow::S_REJECTED && !$inst->isOpen() && $this->domainState($req) === PurchasingWorkflow::S_REJECTED);
@@ -499,7 +527,7 @@ trait ApprovalSelftestScenarios
         $this->asRequester();
         $this->check('[RETURN] en PENDING_AREA_HEAD la solicitud NO es editable (autoridad del motor)', $this->throws(fn () => (new RequestManager())->updateDraft($req, ['observations' => 'x'])));
         $this->asApprover($this->uHead1);
-        $r = $this->orch()->decide($req, 'return', 'falta justificar');
+        $r = $this->orch()->decide($req, 'return', PurchasingWorkflow::S_PENDING_AREA_HEAD, 'falta justificar');
         $this->check('[RETURN] estado RETURNED', ($r['state'] ?? '') === PurchasingWorkflow::S_RETURNED && $this->domainState($req) === PurchasingWorkflow::S_RETURNED);
         $this->asRequester();
         $rm = new RequestManager();
@@ -525,7 +553,7 @@ trait ApprovalSelftestScenarios
         $r1 = $this->approveAs($this->uHead1, $req);
         $this->check('[QUORUM] 1/2 → voto registrado, sigue PENDING_AREA_HEAD', ($r1['status'] ?? '') === TransitionResult::RECORDED && $this->wfState($req) === PurchasingWorkflow::S_PENDING_AREA_HEAD);
         $this->asApprover($this->uHead1);
-        $dup = $this->orch()->decide($req, 'approve', 'reintento');
+        $dup = $this->orch()->decide($req, 'approve', PurchasingWorkflow::S_PENDING_AREA_HEAD, 'reintento');
         $this->check('[QUORUM] mismo aprobador otra vez → DUPLICATE (sin doble voto)', ($dup['status'] ?? '') === TransitionResult::DUPLICATE && $this->wfState($req) === PurchasingWorkflow::S_PENDING_AREA_HEAD);
         $r2 = $this->approveAs($this->uHead2, $req);
         $this->check('[QUORUM] 2/2 → PURCHASING', ($r2['state'] ?? '') === PurchasingWorkflow::S_PURCHASING);
@@ -534,7 +562,7 @@ trait ApprovalSelftestScenarios
 
         // Concurrente: dos procesos reales aprueban a la vez.
         $req2 = $this->newSubmitted('quorumconc');
-        $cmd = 'php bin/console plugins:companypurchasing:concurrency-probe --op=approve --request=' . $req2 . ' --no-interaction --user=';
+        $cmd = 'php bin/console plugins:companypurchasing:concurrency-probe --op=approve --state=' . PurchasingWorkflow::S_PENDING_AREA_HEAD . ' --request=' . $req2 . ' --no-interaction --user=';
         $outs = $this->runParallel([$cmd . $this->uHead1, $cmd . $this->uHead2]);
         $this->out->writeln('  probes: ' . implode(' | ', $outs));
         $okCount = count(array_filter($outs, static fn (string $o): bool => str_starts_with($o, 'OK:')));
@@ -721,11 +749,11 @@ trait ApprovalSelftestScenarios
             }
         };
         $this->asApprover($this->uHead1);
-        $this->check('[CRASH-1] la decisión falla por la caída', $this->throws(fn () => $crashing->decide($req, 'approve', 'x')));
+        $this->check('[CRASH-1] la decisión falla por la caída', $this->throws(fn () => $crashing->decide($req, 'approve', PurchasingWorkflow::S_PENDING_AREA_HEAD, 'x')));
         $sigN = $this->sigVersions($req);
         $ledN = $this->ledgerVersions($req);
         $this->check('[CRASH-1] versión ya registrada en Firma pero el motor NO avanzó', $sigN === 1 && $ledN === 1 && $this->wfState($req) === PurchasingWorkflow::S_PENDING_AREA_HEAD && $this->ledger($req, HistoryEvent::EVENT_DECISION_RECORDED) === []);
-        $a = $this->orch()->decide($req, 'approve', 'reintento');
+        $a = $this->orch()->decide($req, 'approve', PurchasingWorkflow::S_PENDING_AREA_HEAD, 'reintento');
         $this->check('[CRASH-1] reintento: transición OK', ($a['state'] ?? '') === PurchasingWorkflow::S_PURCHASING);
         $this->check('[CRASH-1] reintento SIN duplicar versión (Firma y ledger iguales)', $this->sigVersions($req) === $sigN && $this->ledgerVersions($req) === $ledN && (int) $a['document_version'] === 1);
         $this->check('[CRASH-1] exactamente una decisión en el motor', count($this->ledger($req, HistoryEvent::EVENT_DECISION_RECORDED)) === 1);
@@ -743,9 +771,9 @@ trait ApprovalSelftestScenarios
             }
         };
         $this->asApprover($this->uHead1);
-        $this->check('[CRASH-2] la decisión "falla" tras confirmar en el motor', $this->throws(fn () => $crashing->decide($req, 'approve', 'x')));
+        $this->check('[CRASH-2] la decisión "falla" tras confirmar en el motor', $this->throws(fn () => $crashing->decide($req, 'approve', PurchasingWorkflow::S_PENDING_AREA_HEAD, 'x')));
         $this->check('[CRASH-2] motor = PURCHASING; proyección stale = PENDING_AREA_HEAD', $this->wfState($req) === PurchasingWorkflow::S_PURCHASING && $this->domainState($req) === PurchasingWorkflow::S_PENDING_AREA_HEAD);
-        $again = $this->orch()->decide($req, 'approve', 'reintento', PurchasingWorkflow::S_PENDING_AREA_HEAD);
+        $again = $this->orch()->decide($req, 'approve', PurchasingWorkflow::S_PENDING_AREA_HEAD, 'reintento');
         $this->check('[CRASH-2] reintento con etapa esperada → no-op idempotente (stage_changed), sin 2ª decisión', ($again['status'] ?? '') === 'stage_changed' && count($this->ledger($req, HistoryEvent::EVENT_DECISION_RECORDED)) === 1);
         // (el no-op también proyecta; se vuelve a dejar stale para probar el reconciliador)
         (new Request())->update(['id' => $req, 'domain_state' => PurchasingWorkflow::S_PENDING_AREA_HEAD]);
@@ -777,7 +805,7 @@ trait ApprovalSelftestScenarios
             }
         };
         $this->asApprover($this->uHead1);
-        $a = (new ApprovalOrchestrator(null, $failingSig))->decide($req, 'approve', 'ok');
+        $a = (new ApprovalOrchestrator(null, $failingSig))->decide($req, 'approve', PurchasingWorkflow::S_PENDING_AREA_HEAD, 'ok');
         $row = $this->docVersionRow($req, (int) ($a['document_version'] ?? 0));
         $this->check('[PDF-FAIL] la aprobación NO se revierte (PURCHASING)', ($a['state'] ?? '') === PurchasingWorkflow::S_PURCHASING && $this->wfState($req) === PurchasingWorkflow::S_PURCHASING);
         $this->check('[PDF-FAIL] pdf_status=error + evento pdf.failed', ($a['pdf_status'] ?? '') === DocumentVersionAllocator::PDF_ERROR && (string) ($row['pdf_status'] ?? '') === DocumentVersionAllocator::PDF_ERROR && $this->countEvents($req, PurchasingEvent::EV_PDF_FAILED) === 1);
@@ -794,11 +822,11 @@ trait ApprovalSelftestScenarios
         $this->out->writeln('== [MULTI-ENT] / [ACL] aprobaciones y compras fail-closed ==');
         $req = $this->newSubmitted('acl');
         $this->asApprover($this->uHead1, [$this->entityB]);
-        $this->check('[MULTI-ENT] aprobador sin acceso a la entidad A → rechazado', $this->throws(fn () => $this->orch()->decide($req, 'approve', 'x')));
+        $this->check('[MULTI-ENT] aprobador sin acceso a la entidad A → rechazado', $this->throws(fn () => $this->orch()->decide($req, 'approve', PurchasingWorkflow::S_PENDING_AREA_HEAD, 'x')));
         $this->asApprover($this->uBuyer);
-        $this->check('[ACL] actor que NO es aprobador de la etapa (motor) → rechazado', $this->throws(fn () => $this->orch()->decide($req, 'approve', 'x')));
+        $this->check('[ACL] actor que NO es aprobador de la etapa (motor) → rechazado', $this->throws(fn () => $this->orch()->decide($req, 'approve', PurchasingWorkflow::S_PENDING_AREA_HEAD, 'x')));
         $this->asRequester();
-        $this->check('[ACL] el solicitante no puede aprobar su solicitud', $this->throws(fn () => $this->orch()->decide($req, 'approve', 'x')));
+        $this->check('[ACL] el solicitante no puede aprobar su solicitud', $this->throws(fn () => $this->orch()->decide($req, 'approve', PurchasingWorkflow::S_PENDING_AREA_HEAD, 'x')));
         $this->check('[ACL] estado intacto tras los intentos denegados', $this->wfState($req) === PurchasingWorkflow::S_PENDING_AREA_HEAD && $this->ledger($req, HistoryEvent::EVENT_DECISION_RECORDED) === []);
         $this->asBuyer($this->uBuyer);
         $this->check('[ACL] cotizar ANTES de la aprobación del jefe → fail-closed (estado)', $this->throws(fn () => $this->makeQuote($req, $this->supA, ['1000', '2000'])));
@@ -848,10 +876,354 @@ trait ApprovalSelftestScenarios
         $r->getFromDB($req);
         $this->check('[XBRANCH] ningún intento rechazado alteró la selección', (int) $r->fields['quotes_id_selected'] === 0);
         $this->asBuyer($this->uBuyer);
-        $this->check('[FLOW] Compras NO puede aprobar sin cotización seleccionada (COMMERCIAL no producible)', $this->throws(fn () => $o->decide($req, 'approve', 'x')) && $this->wfState($req) === PurchasingWorkflow::S_PURCHASING);
+        $this->check('[FLOW] Compras NO puede aprobar sin cotización seleccionada (COMMERCIAL no producible)', $this->throws(fn () => $o->decide($req, 'approve', PurchasingWorkflow::S_PURCHASING, 'x')) && $this->wfState($req) === PurchasingWorkflow::S_PURCHASING);
         // …pero SÍ puede devolver/rechazar sin cotización: la decisión se liga a REQUEST_SCOPE.
-        $ret = $o->decide($req, 'return', 'sin cotizaciones válidas');
+        $ret = $o->decide($req, 'return', PurchasingWorkflow::S_PURCHASING, 'sin cotizaciones válidas');
         $this->check('[RETURN] Compras devuelve SIN cotización seleccionada → RETURNED (evidencia REQUEST_SCOPE)', ($ret['state'] ?? '') === PurchasingWorkflow::S_RETURNED && ($ret['scope'] ?? '') === 'REQUEST_SCOPE');
+    }
+
+    // ================================================================ [INTEGRITY-DIRTY] (punto 1)
+
+    /** Gateway del motor cuya invalidación FALLA (simula caída del motor tras confirmar el cambio local). */
+    private function failingInvalidateGateway(): WorkflowGateway
+    {
+        return new class extends WorkflowGateway {
+            public function invalidate(int $instanceId, string $reason, array $context, ?int $expectedVersion): TransitionResult
+            {
+                throw new \RuntimeException('motor no disponible al invalidar (simulado)');
+            }
+        };
+    }
+
+    private function integrityRowState(int $reqId): string
+    {
+        $r = new Request();
+        return $r->getFromDB($reqId) ? (string) $r->fields['integrity_state'] : '';
+    }
+
+    private function scenarioIntegrityDirtyDurable(): void
+    {
+        $this->out->writeln('== [INTEGRITY-DIRTY] invalidación fallida tras un cambio sustantivo ⇒ marca DURABLE ==');
+        $req = $this->newSubmitted('dirty');
+        $q = $this->toFinance($req);
+        $f = $this->approveAs($this->uFin, $req);
+        $this->check('[INTEGRITY-DIRTY] Gerencia aprobó → APPROVED y aprobación íntegra', ($f['state'] ?? '') === PurchasingWorkflow::S_APPROVED && $this->orch()->isFullyApproved($req));
+
+        // Cambio de precio con el motor CAÍDO al invalidar.
+        $this->asBuyer($this->uBuyer);
+        $lines = $this->lineIds($req);
+        $res = (new ApprovalOrchestrator($this->failingInvalidateGateway()))->updateQuote($q, ['lines' => [['items_id' => $lines[0], 'final_unit_price' => '1333']]]);
+        $qi = new \GlpiPlugin\Companypurchasing\Model\QuoteItem();
+        $qi->getFromDBByCrit(['quotes_id' => $q, 'items_id' => $lines[0]]);
+        $this->check('[INTEGRITY-DIRTY] el cambio LOCAL persiste (precio 1333)', (int) ($qi->fields['final_unit_price'] ?? 0) === 1333 && ($res['error'] ?? null) !== null);
+        $st = $this->orch()->integrityStatus($req);
+        $this->check('[INTEGRITY-DIRTY] marca DURABLE COMMERCIAL + integrity_state=dirty', in_array('COMMERCIAL_FINANCIAL_SCOPE', $st['dirty_scopes'], true) && $this->integrityRowState($req) === 'dirty');
+        $this->check('[INTEGRITY-DIRTY] el motor aún dice APPROVED pero NUNCA se presenta como aprobación limpia',
+            $this->wfState($req) === PurchasingWorkflow::S_APPROVED && !$st['clean'] && !$st['fully_approved'] && !$this->orch()->isFullyApproved($req));
+        $mark = new \GlpiPlugin\Companypurchasing\Model\IntegrityMark();
+        $mark->getFromDBByCrit(['requests_id' => $req, 'status' => 'dirty', 'scope_key' => 'COMMERCIAL_FINANCIAL_SCOPE']);
+        $this->check('[INTEGRITY-DIRTY] la marca registra actor, estado del motor, causa e idempotency_key',
+            (int) ($mark->fields['actor_users_id'] ?? 0) === $this->uBuyer && ($mark->fields['workflow_state'] ?? '') === PurchasingWorkflow::S_APPROVED
+            && ($mark->fields['cause'] ?? '') === PurchasingEvent::EV_QUOTE_UPDATED && str_starts_with((string) ($mark->fields['idempotency_key'] ?? ''), 'dirty:' . $req . ':'));
+
+        // Una marca REQUEST + COMMERCIAL: prioridad REQUEST_SCOPE (enmienda con el motor caído).
+        // (se prueba en otra solicitud para no mezclar; aquí seguimos con la reparación)
+        // Reintento con el motor disponible ⇒ invalida/reabre y LIMPIA la marca.
+        $this->asBuyer($this->uBuyer);
+        $fix = $this->orch()->enforceIntegrity($req);
+        $inv = $fix['invalidated'][0] ?? [];
+        $st2 = $this->orch()->integrityStatus($req);
+        $this->check('[INTEGRITY-DIRTY] retry: invalida COMMERCIAL y reabre PURCHASING', ($inv['scope'] ?? '') === 'COMMERCIAL_FINANCIAL_SCOPE' && $this->wfState($req) === PurchasingWorkflow::S_PURCHASING);
+        $this->check('[INTEGRITY-DIRTY] retry: marca RESUELTA sólo tras invalidación confirmada',
+            $st2['dirty_scopes'] === [] && $this->integrityRowState($req) === 'clean'
+            && ($mark->getFromDB((int) $mark->getID()) && $mark->fields['status'] === 'resolved' && str_starts_with((string) $mark->fields['resolution'], 'invalidated:')));
+
+        // decide() repara o falla cerrado ANTES de decidir.
+        $req2 = $this->newSubmitted('dirty2');
+        $q2 = $this->toFinance($req2);
+        $this->asBuyer($this->uBuyer);
+        $l2 = $this->lineIds($req2);
+        (new ApprovalOrchestrator($this->failingInvalidateGateway()))->updateQuote($q2, ['lines' => [['items_id' => $l2[0], 'final_unit_price' => '1111']]]);
+        $this->asApprover($this->uFin);
+        $this->check('[INTEGRITY-DIRTY] decide() con marca pendiente y motor caído ⇒ falla CERRADO (Gerencia no aprueba)',
+            $this->throws(fn () => (new ApprovalOrchestrator($this->failingInvalidateGateway()))->decide($req2, 'approve', PurchasingWorkflow::S_PENDING_FINANCE, 'x'))
+            && $this->wfState($req2) === PurchasingWorkflow::S_PENDING_FINANCE && $this->decisionsBy($req2, $this->uFin) === 0);
+        $d = $this->orch()->decide($req2, 'approve', PurchasingWorkflow::S_PENDING_FINANCE, 'x');
+        $this->check('[INTEGRITY-DIRTY] decide() con motor disponible ⇒ REPARA primero (reopened), sin decidir', ($d['status'] ?? '') === 'reopened' && $this->decisionsBy($req2, $this->uFin) === 0 && $this->integrityRowState($req2) === 'clean');
+
+        // Prioridad REQUEST_SCOPE: enmienda (REQUEST+COMMERCIAL sucios) con motor caído ⇒ la reparación reabre al JEFE.
+        $req3 = $this->newSubmitted('dirty3');
+        $this->toFinance($req3);
+        $this->asBuyer($this->uBuyer);
+        (new ApprovalOrchestrator($this->failingInvalidateGateway()))->amendLineQuantity($this->lineIds($req3)[0], '4');
+        $st3 = $this->orch()->integrityStatus($req3);
+        $this->check('[INTEGRITY-DIRTY] enmienda con motor caído ⇒ REQUEST y COMMERCIAL sucios', $st3['dirty_scopes'] !== [] && array_diff(['REQUEST_SCOPE', 'COMMERCIAL_FINANCIAL_SCOPE'], $st3['dirty_scopes']) === []);
+        $fix3 = $this->orch()->enforceIntegrity($req3);
+        $this->check('[INTEGRITY-DIRTY] prioridad REQUEST_SCOPE: reabre al jefe y limpia AMBAS marcas',
+            ($fix3['invalidated'][0]['scope'] ?? '') === 'REQUEST_SCOPE' && $this->wfState($req3) === PurchasingWorkflow::S_PENDING_AREA_HEAD
+            && $this->orch()->integrityStatus($req3)['dirty_scopes'] === []);
+    }
+
+    private function decisionsBy(int $reqId, int $user): int
+    {
+        return count(array_filter($this->ledger($reqId, HistoryEvent::EVENT_DECISION_RECORDED), fn (array $r): bool => (int) ($this->metaOf($r)['actor'] ?? 0) === $user));
+    }
+
+    // ================================================================ [REOPEN-CAPABILITY] (punto 1)
+
+    private function scenarioReopenCapability(): void
+    {
+        $this->out->writeln('== [REOPEN-CAPABILITY] sin RIGHT_ACT no se aceptan cambios que exigirían reabrir ==');
+        $req = $this->newSubmitted('cap');
+        $q = $this->toFinance($req);
+        $lines = $this->lineIds($req);
+        $noAct = function (): void {
+            $this->applySession($this->uBuyer, [$this->entityA], [
+                'plugin_companypurchasing' => READ | Request::RIGHT_VIEW_ENTITY | Request::RIGHT_MANAGE_PURCHASING,
+                'plugin_companyworkflow'   => READ, // sin RIGHT_ACT
+                'plugin_companysignature'  => ALLSTANDARDRIGHT,
+            ]);
+        };
+        $noAct();
+        $o = $this->orch();
+        $q2 = $o->createQuote($req, ['suppliers_id' => $this->supA2, 'lines' => [['items_id' => $lines[0], 'final_unit_price' => '1000'], ['items_id' => $lines[1], 'final_unit_price' => '2000']]]);
+        $this->check('[REOPEN-CAPABILITY] crear una cotización NO seleccionada sí se permite (no altera lo aprobado)', $q2 > 0);
+        $this->check('[REOPEN-CAPABILITY] seleccionar otra cotización sin RIGHT_ACT → rechazado', $this->throws(fn () => $o->selectQuote($req, $q2)));
+        $this->check('[REOPEN-CAPABILITY] cambiar la cotización seleccionada sin RIGHT_ACT → rechazado', $this->throws(fn () => $o->updateQuote($q, ['discounts' => '10'])));
+        $this->check('[REOPEN-CAPABILITY] enmendar cantidad sin RIGHT_ACT → rechazado', $this->throws(fn () => $o->amendLineQuantity($lines[0], '9')));
+        $r = new Request();
+        $r->getFromDB($req);
+        $qq = new \GlpiPlugin\Companypurchasing\Model\Quote();
+        $qq->getFromDB($q);
+        $this->check('[REOPEN-CAPABILITY] nada cambió: selección, descuento, cantidad, sin marcas',
+            (int) $r->fields['quotes_id_selected'] === $q && (int) $qq->fields['discounts'] === 300
+            && (int) (new RequestManager())->loadItems($req)[0]->fields['quantity'] === 2 && $this->orch()->integrityStatus($req)['dirty_scopes'] === []);
+    }
+
+    // ================================================================ [EXPECTED-STATE] (punto 2)
+
+    private function scenarioExpectedStateMandatory(): void
+    {
+        $this->out->writeln('== [EXPECTED-STATE] etapa obligatoria; reintento tras caída no aprueba la etapa siguiente ==');
+        // Mismo usuario en Compras Y en Finanzas.
+        $uDual = $this->makeActor('dual');
+        (new Group_User())->add(['groups_id' => $this->gBuy, 'users_id' => $uDual]);
+        (new Group_User())->add(['groups_id' => $this->gFin, 'users_id' => $uDual]);
+        $req = $this->newSubmitted('dual');
+        $this->approveAs($this->uHead1, $req);
+        $q = $this->makeQuote($req, $this->supA, ['1400', '2300']);
+        $this->asBuyer($this->uBuyer);
+        $this->orch()->selectQuote($req, $q);
+
+        $this->asBuyer($uDual);
+        $this->check('[EXPECTED-STATE] expectedState vacío → rechazado (contrato obligatorio)', $this->throws(fn () => $this->orch()->decide($req, 'approve', '', 'x')));
+        // Compras (uDual) aprueba; la transición se CONFIRMA y el proceso cae antes de responder.
+        $crashing = new class extends ApprovalOrchestrator {
+            protected function afterTransition(int $requestId, string $action): void
+            {
+                throw new \RuntimeException('caída simulada antes de responder');
+            }
+        };
+        $this->check('[EXPECTED-STATE] Compras aprueba y el proceso cae tras confirmar', $this->throws(fn () => $crashing->decide($req, 'approve', PurchasingWorkflow::S_PURCHASING, 'ok compras'))
+            && $this->wfState($req) === PurchasingWorkflow::S_PENDING_FINANCE);
+        // Reintento del MISMO comando: jamás aprueba Finanzas.
+        $retry = $this->orch()->decide($req, 'approve', PurchasingWorkflow::S_PURCHASING, 'ok compras');
+        $this->check('[EXPECTED-STATE] reintento ⇒ stage_changed (no decide en PENDING_FINANCE)', ($retry['status'] ?? '') === 'stage_changed' && $this->wfState($req) === PurchasingWorkflow::S_PENDING_FINANCE);
+        $this->check('[EXPECTED-STATE] exactamente UNA decisión de uDual (la de Compras); Finanzas intacta', $this->decisionsBy($req, $uDual) === 1 && $this->countTransitionsTo($req, PurchasingWorkflow::S_APPROVED) === 0);
+        // Finanzas explícita por el mismo usuario sí funciona (decisión consciente, otra etapa declarada).
+        $fin = $this->orch()->decide($req, 'approve', PurchasingWorkflow::S_PENDING_FINANCE, 'ok finanzas');
+        $this->check('[EXPECTED-STATE] decisión explícita en PENDING_FINANCE → APPROVED', ($fin['state'] ?? '') === PurchasingWorkflow::S_APPROVED);
+    }
+
+    // ================================================================ [POLICY] (punto 3)
+
+    private function policyIdOf(int $reqId): int
+    {
+        $r = new Request();
+        return $r->getFromDB($reqId) ? (int) $r->fields['policies_id'] : 0;
+    }
+
+    private function scenarioPolicyPinned(): void
+    {
+        $this->out->writeln('== [POLICY] política pinneada por solicitud (cambio de config no es retroactivo) ==');
+        $r1 = $this->newSubmitted('polA');
+        $pA = $this->policyIdOf($r1);
+        $this->check('[POLICY] R1 pinnea la política A al enviarse', $pA > 0);
+
+        // Administrador cambia la política: sin PDF por etapa y sin gestión comercial en APPROVED.
+        $this->asAdmin();
+        \Config::setConfigurationValues(PluginConfig::CONTEXT, ['pdf_stages' => '[]', 'quote_states' => '["PURCHASING","PENDING_FINANCE"]']);
+        $r2 = $this->newSubmitted('polB');
+        $pB = $this->policyIdOf($r2);
+        $this->check('[POLICY] R2 nuevo pinnea la política B (distinta de A)', $pB > 0 && $pB !== $pA);
+        $this->check('[POLICY] R1 conserva A (policies_id intacto)', $this->policyIdOf($r1) === $pA);
+
+        $a1 = $this->approveAs($this->uHead1, $r1);
+        $a2 = $this->approveAs($this->uHead1, $r2);
+        $this->check('[POLICY] R1 (política A) compone PDF en la etapa del jefe', ($a1['pdf_status'] ?? '') === DocumentVersionAllocator::PDF_READY);
+        $this->check('[POLICY] R2 (política B) NO compone PDF', !array_key_exists('pdf_status', $a2) && ($a2['state'] ?? '') === PurchasingWorkflow::S_PURCHASING);
+        $store = new \GlpiPlugin\Companypurchasing\Service\PolicyStore();
+        $this->check('[POLICY] versiones inmutables verificables (hash)', $store->load($pA)->pdfStages() === ['PENDING_AREA_HEAD', 'PENDING_FINANCE'] && $store->load($pB)->pdfStages() === []);
+
+        // Restaurar la política por defecto (nuevas solicitudes).
+        \Config::setConfigurationValues(PluginConfig::CONTEXT, [
+            'pdf_stages'   => PluginConfig::DEFAULTS['pdf_stages'],
+            'quote_states' => PluginConfig::DEFAULTS['quote_states'],
+        ]);
+    }
+
+    // ================================================================ [CRASH-0] (punto 5)
+
+    private function scenarioSubmitCrashBeforeStart(): void
+    {
+        $this->out->writeln('== [CRASH-0] envío local confirmado → caída antes de startInstance → retry converge ==');
+        $this->asRequester();
+        $rm = new RequestManager();
+        $req = $rm->createDraft(['entities_id' => $this->entityA, 'reason' => 'p2d2-crash0-' . $this->suffix]);
+        $rm->addLine($req, ['description' => 'x', 'quantity' => '1', 'estimated_unit_price' => '1000', 'is_inventoriable' => 0]);
+        $crashing = new class extends ApprovalOrchestrator {
+            protected function beforeStartInstance(int $requestId): void
+            {
+                throw new \RuntimeException('caída simulada antes de startInstance()');
+            }
+        };
+        $this->check('[CRASH-0] el envío falla tras confirmar el paso local', $this->throws(fn () => $crashing->submit($req)));
+        $r = new Request();
+        $r->getFromDB($req);
+        $this->check('[CRASH-0] estado intermedio: número asignado + política pinneada, SIN instancia',
+            (int) $r->fields['number_seq'] > 0 && (int) $r->fields['policies_id'] > 0 && (new WorkflowGateway())->findInstance(Request::class, $req) === null);
+        $this->check('[CRASH-0] reconcile DETECTA la solicitud enviada sin instancia (no es éxito silencioso)', ($this->orch()->reconcile($req)['orphan'] ?? false) === true);
+        $this->asRequester();
+        $state = $this->orch()->submit($req);
+        $this->check('[CRASH-0] retry del envío converge → PENDING_AREA_HEAD (mismo número)', $state === PurchasingWorkflow::S_PENDING_AREA_HEAD && $this->countEvents($req, PurchasingEvent::EV_REQUEST_SUBMITTED) === 1);
+        $this->check('[CRASH-0] reconcile ya no la reporta', ($this->orch()->reconcile($req)['orphan'] ?? true) === false);
+    }
+
+    // ================================================================ [RECONCILE-CURSOR] (punto 5)
+
+    private function scenarioReconcileCursor(): void
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $this->out->writeln('== [RECONCILE-CURSOR] lotes con cursor y wrap-around: sin starvation ==');
+        \Config::setConfigurationValues(PluginConfig::CONTEXT, ['sync_on_workflow_events' => '0']);
+        $reqs = [];
+        for ($i = 0; $i < 3; $i++) {
+            $reqs[] = $this->newSubmitted('cur' . $i);
+        }
+        // Proyecciones stale en solicitudes repartidas (incluida la de MAYOR id).
+        foreach ($reqs as $id) {
+            $DB->update(Request::getTable(), ['domain_state' => 'STALE'], ['id' => $id]);
+        }
+        $total = 0;
+        foreach ($DB->request(['COUNT' => 'c', 'FROM' => Request::getTable(), 'WHERE' => ['NOT' => ['domain_state' => Request::STATE_DRAFT]]]) as $row) {
+            $total = (int) $row['c'];
+        }
+        \Config::setConfigurationValues(PluginConfig::CONTEXT, ['reconcile_cursor' => '0']);
+        $limit = 2;
+        $runs = (int) ceil($total / $limit);
+        $wrapped = false;
+        $seen = [];
+        $o = $this->orch();
+        for ($i = 0; $i < $runs + 1; $i++) {
+            $r = $o->reconcileAll($limit);
+            $wrapped = $wrapped || $r['wrapped'];
+            $seen[] = $r['cursor'];
+        }
+        $fixed = array_filter($reqs, fn (int $id): bool => $this->domainState($id) === PurchasingWorkflow::S_PENDING_AREA_HEAD);
+        $this->check('[RECONCILE-CURSOR] con límite ' . $limit . ' y ' . $total . ' solicitudes, TODAS las stale se corrigen en ' . ($runs + 1) . ' corridas (incluida la de mayor id)', count($fixed) === count($reqs));
+        $this->check('[RECONCILE-CURSOR] el cursor avanza y hace wrap-around', $wrapped && count(array_unique($seen)) > 1);
+        $once = $o->reconcileAll(1000);
+        $this->check('[RECONCILE-CURSOR] reporta solicitudes enviadas sin instancia (las de P2D-1 enviadas sólo localmente)', count($once['orphans']) > 0 && $once['errors'] === 0);
+
+        // La Acción automática NATIVA (CronTask) corrige una proyección stale por la ruta real de GLPI.
+        $DB->update(Request::getTable(), ['domain_state' => 'STALE'], ['id' => end($reqs)]);
+        \Config::setConfigurationValues(PluginConfig::CONTEXT, ['reconcile_cursor' => '0']);
+        $ran = \CronTask::launch(-\CronTask::MODE_EXTERNAL, 1, \GlpiPlugin\Companypurchasing\Model\ProjectionTask::CRON_NAME);
+        $this->check('[RECONCILE-CURSOR] CronTask nativa ejecutada y corrigió la proyección', $ran === \GlpiPlugin\Companypurchasing\Model\ProjectionTask::CRON_NAME && $this->domainState(end($reqs)) === PurchasingWorkflow::S_PENDING_AREA_HEAD);
+        $this->asAdmin();
+        \Config::setConfigurationValues(PluginConfig::CONTEXT, ['sync_on_workflow_events' => '1', 'reconcile_cursor' => '0']);
+    }
+
+    // ================================================================ [EVIDENCE-TAMPER] (punto 6)
+
+    private function scenarioEvidenceRefTampered(): void
+    {
+        $this->out->writeln('== [EVIDENCE-TAMPER] aprobación con evidence_bound=1 pero evidence_ref alterada ==');
+        $prepare = function (string $tag): array {
+            $req = $this->newSubmitted($tag);
+            // Registra la versión REQUEST_SCOPE en el ledger de Compras y en Firma SIN transicionar.
+            $recordOnly = new class extends ApprovalOrchestrator {
+                protected function beforeTransition(int $requestId, string $action): void
+                {
+                    throw new \RuntimeException('sólo registrar la versión');
+                }
+            };
+            $this->asApprover($this->uHead1);
+            $this->throws(fn () => $recordOnly->decide($req, 'approve', PurchasingWorkflow::S_PENDING_AREA_HEAD, 'x'));
+            $row = $this->docVersionRow($req, 1);
+            return [$req, $row];
+        };
+        $cases = [
+            'content_sha256 alterado' => static fn (array $row): array => ['document_versions_id' => (int) $row['document_versions_id'], 'document_version' => 1, 'content_sha256' => str_repeat('f', 64)],
+            'ref incompleta (sin content_sha256)' => static fn (array $row): array => ['document_versions_id' => (int) $row['document_versions_id'], 'document_version' => 1],
+            'document_versions_id ajeno' => static fn (array $row): array => ['document_versions_id' => (int) $row['document_versions_id'] + 999999, 'document_version' => 1, 'content_sha256' => (string) $row['content_sha256']],
+        ];
+        $i = 0;
+        foreach ($cases as $label => $mkRef) {
+            [$req, $row] = $prepare('tamper' . $i++);
+            $inst = (new WorkflowGateway())->loadInstance($this->instanceId($req));
+            $this->asApprover($this->uHead1);
+            // Transición DIRECTA en el motor (fuera de Compras) con la condición satisfecha y la ref alterada.
+            $res = ($inst !== null && $row !== null) ? (new WorkflowApi())->transition($inst, 'approve', [
+                'comment' => 'ref alterada', 'fields' => ['evidence_bound' => 1], 'evidence_ref' => $mkRef($row),
+            ]) : null;
+            $st = $this->orch()->integrityStatus($req);
+            $this->check("[EVIDENCE-TAMPER] {$label}: el motor avanzó pero Compras NO la considera íntegra",
+                $res !== null && $res->success && $this->wfState($req) === PurchasingWorkflow::S_PURCHASING
+                && ($st['drift']['REQUEST_SCOPE'] ?? '') === 'evidence_mismatch' && !$st['clean']);
+            $this->asBuyer($this->uBuyer);
+            $d = $this->orch()->decide($req, 'approve', PurchasingWorkflow::S_PURCHASING, 'x');
+            $this->check("[EVIDENCE-TAMPER] {$label}: la siguiente decisión REPARA (reabre al jefe) y no decide",
+                ($d['status'] ?? '') === 'reopened' && $this->wfState($req) === PurchasingWorkflow::S_PENDING_AREA_HEAD && $this->decisionsBy($req, $this->uBuyer) === 0);
+        }
+    }
+
+    // ================================================================ [SUPPLIER-MOVED] (punto 6)
+
+    private function scenarioSupplierMovedAfterSelection(): void
+    {
+        $this->out->writeln('== [SUPPLIER-MOVED] Supplier válido al seleccionar → pasa a otra rama → fail-closed ==');
+        $this->asAdmin();
+        $supM = $this->makeSupplier('CP-SUP-MOVE-' . $this->suffix, $this->entityA, false);
+        $req = $this->newSubmitted('supmove');
+        $this->approveAs($this->uHead1, $req);
+        $q = $this->makeQuote($req, $supM, ['1400', '2300']);
+        $this->asBuyer($this->uBuyer);
+        $this->orch()->selectQuote($req, $q);
+        $this->approveAs($this->uBuyer, $req, true);
+        $this->check('[SUPPLIER-MOVED] con Supplier válido → PENDING_FINANCE', $this->wfState($req) === PurchasingWorkflow::S_PENDING_FINANCE);
+
+        // El Supplier pasa a la rama B (interfaz del modelo nativo, no SQL al core).
+        $this->asAdmin();
+        (new \Supplier())->update(['id' => $supM, 'entities_id' => $this->entityB]);
+        $sup = new \Supplier();
+        $moved = $sup->getFromDB($supM) && (int) $sup->fields['entities_id'] === $this->entityB;
+        $this->check('[SUPPLIER-MOVED] fixture: el Supplier quedó en la rama B', $moved);
+
+        $this->asApprover($this->uFin);
+        $d = null;
+        $threw = $this->throws(function () use ($req, &$d): void {
+            $d = $this->orch()->decide($req, 'approve', PurchasingWorkflow::S_PENDING_FINANCE, 'ok');
+        });
+        $this->check('[SUPPLIER-MOVED] la aprobación financiera NO ocurre (fail-closed: reabre o rechaza)',
+            $moved && $this->decisionsBy($req, $this->uFin) === 0 && $this->wfState($req) !== PurchasingWorkflow::S_APPROVED
+            && ($threw || in_array($d['status'] ?? '', ['reopened'], true)));
+        $this->check('[SUPPLIER-MOVED] los términos comerciales ya no son producibles con ese Supplier', $this->throws(function () use ($req): void {
+            $r = new Request();
+            $r->getFromDB($req);
+            (new \GlpiPlugin\Companypurchasing\Service\QuoteManager())->commercialTerms($r);
+        }));
     }
 
     // ================================================================ fixtures nativos
@@ -912,7 +1284,7 @@ trait ApprovalSelftestScenarios
                 $DB->delete(WorkflowDef::getTable(), ['id' => (int) $row['id']]);
             }
             $DB->delete(Delegation::getTable(), ['users_id_from' => $this->uFin]);
-            foreach (['quote_items', 'quotes', 'doc_versions', 'docseq'] as $t) {
+            foreach (['integrity', 'quote_items', 'quotes', 'doc_versions', 'docseq', 'policies'] as $t) {
                 $DB->delete('glpi_plugin_companypurchasing_' . $t, ['id' => ['>', 0]]);
             }
             $DB->delete(PurchasingEvent::getTable(), ['event' => PurchasingEvent::EV_DEFINITION_PUBLISHED]);

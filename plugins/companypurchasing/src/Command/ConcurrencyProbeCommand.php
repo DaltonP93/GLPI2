@@ -41,7 +41,8 @@ final class ConcurrencyProbeCommand extends Command
             ->addOption('quote', null, InputOption::VALUE_OPTIONAL, 'quotes_id (select-quote)', '0')
             ->addOption('expect', null, InputOption::VALUE_OPTIONAL, 'lock_version esperado (select-quote)', '-1')
             ->addOption('scope', null, InputOption::VALUE_OPTIONAL, 'scope (docversion)', 'REQUEST_SCOPE')
-            ->addOption('hash', null, InputOption::VALUE_OPTIONAL, 'sha256 del payload (docversion)', '');
+            ->addOption('hash', null, InputOption::VALUE_OPTIONAL, 'sha256 del payload (docversion)', '')
+            ->addOption('state', null, InputOption::VALUE_OPTIONAL, 'etapa esperada (approve; obligatoria)', '');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -85,7 +86,7 @@ final class ConcurrencyProbeCommand extends Command
                     $output->writeln('OK:' . $a['document_version'] . ':' . ($a['reused'] ? 'reused' : 'new'));
                     return Command::SUCCESS;
                 case 'approve':
-                    $r = (new ApprovalOrchestrator())->decide($reqId, 'approve', 'probe-' . getmypid());
+                    $r = (new ApprovalOrchestrator())->decide($reqId, 'approve', (string) $input->getOption('state'), 'probe-' . getmypid());
                     $output->writeln('OK:' . $r['status'] . ':v' . (int) ($r['document_version'] ?? 0));
                     return Command::SUCCESS;
                 case 'submit':

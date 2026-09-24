@@ -241,6 +241,44 @@ final class PurchasingWorkflow
         return $start;
     }
 
+    /** Claves EXACTAS del contrato `evidence_ref` (companysignature `Materializer::resolveRef`). */
+    public const EVIDENCE_REF_KEYS = ['document_versions_id', 'document_version', 'content_sha256'];
+
+    /**
+     * ¿La `evidence_ref` de una aprobación del ledger del motor corresponde EXACTAMENTE a la fila del ledger
+     * propio de Compras para ese scope? Exige las TRES claves con formato válido y que coincidan con
+     * `document_versions_id`, `document_version` y `content_sha256` de la fila, que la fila sea del scope
+     * indicado y que su `payload_sha256` sea `$expectedPayloadSha`. Ref incompleta/alterada/ajena ⇒ false.
+     * PURO.
+     *
+     * @param mixed                     $ref
+     * @param array<string,mixed>|null  $ledgerRow  fila de `..._doc_versions` (o null si no existe)
+     */
+    public static function evidenceRefMatches(mixed $ref, ?array $ledgerRow, string $scope, string $expectedPayloadSha): bool
+    {
+        if (!is_array($ref) || $ledgerRow === null) {
+            return false;
+        }
+        foreach (self::EVIDENCE_REF_KEYS as $k) {
+            if (!array_key_exists($k, $ref)) {
+                return false;
+            }
+        }
+        $dvId = $ref['document_versions_id'];
+        $ver  = $ref['document_version'];
+        $hash = $ref['content_sha256'];
+        if (!is_int($dvId) || !is_int($ver) || $dvId <= 0 || $ver <= 0
+            || !is_string($hash) || preg_match('/^[0-9a-f]{64}$/', $hash) !== 1) {
+            return false;
+        }
+        return (string) ($ledgerRow['scope_key'] ?? '') === $scope
+            && (int) ($ledgerRow['document_version'] ?? 0) === $ver
+            && (int) ($ledgerRow['document_versions_id'] ?? 0) === $dvId
+            && hash_equals((string) ($ledgerRow['content_sha256'] ?? ''), $hash)
+            && $expectedPayloadSha !== ''
+            && hash_equals((string) ($ledgerRow['payload_sha256'] ?? ''), $expectedPayloadSha);
+    }
+
     /**
      * Valida mapas configurables (fail-closed): cada etapa de aprobación tiene un scope conocido; cada
      * scope usado tiene checkpoint que es una etapa de aprobación ANTERIOR o IGUAL a las etapas que lo usan.

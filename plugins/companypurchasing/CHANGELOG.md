@@ -6,6 +6,31 @@ y versionado [SemVer](https://semver.org/lang/es/).
 ## [0.3.0] — Fase 2D · P2D-2 (circuito de aprobación)
 Ver `../../docs/adr/ADR-0018-companypurchasing-approvals.md`.
 
+### Hardening — integridad de la saga (pasada acotada)
+- **Marca DURABLE de integridad** (`..._integrity` + `requests.integrity_state`): `selectQuote`,
+  `updateQuote` (cotización seleccionada) y `amendLineQuantity` la escriben en **su misma transacción local**
+  (solicitud, scope, causa, actor, estado/lock del motor, `idempotency_key`). Se resuelve sólo tras
+  `invalidateApprovals()` CONFIRMADA o verificación contra el ledger del motor; una reparación fallida la deja.
+  REQUEST_SCOPE tiene prioridad sobre COMMERCIAL. `integrityStatus()`/`isFullyApproved()`: nunca "aprobación
+  limpia" mientras haya marca o deriva, aunque el motor diga APPROVED. `decide()` repara o falla cerrado.
+  Las mutaciones que pueden exigir reabrir verifican **antes** `RIGHT_ACT` (+ `RIGHT_RECORD` de Firma).
+- **`expectedState` obligatorio**: `decide(requestId, action, expectedState, comment)`; etapa distinta ⇒
+  `stage_changed` sin nueva decisión (un usuario en Compras y Finanzas no "aprueba de más" al reintentar).
+- **Política pinneada por solicitud** (`..._policies`, JSON canónico + hash; `requests.policies_id`, fijada
+  en `submitDraft` junto a `scopes_version`): `stage_scopes`, `scope_checkpoints`, `pdf_stages`,
+  `quote_states`, `amend_states` ya no se leen en vivo de la configuración.
+- **Reconciliación convergente**: `reconcileAll` por lotes con cursor persistido + wrap-around (sin
+  starvation); **Acción automática nativa** `reconcileprojection` (CronTask); reporta solicitudes enviadas sin
+  instancia e integridad pendiente (el comando sale con error ante esas anomalías). `submit()` exige definición
+  activa **antes** de `submitDraft()` (sin definición la solicitud queda en DRAFT).
+- **Evidencia exacta**: toda aprobación viva debe coincidir en `document_versions_id`, `document_version`,
+  `content_sha256` y scope con el ledger propio; ref incompleta/alterada ⇒ deriva. El snapshot comercial
+  revalida en vivo que el Supplier seleccionado siga aplicando a la entidad.
+- Tests: unit 134 (política, `evidenceRefMatches`, `planBatch`); selftest `[INTEGRITY-DIRTY]`,
+  `[REOPEN-CAPABILITY]`, `[EXPECTED-STATE]`, `[POLICY]`, `[CRASH-0]`, `[SUBMIT-PRECHECK]`,
+  `[RECONCILE-CURSOR]` (incl. CronTask nativa), `[EVIDENCE-TAMPER]`, `[SUPPLIER-MOVED]`; `[MIGRATE]` cubre
+  las tablas/columnas nuevas y el (des)registro de la Acción automática.
+
 ### Added
 - **Integración con `companyworkflow` (único motor):** `PurchasingWorkflow` describe el proceso
   (`DRAFT → PENDING_AREA_HEAD → PURCHASING → PENDING_FINANCE → APPROVED`, más `RETURNED`/`REJECTED`/
@@ -53,7 +78,7 @@ Ver `../../docs/adr/ADR-0018-companypurchasing-approvals.md`.
   `glpi_profilerights`) ni pisa la configuración ajustada por un administrador (sólo siembra claves ausentes).
 
 ### Tests
-- Unit: 113 (resta exacta, `QuoteMath`, hash de payload, spec de la definición, reinicio de scopes,
+- Unit: 113 en la entrega inicial (resta exacta, `QuoteMath`, hash de payload, spec de la definición, reinicio de scopes,
   aprobaciones vivas desde el ledger —ambos órdenes del motor—, mapas, registro comercial).
 - Selftest obligatorio (mismo comando, trait `ApprovalSelftestScenarios`): flujo completo, rechazo,
   devolución, quórum secuencial y **concurrente**, delegación, selección concurrente de cotización,

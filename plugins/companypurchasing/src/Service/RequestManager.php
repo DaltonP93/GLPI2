@@ -35,6 +35,8 @@ final class RequestManager
     private Audit $audit;
     private AdvisoryLock $lock;
     private WorkflowGateway $workflow;
+    private PolicyStore $policies;
+    private IntegrityLedger $integrity;
 
     public function __construct(?NumberingService $numbering = null, ?Audit $audit = null, ?AdvisoryLock $lock = null, ?WorkflowGateway $workflow = null)
     {
@@ -42,6 +44,8 @@ final class RequestManager
         $this->audit     = $audit ?? new Audit();
         $this->lock      = $lock ?? new AdvisoryLock();
         $this->workflow  = $workflow ?? new WorkflowGateway();
+        $this->policies  = new PolicyStore();
+        $this->integrity = new IntegrityLedger();
     }
 
     // ---------------------------------------------------------------- CREATE
@@ -402,6 +406,10 @@ final class RequestManager
             // solicitud sigue en DRAFT y NO consume número.
             $scopesVersion = PluginConfig::currentScopesVersion();
             ScopeCatalog::assertVersionComplete($scopesVersion);
+            // P2D-2: la POLÍTICA de aprobación (etapa→scope, checkpoints, PDF, estados comerciales) se pinnea
+            // aquí igual que `scopes_version`: validada ANTES de reservar número (fail-closed) e inmutable para
+            // toda la vida de la solicitud (un cambio de configuración posterior sólo afecta a solicitudes nuevas).
+            $policyId = $this->policies->pinCurrent();
 
             $year   = (int) date('Y', strtotime((string) ($_SESSION['glpi_currenttime'] ?? 'now')) ?: time());
             // Reserva de número: transacción PROPIA e independiente (si lo de abajo falla, queda un hueco
@@ -422,6 +430,7 @@ final class RequestManager
                     'number_year'    => $year,
                     'domain_state'   => Request::STATE_PENDING,
                     'scopes_version' => $scopesVersion,
+                    'policies_id'    => $policyId,
                     'lock_version'   => (int) $req->fields['lock_version'] + 1,
                     'date_mod'       => $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s'),
                 ]);
@@ -433,7 +442,7 @@ final class RequestManager
                     $id,
                     PurchasingEvent::EV_REQUEST_SUBMITTED,
                     $entity,
-                    ['number' => $number, 'seq' => $seq, 'scopes_version' => $scopesVersion],
+                    ['number' => $number, 'seq' => $seq, 'scopes_version' => $scopesVersion, 'policies_id' => $policyId],
                     (string) $req->fields['correlation_id'],
                     'request-submit:' . $id
                 );
@@ -572,9 +581,13 @@ final class RequestManager
             }
             $this->assertRight(Request::RIGHT_MANAGE_PURCHASING);
             $this->assertEntity((int) $req->fields['entities_id']);
+            // Puede requerir invalidar aprobaciones: el perfil debe poder REABRIRLAS (RIGHT_ACT del motor +
+            // registrar la nueva versión en Firma) ANTES de aceptar el cambio. Fail-closed.
+            ReopenCapability::assert();
             $inst = $this->workflow->loadInstance((int) $req->fields['workflow_instances_id']);
+            $state = $inst !== null ? $this->workflow->stateCode($inst) : '';
             if ($inst === null || !$this->workflow->isOpen($inst)
-                || !in_array($this->workflow->stateCode($inst), PluginConfig::amendStates(), true)) {
+                || !in_array($state, $this->policies->forRequest($req)->amendStates(), true)) {
                 throw new \RuntimeException('la solicitud no admite enmiendas en su estado actual (fail-closed)');
             }
             $item = new RequestItem();
@@ -605,6 +618,9 @@ final class RequestManager
                 $this->audit->record($reqId, PurchasingEvent::EV_LINE_AMENDED, (int) $req->fields['entities_id'], [
                     'line_id' => $lineId, 'field' => 'quantity', 'from' => $from, 'to' => $qty,
                 ], (string) $req->fields['correlation_id']);
+                // Marca DURABLE en la MISMA transacción: la cantidad está en REQUEST_SCOPE (prioritario) y, como
+                // COMMERCIAL es superconjunto, también en COMMERCIAL_FINANCIAL_SCOPE.
+                $this->integrity->markDirty($req, [ScopeCatalog::SCOPE_REQUEST, ScopeCatalog::SCOPE_COMMERCIAL_FINANCIAL], PurchasingEvent::EV_LINE_AMENDED, $state, (int) $inst->fields['lock_version']);
                 $DB->commit();
             } catch (\Throwable $e) {
                 $this->safeRollback($DB);

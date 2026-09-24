@@ -203,6 +203,14 @@ ok('actor único: reabrir a S2 anula la decisión de S2 (#15)', $mat::isVoidedBy
 ok('conservador: sin entrada localizable (0) ⇒ anula', $mat::isVoidedByCheckpoint($single, 13, 0) === true);
 ok('conservador: decisión fuera del ledger ⇒ anula', $mat::isVoidedByCheckpoint($single, 999, $entryS2) === true);
 
+echo "== Materializer::resolveCheckpoint (lectura del ledger con resultado EXPLÍCITO) ==\n";
+ok('ledger NO legible (null) + reopen_to_code ⇒ pending (nunca "anular todo")', $mat::resolveCheckpoint(null, 16, 'S2') === ['status' => 'pending', 'entry' => 0]);
+ok('ledger incompleto (no contiene la propia invalidación) ⇒ pending', $mat::resolveCheckpoint(array_slice($single, 0, 3), 16, 'S2')['status'] === 'pending');
+ok('ledger vacío ([]) con reopen_to_code ⇒ pending (vacío ≠ certeza)', $mat::resolveCheckpoint([], 16, 'S2')['status'] === 'pending');
+ok('ledger completo ⇒ ok con la entrada al checkpoint', $mat::resolveCheckpoint($single, 16, 'S2') === ['status' => 'ok', 'entry' => 12]);
+ok('ledger completo pero checkpoint nunca ingresado ⇒ error (visible, sin evidencias)', $mat::resolveCheckpoint($single, 16, 'NUNCA')['status'] === 'error');
+ok('invalidación LEGACY sin reopen_to_code ⇒ legacy (anula todas, documentado)', $mat::resolveCheckpoint(null, 16, '') === ['status' => 'legacy', 'entry' => 0]);
+
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"
     : "\033[32mUNIT OK: {$total}/{$total}\033[0m") . "\n";

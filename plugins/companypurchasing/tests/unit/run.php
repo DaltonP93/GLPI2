@@ -29,7 +29,11 @@ require $svc . 'RequestManager.php';
 require $svc . 'QuoteMath.php';
 require $svc . 'PurchasingWorkflow.php';
 require $svc . 'DocumentVersionAllocator.php';
+require $svc . 'ApprovalPolicy.php';
+require $svc . 'ApprovalOrchestrator.php'; // sólo el helper PURO planBatch()
 
+use GlpiPlugin\Companypurchasing\Service\ApprovalOrchestrator;
+use GlpiPlugin\Companypurchasing\Service\ApprovalPolicy;
 use GlpiPlugin\Companypurchasing\Service\CurrencyPolicy;
 use GlpiPlugin\Companypurchasing\Service\Decimal;
 use GlpiPlugin\Companypurchasing\Service\DocumentVersionAllocator;
@@ -297,6 +301,60 @@ ok('claves comerciales del vocabulario cerrado', array_diff(array_keys($cr), Sco
 ok('moneda distinta a la de la solicitud → fail-closed', throws(fn () => ScopeSnapshotBuilder::commercialRecord($terms, 'USD')));
 ok('términos incompletos → fail-closed', throws(fn () => ScopeSnapshotBuilder::commercialRecord(['quote_id' => 5, 'suppliers_id' => 9, 'math' => ['currency' => 'PYG']], 'PYG')));
 ok('COMMERCIAL_FINANCIAL (v1) = REQUEST + claves comerciales producibles', array_diff(ScopeCatalog::defaultFields('COMMERCIAL_FINANCIAL_SCOPE'), array_merge(ScopeCatalog::REQUEST_KEYS, ['currency', 'total'], array_keys($cr))) === []);
+
+
+// ============================================================================ P2D-2 · pasada de integridad
+echo "== P2D-2 · ApprovalPolicy (política pinneada: canónica, hash, validación, prioridad) ==\n";
+$polRaw = [
+    'stage_scopes'      => ['PURCHASING' => 'COMMERCIAL_FINANCIAL_SCOPE', 'PENDING_AREA_HEAD' => 'REQUEST_SCOPE', 'PENDING_FINANCE' => 'COMMERCIAL_FINANCIAL_SCOPE'],
+    'scope_checkpoints' => ['COMMERCIAL_FINANCIAL_SCOPE' => 'PURCHASING', 'REQUEST_SCOPE' => 'PENDING_AREA_HEAD'],
+    'pdf_stages'        => ['PENDING_FINANCE', 'PENDING_AREA_HEAD'],
+    'quote_states'      => ['PURCHASING', 'PENDING_FINANCE', 'APPROVED'],
+    'amend_states'      => ['PURCHASING', 'PENDING_FINANCE', 'APPROVED'],
+];
+$polA = ApprovalPolicy::fromArray($polRaw);
+$polRaw2 = $polRaw;
+$polRaw2['pdf_stages'] = ['PENDING_AREA_HEAD', 'PENDING_FINANCE', 'PENDING_FINANCE']; // otro orden + duplicado
+ok('mismo contenido (orden/duplicados irrelevantes) ⇒ MISMO hash (misma versión)', ApprovalPolicy::hash($polA->toArray()) === ApprovalPolicy::hash(ApprovalPolicy::fromArray($polRaw2)->toArray()));
+$polRaw3 = $polRaw;
+$polRaw3['pdf_stages'] = [];
+ok('contenido distinto ⇒ hash distinto (versión nueva)', ApprovalPolicy::hash($polA->toArray()) !== ApprovalPolicy::hash(ApprovalPolicy::fromArray($polRaw3)->toArray()));
+ok('prioridad: REQUEST_SCOPE antes que COMMERCIAL', array_keys($polA->orderedCheckpoints()) === ['REQUEST_SCOPE', 'COMMERCIAL_FINANCIAL_SCOPE']);
+ok('estado desconocido en quote_states → fail-closed', throws(fn () => ApprovalPolicy::fromArray(['quote_states' => ['NOPE']] + $polRaw)));
+ok('pdf_stages fuera de etapas de aprobación → fail-closed', throws(fn () => ApprovalPolicy::fromArray(['pdf_stages' => ['APPROVED']] + $polRaw)));
+ok('checkpoint posterior a su etapa → fail-closed', throws(fn () => ApprovalPolicy::fromArray(['scope_checkpoints' => ['REQUEST_SCOPE' => 'PENDING_FINANCE', 'COMMERCIAL_FINANCIAL_SCOPE' => 'PURCHASING']] + $polRaw)));
+ok('clave faltante → fail-closed', throws(fn () => ApprovalPolicy::fromArray(array_diff_key($polRaw, ['amend_states' => 1]))));
+
+echo "== P2D-2 · evidenceRefMatches (las TRES claves + scope + contenido, exactas) ==\n";
+$lrow = ['scope_key' => 'REQUEST_SCOPE', 'document_version' => 3, 'document_versions_id' => 41, 'content_sha256' => str_repeat('a', 64), 'payload_sha256' => str_repeat('b', 64)];
+$goodRef = ['document_versions_id' => 41, 'document_version' => 3, 'content_sha256' => str_repeat('a', 64)];
+ok('ref exacta ⇒ íntegra', PurchasingWorkflow::evidenceRefMatches($goodRef, $lrow, 'REQUEST_SCOPE', str_repeat('b', 64)));
+ok('content_sha256 alterado ⇒ NO', !PurchasingWorkflow::evidenceRefMatches(['content_sha256' => str_repeat('f', 64)] + $goodRef, $lrow, 'REQUEST_SCOPE', str_repeat('b', 64)));
+ok('document_versions_id ajeno ⇒ NO', !PurchasingWorkflow::evidenceRefMatches(['document_versions_id' => 42] + $goodRef, $lrow, 'REQUEST_SCOPE', str_repeat('b', 64)));
+ok('document_version distinto ⇒ NO', !PurchasingWorkflow::evidenceRefMatches(['document_version' => 4] + $goodRef, $lrow, 'REQUEST_SCOPE', str_repeat('b', 64)));
+ok('ref incompleta (falta una clave) ⇒ NO', !PurchasingWorkflow::evidenceRefMatches(array_diff_key($goodRef, ['content_sha256' => 1]), $lrow, 'REQUEST_SCOPE', str_repeat('b', 64)));
+ok('tipos inválidos ("41" string) ⇒ NO', !PurchasingWorkflow::evidenceRefMatches(['document_versions_id' => '41'] + $goodRef, $lrow, 'REQUEST_SCOPE', str_repeat('b', 64)));
+ok('fila de OTRO scope ⇒ NO', !PurchasingWorkflow::evidenceRefMatches($goodRef, $lrow, 'COMMERCIAL_FINANCIAL_SCOPE', str_repeat('b', 64)));
+ok('contenido actual distinto ⇒ NO', !PurchasingWorkflow::evidenceRefMatches($goodRef, $lrow, 'REQUEST_SCOPE', str_repeat('c', 64)));
+ok('sin fila en el ledger propio ⇒ NO', !PurchasingWorkflow::evidenceRefMatches($goodRef, null, 'REQUEST_SCOPE', str_repeat('b', 64)));
+ok('ref no-array ⇒ NO', !PurchasingWorkflow::evidenceRefMatches(null, $lrow, 'REQUEST_SCOPE', str_repeat('b', 64)));
+
+echo "== P2D-2 · planBatch (reconciliación por lotes con cursor + wrap-around) ==\n";
+ok('lote completo tras el cursor ⇒ avanza al último', ApprovalOrchestrator::planBatch([11, 12], [], 10) === ['ids' => [11, 12], 'cursor' => 12, 'wrapped' => false]);
+ok('fin de la lista ⇒ wrap-around desde el inicio', ApprovalOrchestrator::planBatch([19], [3, 5], 18) === ['ids' => [19, 3, 5], 'cursor' => 5, 'wrapped' => true]);
+ok('nada que revisar ⇒ cursor 0', ApprovalOrchestrator::planBatch([], [], 7) === ['ids' => [], 'cursor' => 0, 'wrapped' => false]);
+// Simulación: 7 ids, límite 3 ⇒ en ≤ 3 corridas se revisan TODOS (sin starvation del mayor).
+$all = [2, 4, 6, 8, 10, 12, 14];
+$cur = 0;
+$visited = [];
+for ($run = 0; $run < 3; $run++) {
+    $after = array_slice(array_values(array_filter($all, fn ($i) => $i > $cur)), 0, 3);
+    $start = count($after) < 3 ? array_slice(array_values(array_filter($all, fn ($i) => $i <= $cur)), 0, 3 - count($after)) : [];
+    $plan = ApprovalOrchestrator::planBatch($after, $start, $cur);
+    $visited = array_merge($visited, $plan['ids']);
+    $cur = $plan['cursor'];
+}
+ok('7 solicitudes, límite 3: en 3 corridas se revisan TODAS (incluida la de mayor id)', array_diff($all, $visited) === []);
 
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"

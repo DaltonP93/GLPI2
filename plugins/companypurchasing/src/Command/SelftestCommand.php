@@ -878,7 +878,8 @@ final class SelftestCommand extends Command
         plugin_companypurchasing_uninstall();
         // Comprobación EN VIVO (SHOW TABLES): la caché de esquema de GLPI no se invalida tras un DROP por
         // SQL crudo dentro del mismo proceso, así que no se usa $DB->tableExists() aquí.
-        $this->check('[MIGRATE] uninstall elimina las tablas propias', !$this->tableExistsLive($table));
+        $this->check('[MIGRATE] uninstall elimina las tablas propias', !$this->tableExistsLive($table) && !$this->tableExistsLive('glpi_plugin_companypurchasing_integrity'));
+        $this->check('[MIGRATE] uninstall desregistra la Acción automática', countElementsInTable(\CronTask::getTable(), ['itemtype' => \GlpiPlugin\Companypurchasing\Model\ProjectionTask::class]) === 0);
 
         plugin_companypurchasing_install();
         $this->check('[MIGRATE] reinstall recrea las tablas propias', $this->tableExistsLive($table));
@@ -888,19 +889,24 @@ final class SelftestCommand extends Command
             $seeded++;
         }
         $this->check('[MIGRATE] reinstall re-siembra los scopes v1', $seeded >= 2);
-        foreach (['quotes', 'quote_items', 'doc_versions', 'docseq'] as $t) {
+        foreach (['quotes', 'quote_items', 'doc_versions', 'docseq', 'policies', 'integrity'] as $t) {
             $this->check("[MIGRATE] reinstall recrea glpi_plugin_companypurchasing_{$t}", $this->tableExistsLive("glpi_plugin_companypurchasing_{$t}"));
         }
+        $ct = new \CronTask();
+        $this->check('[MIGRATE] reinstall re-registra la Acción automática (una sola)', $ct->getFromDBbyName(\GlpiPlugin\Companypurchasing\Model\ProjectionTask::class, \GlpiPlugin\Companypurchasing\Model\ProjectionTask::CRON_NAME)
+            && countElementsInTable(\CronTask::getTable(), ['itemtype' => \GlpiPlugin\Companypurchasing\Model\ProjectionTask::class]) === 1);
 
         // UPGRADE P2D-1 → P2D-2: sobre un esquema SIN las columnas nuevas, install() las agrega (idempotente).
-        foreach (['quotes_id_selected', 'workflow_lock_version', 'workflow_synced_at'] as $col) {
+        $cols = ['quotes_id_selected', 'workflow_lock_version', 'workflow_synced_at', 'policies_id', 'integrity_state'];
+        foreach ($cols as $col) {
             $DB->doQuery("ALTER TABLE `{$table}` DROP COLUMN `{$col}`");
         }
-        $this->check('[MIGRATE] esquema P2D-1 simulado (sin columnas P2D-2)', !$this->columnExistsLive($table, 'quotes_id_selected'));
+        $this->check('[MIGRATE] esquema P2D-1 simulado (sin columnas P2D-2)', !$this->columnExistsLive($table, 'quotes_id_selected') && !$this->columnExistsLive($table, 'policies_id'));
         plugin_companypurchasing_install();
         plugin_companypurchasing_install(); // idempotente: segunda pasada no falla ni duplica
-        $this->check('[MIGRATE] upgrade agrega quotes_id_selected / workflow_lock_version / workflow_synced_at',
-            $this->columnExistsLive($table, 'quotes_id_selected') && $this->columnExistsLive($table, 'workflow_lock_version') && $this->columnExistsLive($table, 'workflow_synced_at'));
+        $this->check('[MIGRATE] upgrade agrega ' . implode(' / ', $cols),
+            array_reduce($cols, fn (bool $c, string $col): bool => $c && $this->columnExistsLive($table, $col), true));
+        $this->check('[MIGRATE] upgrade no duplica la Acción automática', countElementsInTable(\CronTask::getTable(), ['itemtype' => \GlpiPlugin\Companypurchasing\Model\ProjectionTask::class]) === 1);
     }
 
     private function columnExistsLive(string $table, string $column): bool

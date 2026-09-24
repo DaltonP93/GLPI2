@@ -18,6 +18,7 @@
  *   [QUEUE]       §3: cron/queue durable; pendiente no bloquea a posteriores; idempotente; restart.
  *   [INVALIDATE]  §4: idempotency_key obligatoria; actor DURABLE reconstruido; exacta A/B.
  *   [INVALIDATE-CHECKPOINT] reabrir S2 anula sólo lo decidido desde la entrada a S2 (S1 sigue válida).
+ *   [INVALIDATE-LEDGER-FAIL] history() caído ⇒ PENDING y cero invalidaciones; al volver, exacta.
  *
  * @license GPL-3.0-or-later
  */
@@ -112,6 +113,7 @@ final class SelftestCommand extends Command
         $this->scenarioQueueDurable();
         $this->scenarioInvalidation();
         $this->scenarioInvalidationCheckpoint();
+        $this->scenarioInvalidationLedgerUnavailable();
         $this->scenarioMaterializerFailClosed();
         $this->scenarioPdfLockFailClosed();
         $this->scenarioNoStarvation();
@@ -635,6 +637,88 @@ final class SelftestCommand extends Command
         $this->reconcile();
         $this->check('[INVALIDATE-CHECKPOINT] S1 (antes de entrar a S2) sigue VALID', $eS1 !== null && $this->verifyAs($this->uReq, $this->entityA, (string) $eS1->fields['verification_token']) === VerificationService::STATUS_VALID);
         $this->check('[INVALIDATE-CHECKPOINT] S2 (desde la entrada a S2) queda INVALIDATED', $eS2 !== null && $this->verifyAs($this->uReq, $this->entityA, (string) $eS2->fields['verification_token']) === VerificationService::STATUS_INVALIDATED);
+    }
+
+    // ------------------------------------------------------------------ [INVALIDATE-LEDGER-FAIL]
+
+    /**
+     * Una falla TEMPORAL de `WorkflowApi::history()` (con `historyById()` disponible) NO degenera en "anular
+     * todo": la invalidación con `reopen_to_code` queda PENDING (retryable) y no se crea NINGUNA evidencia de
+     * invalidación; cuando el ledger vuelve, se anula exactamente lo que corresponde al checkpoint.
+     */
+    private function scenarioInvalidationLedgerUnavailable(): void
+    {
+        $this->out->writeln('== [INVALIDATE-LEDGER-FAIL] history() caído ⇒ pending, cero invalidaciones ==');
+        $this->setListen(false);
+        $api = new WorkflowApi();
+        $sig = new SignatureApi();
+        $c = $this->makeComputer();
+        $this->applySession(2, [0, $this->entityA], ['plugin_companyworkflow' => ALLSTANDARDRIGHT, 'computer' => ALLSTANDARDRIGHT], 1);
+        $def = $api->builder()->createVersion([
+            'code' => 'sig_lf_' . $this->suffix, 'name' => 'two-stage-lf', 'itemtype_target' => 'Computer', 'entities_id' => 0, 'is_recursive' => 1,
+            'states' => [
+                ['code' => 'DRAFT', 'kind' => StateDef::KIND_INITIAL, 'is_editable' => 1],
+                ['code' => 'S1', 'kind' => StateDef::KIND_INTERMEDIATE],
+                ['code' => 'S2', 'kind' => StateDef::KIND_INTERMEDIATE],
+                ['code' => 'OK', 'kind' => StateDef::KIND_INTERMEDIATE],
+            ],
+            'transitions' => [
+                ['from' => 'DRAFT', 'to' => 'S1', 'action' => 'submit'],
+                ['from' => 'S1', 'to' => 'S2', 'action' => 'approve', 'required_right' => WorkflowDef::RIGHT_ACT],
+                ['from' => 'S2', 'to' => 'OK', 'action' => 'approve', 'required_right' => WorkflowDef::RIGHT_ACT],
+            ],
+        ]);
+        $inst = $this->startSubmit($api, $def, $c);
+        if ($inst === null) {
+            $this->check('[INVALIDATE-LEDGER-FAIL] instancia', false);
+            return;
+        }
+        $this->approve($api, $inst, $this->uA1, $this->recordVersion($sig, $c, 1, 'LF1'), 'S1 ok');
+        $inst->getFromDB((int) $inst->getID());
+        $this->approve($api, $inst, $this->uA2, $this->recordVersion($sig, $c, 2, 'LF2'), 'S2 ok');
+        $this->reconcile(); // materializa las dos decisiones
+        $eS1 = $this->latestBy(['subject_itemtype' => 'Computer', 'subject_items_id' => $c, 'event_type' => ApprovalEvidence::EVENT_DECISION, 'decision' => ApprovalEvidence::DECISION_APPROVED, 'actor_users_id' => $this->uA1]);
+        $eS2 = $this->latestBy(['subject_itemtype' => 'Computer', 'subject_items_id' => $c, 'event_type' => ApprovalEvidence::EVENT_DECISION, 'decision' => ApprovalEvidence::DECISION_APPROVED, 'actor_users_id' => $this->uA2]);
+
+        $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $r = $api->invalidateApprovals((int) $inst->getID(), 'cambio etapa 2', ['idempotency_key' => 'kLF-' . $this->suffix, 'reopen_to_code' => 'S2', 'document_version' => 2]);
+        $invHid = $this->latestLedgerId((int) $inst->getID(), WfHistoryEvent::EVENT_APPROVAL_INVALIDATED);
+        $this->check('[INVALIDATE-LEDGER-FAIL] invalidación registrada en el motor', $r->success && $invHid > 0);
+
+        // Materializer con `history()` caído temporalmente (historyById sí responde).
+        $flaky = new class extends Materializer {
+            protected function workflowApi(): ?object
+            {
+                return new class {
+                    private WorkflowApi $real;
+                    public function __construct()
+                    {
+                        $this->real = new WorkflowApi();
+                    }
+                    /** @return array<string,mixed>|null */
+                    public function historyById(int $id): ?array
+                    {
+                        return $this->real->historyById($id);
+                    }
+                    /** @param array<string,mixed> $f @return array<int,array<string,mixed>> */
+                    public function history(array $f = []): array
+                    {
+                        throw new \RuntimeException('ledger temporalmente no disponible (simulado)');
+                    }
+                };
+            }
+        };
+        $res = $flaky->materializeByHistoryId($invHid);
+        $this->check('[INVALIDATE-LEDGER-FAIL] history() caído ⇒ PENDING (retryable), no DONE/ERROR', ($res['status'] ?? '') === Materializer::R_PENDING);
+        $this->check('[INVALIDATE-LEDGER-FAIL] … y CERO evidencias de invalidación creadas', $this->countEvidence($c, ApprovalEvidence::EVENT_INVALIDATION, null) === 0);
+        $this->check('[INVALIDATE-LEDGER-FAIL] … S1 y S2 siguen VALID (nada anulado por la falla)', $eS1 !== null && $eS2 !== null
+            && $this->verifyAs($this->uReq, $this->entityA, (string) $eS1->fields['verification_token']) === VerificationService::STATUS_VALID
+            && $this->verifyAs($this->uReq, $this->entityA, (string) $eS2->fields['verification_token']) === VerificationService::STATUS_VALID);
+
+        // Ledger recuperado: el reintento anula EXACTAMENTE lo del checkpoint.
+        $this->reconcile();
+        $this->check('[INVALIDATE-LEDGER-FAIL] reintento: S1 sigue VALID', $this->verifyAs($this->uReq, $this->entityA, (string) $eS1->fields['verification_token']) === VerificationService::STATUS_VALID);
+        $this->check('[INVALIDATE-LEDGER-FAIL] reintento: S2 queda INVALIDATED', $this->verifyAs($this->uReq, $this->entityA, (string) $eS2->fields['verification_token']) === VerificationService::STATUS_INVALIDATED);
     }
 
     // ------------------------------------------------------------------ [MAT-FAILCLOSED] §3

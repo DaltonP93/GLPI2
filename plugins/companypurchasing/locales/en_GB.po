@@ -79,3 +79,19 @@ msgid "Document version sequence"
 msgid_plural "Document version sequences"
 msgstr[0] "Document version sequence"
 msgstr[1] "Document version sequences"
+
+msgid "Approval policy version"
+msgid_plural "Approval policy versions"
+msgstr[0] "Approval policy version"
+msgstr[1] "Approval policy versions"
+
+msgid "Approval integrity mark"
+msgid_plural "Approval integrity marks"
+msgstr[0] "Approval integrity mark"
+msgstr[1] "Approval integrity marks"
+
+msgid "Purchasing state reconciliation"
+msgstr "Purchasing state reconciliation"
+
+msgid "Reconcile purchase request states with the workflow engine"
+msgstr "Reconcile purchase request states with the workflow engine"

@@ -21,7 +21,10 @@
  *   - glpi_plugin_companypurchasing_quote_items    : precio final por línea (FK items.id, no line_no).
  *   - glpi_plugin_companypurchasing_doc_versions   : ledger de versiones documentales de dominio.
  *   - glpi_plugin_companypurchasing_docseq         : contador monotónico de document_version por solicitud.
- * y columnas nuevas en `requests` (`quotes_id_selected`, `workflow_lock_version`, `workflow_synced_at`),
+ *   - glpi_plugin_companypurchasing_policies       : versiones INMUTABLES de la política de aprobación.
+ *   - glpi_plugin_companypurchasing_integrity      : marcas durables de integridad (scope sucio).
+ * y columnas nuevas en `requests` (`quotes_id_selected`, `workflow_lock_version`, `workflow_synced_at`,
+ * `policies_id`, `integrity_state`),
  * añadidas también en UPGRADE (ALTER idempotente) sobre una instalación P2D-1.
  *
  * @license GPL-3.0-or-later
@@ -66,6 +69,8 @@ function plugin_companypurchasing_install() {
         `quotes_id_selected` INT UNSIGNED NOT NULL DEFAULT 0,
         `workflow_lock_version` INT UNSIGNED NOT NULL DEFAULT 0,
         `workflow_synced_at` TIMESTAMP NULL DEFAULT NULL,
+        `policies_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `integrity_state` VARCHAR(20) NOT NULL DEFAULT 'clean',
         `correlation_id` VARCHAR(64) NOT NULL DEFAULT '',
         `users_id_creator` INT UNSIGNED NOT NULL DEFAULT 0,
         `lock_version` INT UNSIGNED NOT NULL DEFAULT 0,
@@ -145,6 +150,8 @@ function plugin_companypurchasing_install() {
         'quotes_id_selected'    => "INT UNSIGNED NOT NULL DEFAULT 0",
         'workflow_lock_version' => "INT UNSIGNED NOT NULL DEFAULT 0",
         'workflow_synced_at'    => "TIMESTAMP NULL DEFAULT NULL",
+        'policies_id'           => "INT UNSIGNED NOT NULL DEFAULT 0",
+        'integrity_state'       => "VARCHAR(20) NOT NULL DEFAULT 'clean'",
     ] as $col => $ddl) {
         plugin_companypurchasing_add_column_if_missing('glpi_plugin_companypurchasing_requests', $col, $ddl);
     }
@@ -215,6 +222,36 @@ function plugin_companypurchasing_install() {
         UNIQUE KEY `requests_id` (`requests_id`)
     ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
 
+    // Versiones INMUTABLES de la política de aprobación (pinneadas por solicitud en `requests.policies_id`).
+    $DB->doQuery("CREATE TABLE IF NOT EXISTS `glpi_plugin_companypurchasing_policies` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `policy_hash` CHAR(64) NOT NULL DEFAULT '',
+        `policy_json` LONGTEXT NOT NULL,
+        `date_creation` TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (`id`),
+        UNIQUE KEY `policy_hash` (`policy_hash`)
+    ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+
+    // Marcas DURABLES de integridad de aprobación (escritas en la misma transacción que la mutación).
+    $DB->doQuery("CREATE TABLE IF NOT EXISTS `glpi_plugin_companypurchasing_integrity` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `requests_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `scope_key` VARCHAR(60) NOT NULL DEFAULT '',
+        `status` VARCHAR(20) NOT NULL DEFAULT 'dirty',
+        `cause` VARCHAR(60) NOT NULL DEFAULT '',
+        `actor_users_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `workflow_state` VARCHAR(60) NOT NULL DEFAULT '',
+        `workflow_lock_version` INT UNSIGNED NOT NULL DEFAULT 0,
+        `idempotency_key` VARCHAR(190) NOT NULL DEFAULT '',
+        `resolution` VARCHAR(190) NOT NULL DEFAULT '',
+        `resolved_by` INT UNSIGNED NOT NULL DEFAULT 0,
+        `date_creation` TIMESTAMP NULL DEFAULT NULL,
+        `date_resolved` TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (`id`),
+        UNIQUE KEY `idempotency_key` (`idempotency_key`),
+        KEY `req_status` (`requests_id`,`status`)
+    ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+
     // Derecho propio del plugin en todos los perfiles (valor 0 por defecto). IDEMPOTENTE: GLPI vuelve a
     // llamar install() al ACTUALIZAR el plugin (p. ej. 0.2.0 → 0.3.0); re-agregarlo violaría el UNIQUE
     // (profiles_id, name) de glpi_profilerights y abortaría el upgrade.
@@ -247,6 +284,18 @@ function plugin_companypurchasing_install() {
     // Sembrar la versión 1 del catálogo de scopes de aprobación (idempotente).
     ScopeCatalog::seedVersion1();
 
+    // CronTask NATIVA (Acción automática): reconciliación de la proyección `domain_state` con el motor, por
+    // lotes con cursor (sin starvation), y detección de solicitudes enviadas sin instancia. NUNCA aprueba,
+    // rechaza ni invalida. Idempotente (`register` no duplica).
+    if (class_exists('CronTask')) {
+        CronTask::register(
+            \GlpiPlugin\Companypurchasing\Model\ProjectionTask::class,
+            'reconcileprojection',
+            defined('MINUTE_TIMESTAMP') ? 15 * MINUTE_TIMESTAMP : 900,
+            ['mode' => 2, 'comment' => 'companypurchasing: reconciliación de la proyección domain_state con companyworkflow']
+        );
+    }
+
     return true;
 }
 
@@ -258,7 +307,13 @@ function plugin_companypurchasing_uninstall() {
     /** @var DBmysql $DB */
     global $DB;
 
+    if (class_exists('CronTask')) {
+        CronTask::unregister('companypurchasing');
+    }
+
     foreach ([
+        'glpi_plugin_companypurchasing_integrity',
+        'glpi_plugin_companypurchasing_policies',
         'glpi_plugin_companypurchasing_quote_items',
         'glpi_plugin_companypurchasing_quotes',
         'glpi_plugin_companypurchasing_doc_versions',
@@ -301,8 +356,9 @@ function plugin_companypurchasing_add_column_if_missing(string $table, string $c
 /**
  * Listener best-effort de `companyworkflow:transitioned` / `companyworkflow:approval_invalidated`:
  * PROYECTA el estado confirmado del motor en `requests.domain_state` (cache). Nunca lanza: la
- * transición ya está confirmada y la reconciliación (`plugins:companypurchasing:reconcile`) garantiza
- * la convergencia si este listener se pierde.
+ * transición ya está confirmada. Si este listener se pierde, la proyección converge en la siguiente
+ * ejecución de la Acción automática NATIVA `reconcileprojection` (lotes con cursor y wrap-around: toda
+ * solicitud se revisa en un número acotado de ejecuciones) o del comando `plugins:companypurchasing:reconcile`.
  *
  * @param mixed $payload
  * @return mixed

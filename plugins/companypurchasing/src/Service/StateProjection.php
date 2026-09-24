@@ -48,14 +48,14 @@ class StateProjection
 
     /**
      * @param string $source  'live' (orquestador/listener) | 'reconcile' (audita la corrección)
-     * @return array{changed:bool, linked:bool, from:string, to:string, lock_version:int}
+     * @return array{changed:bool, linked:bool, instance:bool, from:string, to:string, lock_version:int}
      */
     public function sync(Request $req, string $source = 'live'): array
     {
         $reqId = (int) $req->getID();
         $req->getFromDB($reqId); // relectura fresca
         $from = (string) ($req->fields['domain_state'] ?? '');
-        $none = ['changed' => false, 'linked' => false, 'from' => $from, 'to' => $from, 'lock_version' => (int) ($req->fields['workflow_lock_version'] ?? 0)];
+        $none = ['changed' => false, 'linked' => false, 'instance' => false, 'from' => $from, 'to' => $from, 'lock_version' => (int) ($req->fields['workflow_lock_version'] ?? 0)];
 
         $instId = (int) ($req->fields['workflow_instances_id'] ?? 0);
         $inst = $instId > 0 ? $this->wf->loadInstance($instId) : $this->wf->findInstance(Request::class, $reqId);
@@ -68,7 +68,7 @@ class StateProjection
         $code = $this->wf->stateCode($inst);
         $lock = (int) $inst->fields['lock_version'];
         if ($code === '') {
-            return $none;
+            return ['instance' => true] + $none;
         }
         $fields = [];
         if ($instId !== (int) $inst->getID()) {
@@ -81,7 +81,7 @@ class StateProjection
             $fields['workflow_lock_version'] = $lock;
         }
         if ($fields === []) {
-            return ['changed' => false, 'linked' => false, 'from' => $from, 'to' => $code, 'lock_version' => $lock];
+            return ['changed' => false, 'linked' => false, 'instance' => true, 'from' => $from, 'to' => $code, 'lock_version' => $lock];
         }
         $fields['id'] = $reqId;
         $fields['workflow_synced_at'] = $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s');
@@ -96,6 +96,7 @@ class StateProjection
         return [
             'changed'      => true,
             'linked'       => isset($fields['workflow_instances_id']),
+            'instance'     => true,
             'from'         => $from,
             'to'           => $code,
             'lock_version' => $lock,

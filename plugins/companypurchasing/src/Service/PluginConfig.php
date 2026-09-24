@@ -44,6 +44,8 @@ final class PluginConfig
         'sla_hours_area_head'        => '',
         'sla_hours_purchasing'       => '',
         'sla_hours_finance'          => '',
+        // --- Política de aprobación: se PINNEA por solicitud al abandonar DRAFT (ver PolicyStore); un cambio
+        //     aquí sólo afecta a solicitudes NUEVAS. ---
         // Scope que protege cada etapa de aprobación y checkpoint (estado) que reabre cada scope.
         'stage_scopes'               => '{"PENDING_AREA_HEAD":"REQUEST_SCOPE","PURCHASING":"COMMERCIAL_FINANCIAL_SCOPE","PENDING_FINANCE":"COMMERCIAL_FINANCIAL_SCOPE"}',
         'scope_checkpoints'          => '{"REQUEST_SCOPE":"PENDING_AREA_HEAD","COMMERCIAL_FINANCIAL_SCOPE":"PURCHASING"}',
@@ -52,8 +54,10 @@ final class PluginConfig
         // Estados donde Compras gestiona cotizaciones / enmienda cantidades (tras la aprobación del jefe).
         'quote_states'               => '["PURCHASING","PENDING_FINANCE","APPROVED"]',
         'amend_states'               => '["PURCHASING","PENDING_FINANCE","APPROVED"]',
-        // Proyección inmediata de domain_state al escuchar eventos del motor (la reconciliación la garantiza).
+        // Proyección inmediata de domain_state al escuchar eventos del motor (operacional, NO pinneada).
         'sync_on_workflow_events'    => '1',
+        // Estado operacional de la reconciliación por lotes: último id revisado (cursor con wrap-around).
+        'reconcile_cursor'           => '0',
     ];
 
     /** Sufijo de configuración por etapa de aprobación (clave estable, no dato de negocio). */

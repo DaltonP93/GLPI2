@@ -12,8 +12,15 @@ y versionado [SemVer](https://semver.org/lang/es/).
   jefe de área al reabrir la etapa comercial en `companypurchasing`). La visita se deriva del ledger porque
   el motor registra la decisión de un actor único **después** de la fila `transitioned` (en quórum, antes).
   Sin ledger/checkpoint localizable ⇒ comportamiento previo (anula todas; conservador).
-- Tests: unit (`checkpointEntryId`, `visitStartOf`, `isVoidedByCheckpoint` en ambos órdenes) + selftest
-  `[INVALIDATE-CHECKPOINT]` (reabrir S2 deja S1 `valid` y S2 `invalidated`).
+- **Lectura incierta del ledger ⇒ PENDING, nunca "anular todo"**: `resolveCheckpoint()` devuelve un
+  resultado explícito (`ok`/`pending`/`error`/`legacy`). Con `reopen_to_code`, si `history()` falla o la lectura
+  no contiene la propia invalidación ⇒ `R_PENDING` (retryable) y **cero** evidencias de invalidación; ledger
+  legible pero checkpoint nunca ingresado ⇒ `R_ERROR` visible. Sólo una invalidación legacy sin
+  `reopen_to_code` anula todas (documentado).
+- Tests: unit (`checkpointEntryId`, `visitStartOf`, `isVoidedByCheckpoint` en ambos órdenes,
+  `resolveCheckpoint`) + selftest `[INVALIDATE-CHECKPOINT]` (reabrir S2 deja S1 `valid` y S2 `invalidated`) y
+  `[INVALIDATE-LEDGER-FAIL]` (`history()` caído con `historyById()` disponible ⇒ pending, nada anulado; al
+  volver, anulación exacta).
 
 ## [0.4.0] — Fase 2C (integridad probatoria)
 ### Hardening — durabilidad fail-closed (cola de reconciliación + lock del PDF)

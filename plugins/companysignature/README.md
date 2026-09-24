@@ -27,7 +27,7 @@ Plugin propio de la **Plataforma GLPI Modular**.
 ## Hardening / integridad probatoria (§1–§7)
 | Pieza | Rol |
 |------|-----|
-| `Service/Materializer` | Única vía de creación de evidencia desde el **ledger** de `companyworkflow`. Idempotente por `workflow_history_id`; identidad por **`evidence_ref` explícita** (no infiere por fecha); `event_date` = fecha original del ledger; copia el **contexto histórico** del aprobador; invalidación **exacta** por referencia y **por checkpoint** (sólo anula lo decidido en visitas de estado iniciadas desde la última entrada al `reopen_to_code`; 0.5.0). |
+| `Service/Materializer` | Única vía de creación de evidencia desde el **ledger** de `companyworkflow`. Idempotente por `workflow_history_id`; identidad por **`evidence_ref` explícita** (no infiere por fecha); `event_date` = fecha original del ledger; copia el **contexto histórico** del aprobador; invalidación **exacta** por referencia y **por checkpoint** (sólo anula lo decidido en visitas de estado iniciadas desde la última entrada al `reopen_to_code`; si el ledger no se puede leer con certeza ⇒ `pending`, sin anular nada; 0.5.0). |
 | `Service/ReconcileService` + `Model/ReconcileTask` | Reconciliación DURABLE: **CronTask nativa** `reconcile` + cola propia (`UNIQUE(workflow_history_id)`, estados/reintentos/backoff) + high-watermark. Un pendiente no bloquea a los posteriores ni se pierde; sobrevive a reinicios. |
 | `Command/ReconcileCommand` | `plugins:companysignature:reconcile` (misma lógica harvest+worker, on-demand). |
 | Verificación fail-closed | Sin versión/snapshot/hash válido → nunca `valid`. Invalidación reflejada por referencia exacta (`references_evidences_id`). |

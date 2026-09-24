@@ -44,8 +44,9 @@ function plugin_init_companypurchasing() {
         Plugin::registerClass(\GlpiPlugin\Companypurchasing\Model\Quote::class, ['document_types' => true]);
     }
 
-    // P2D-2: proyección best-effort del estado del motor (companyworkflow es la AUTORIDAD; la
-    // reconciliación garantiza la convergencia si el listener se pierde).
+    // P2D-2: proyección best-effort del estado del motor (companyworkflow es la AUTORIDAD). Si el listener se
+    // pierde, converge la Acción automática NATIVA `reconcileprojection` (lotes con cursor + wrap-around; ver
+    // hook.php) o el comando `plugins:companypurchasing:reconcile`.
     $PLUGIN_HOOKS['companyworkflow:transitioned']['companypurchasing']         = 'plugin_companypurchasing_on_workflow_event';
     $PLUGIN_HOOKS['companyworkflow:approval_invalidated']['companypurchasing'] = 'plugin_companypurchasing_on_workflow_event';
 

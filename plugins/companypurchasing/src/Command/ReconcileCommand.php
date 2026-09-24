@@ -2,9 +2,10 @@
 
 /**
  * `plugins:companypurchasing:reconcile` — converge `requests.domain_state` (proyección) con la instancia
- * de `companyworkflow` (AUTORIDAD). Idempotente: una segunda ejecución no corrige nada. Re-enlaza una
- * instancia si una caída ocurrió entre `startInstance()` y el enlace local. No invalida aprobaciones (eso
- * exige una sesión con RIGHT_ACT; lo hace el orquestador antes de cada decisión).
+ * de `companyworkflow` (AUTORIDAD), por lotes con cursor y wrap-around (misma lógica que la Acción
+ * automática `reconcileprojection`). Idempotente. Re-enlaza una instancia si una caída ocurrió entre
+ * `startInstance()` y el enlace local. REPORTA (y sale con error) solicitudes enviadas sin instancia e
+ * integridad de aprobación pendiente: no las repara (exigen un actor con RIGHT_ACT).
  *
  * @license GPL-3.0-or-later
  */
@@ -37,11 +38,23 @@ final class ReconcileCommand extends Command
         }
         $r = (new ApprovalOrchestrator())->reconcileAll((int) $input->getOption('limit'));
         $output->writeln(sprintf(
-            '<info>reconcile: revisadas=%d corregidas=%d errores=%d</info>',
+            '<info>reconcile: revisadas=%d corregidas=%d sin_instancia=%d integridad_pendiente=%d errores=%d cursor=%d%s</info>',
             $r['checked'],
             $r['corrected'],
-            $r['errors']
+            count($r['orphans']),
+            count($r['dirty']),
+            $r['errors'],
+            $r['cursor'],
+            $r['wrapped'] ? ' (wrap-around)' : ''
         ));
-        return $r['errors'] > 0 ? Command::FAILURE : Command::SUCCESS;
+        // Anomalías que la reconciliación NO puede reparar sola (exigen un actor con RIGHT_ACT): se reportan y
+        // el comando falla para que no pasen inadvertidas (nunca "éxito silencioso").
+        if ($r['orphans'] !== []) {
+            $output->writeln('<error>solicitudes enviadas SIN instancia de workflow (reintentar submit): ' . implode(',', $r['orphans']) . '</error>');
+        }
+        if ($r['dirty'] !== []) {
+            $output->writeln('<error>solicitudes con integridad de aprobación PENDIENTE (reparar antes de decidir): ' . implode(',', $r['dirty']) . '</error>');
+        }
+        return ($r['errors'] > 0 || $r['orphans'] !== [] || $r['dirty'] !== []) ? Command::FAILURE : Command::SUCCESS;
     }
 }

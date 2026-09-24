@@ -37,18 +37,27 @@ motor y `domain_state` es sólo su **proyección** (el motor gana; `reconcile` c
 | `Service/DocumentVersionAllocator` + `Model/DocVersion`/`DocSequence` | `document_version` de dominio: monotónica por solicitud, concurrency-safe, no reutilizable; reutiliza la última del scope sólo si el contenido no cambió. |
 | `Service/QuoteManager` + `QuoteMath` + `Model/Quote`/`QuoteItem` | Cotizaciones (Supplier nativo; N adjuntos `Document_Item` nativos), precio final por línea (FK `items.id`), totales derivados exactos; selección con `requests.quotes_id_selected` como única fuente de verdad (lock + `lock_version`). |
 | `Service/WorkflowGateway` / `SignatureGateway` | Únicas puertas a `companyworkflow` / `companysignature` (APIs oficiales; lecturas por modelo). |
-| `Service/StateProjection` + `Command/ReconcileCommand` | Proyección de `domain_state`; listener best-effort + `plugins:companypurchasing:reconcile`. |
+| `Service/StateProjection` + `Command/ReconcileCommand` + `Model/ProjectionTask` | Proyección de `domain_state`; listener best-effort + **Acción automática nativa** `reconcileprojection` y comando `plugins:companypurchasing:reconcile` (lotes con cursor + wrap-around; reportan enviadas-sin-instancia e integridad pendiente). |
+| `Service/ApprovalPolicy` + `PolicyStore` + `Model/PolicyVersion` | Política de aprobación **pinneada por solicitud** (JSON canónico + hash, inmutable): etapa→scope, checkpoints, PDF, estados comerciales. Un cambio de configuración sólo afecta a solicitudes nuevas. |
+| `Service/IntegrityLedger` + `ReopenCapability` + `Model/IntegrityMark` | Marca **durable** de integridad escrita en la misma transacción que la mutación sustantiva; sólo se resuelve tras invalidación confirmada o verificación contra el ledger del motor. Las mutaciones que pueden exigir reabrir requieren `RIGHT_ACT` (+ `RIGHT_RECORD`). |
 | `Service/ReferenceValidator` | Validación AUTORITATIVA de maestros nativos PARA la entidad (extraída de P2D-1, misma semántica). |
 
 **Configuración (`plugin:companypurchasing`)**: `workflow_code`; `approver_group_{area_head,purchasing,finance}`
 (obligatorios para publicar); `quorum_*`; `sla_hours_*`; `stage_scopes` (etapa → scope);
 `scope_checkpoints` (scope → estado que reabre); `pdf_stages`; `quote_states`; `amend_states`;
-`sync_on_workflow_events`. Publicar: `ApprovalOrchestrator::publishDefinition()` (derecho `MANAGE_CONFIG`).
+`sync_on_workflow_events` (operacional); `reconcile_cursor` (estado de la reconciliación). Publicar:
+`ApprovalOrchestrator::publishDefinition()` (derecho `MANAGE_CONFIG`). Las reglas de política se **pinnean**
+por solicitud al enviarla.
+
+**Contrato de decisión:** `decide(requestId, action, expectedState, comment)` — `expectedState` es
+obligatoria; si la etapa ya cambió ⇒ `stage_changed` (sin nueva decisión). `integrityStatus()` /
+`isFullyApproved()` exigen APPROVED **y** ausencia de marcas/deriva (P2D-3 debe consultarlo antes de comprar).
 
 **Perfiles (mínimo privilegio; la autorización de cada decisión la da el motor: grupo + quórum):**
 solicitante `plugin_companypurchasing` (crear/ver propias/editar borrador) + `plugin_companyworkflow:READ`;
 aprobadores `plugin_companyworkflow:RIGHT_ACT` + `plugin_companysignature:RIGHT_RECORD`; Compras además
-`plugin_companypurchasing:MANAGE_PURCHASING`.
+`plugin_companypurchasing:MANAGE_PURCHASING` (y `RIGHT_ACT` + `RIGHT_RECORD` para aceptar cambios que exijan
+reabrir una aprobación).
 
 ## Regla 0
 Este plugin **no modifica el core de GLPI**. Solo usa hooks/API oficiales.

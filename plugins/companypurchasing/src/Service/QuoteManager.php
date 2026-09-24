@@ -12,8 +12,10 @@
  * - Dinero exacto (`Money`/`QuoteMath`); totales DERIVADOS. Moneda = la de la solicitud (v1).
  * - Toda mutación + su evento de auditoría confirman JUNTOS (transacción local, tablas propias).
  *
- * La re-evaluación de scopes aprobados (invalidación) tras una mutación comercial la hace
- * `ApprovalOrchestrator` (fachada), y además antes de CADA decisión (red de seguridad).
+ * Toda mutación que altera el contenido COMMERCIAL (selección / cotización seleccionada) exige que el
+ * perfil pueda reabrir aprobaciones (`ReopenCapability`) y escribe una marca DURABLE de integridad en su
+ * misma transacción; la invalidación la ejecuta `ApprovalOrchestrator` (fachada) y, si falla, la marca
+ * persiste y toda decisión posterior debe repararla antes (o fallar cerrado).
  *
  * @license GPL-3.0-or-later
  */
@@ -36,13 +38,17 @@ class QuoteManager
     private AdvisoryLock $lock;
     private ReferenceValidator $refs;
     private WorkflowGateway $wf;
+    private PolicyStore $policies;
+    private IntegrityLedger $integrity;
 
     public function __construct(?Audit $audit = null, ?AdvisoryLock $lock = null, ?ReferenceValidator $refs = null, ?WorkflowGateway $wf = null)
     {
-        $this->audit = $audit ?? new Audit();
-        $this->lock  = $lock ?? new AdvisoryLock();
-        $this->refs  = $refs ?? new ReferenceValidator();
-        $this->wf    = $wf ?? new WorkflowGateway();
+        $this->audit     = $audit ?? new Audit();
+        $this->lock      = $lock ?? new AdvisoryLock();
+        $this->refs      = $refs ?? new ReferenceValidator();
+        $this->wf        = $wf ?? new WorkflowGateway();
+        $this->policies  = new PolicyStore();
+        $this->integrity = new IntegrityLedger();
     }
 
     /**
@@ -127,6 +133,12 @@ class QuoteManager
             if ((int) $quote->fields['requests_id'] !== $requestId) {
                 throw new \RuntimeException('la cotización no pertenece a la solicitud (fail-closed)');
             }
+            // Cambiar la cotización SELECCIONADA altera COMMERCIAL_FINANCIAL_SCOPE: puede exigir reabrir una
+            // aprobación ⇒ el perfil debe poder hacerlo ANTES de aceptar el cambio.
+            $isSelected = (int) $req->fields['quotes_id_selected'] === $quoteId;
+            if ($isSelected) {
+                ReopenCapability::assert();
+            }
             $currency = (string) $req->fields['currency_code'];
             $overrides = PluginConfig::currencyScaleOverrides();
             $amounts = $this->amounts($in, $currency, $overrides, $quote);
@@ -156,12 +168,17 @@ class QuoteManager
                 $this->audit->record($requestId, PurchasingEvent::EV_QUOTE_UPDATED, (int) $req->fields['entities_id'], [
                     'quote_id' => $quoteId, 'lines' => array_keys($lines),
                 ], (string) $req->fields['correlation_id']);
+                if ($isSelected) {
+                    // Marca DURABLE en la MISMA transacción (sólo se limpia tras invalidación confirmada o
+                    // verificación contra el ledger del motor).
+                    $this->integrity->markDirty($req, [ScopeCatalog::SCOPE_COMMERCIAL_FINANCIAL], PurchasingEvent::EV_QUOTE_UPDATED, $this->lastState, $this->lastLock);
+                }
                 $DB->commit();
             } catch (\Throwable $e) {
                 $this->safeRollback($DB);
                 throw $e;
             }
-            return (int) $req->fields['quotes_id_selected'] === $quoteId;
+            return $isSelected;
         });
     }
 
@@ -193,6 +210,8 @@ class QuoteManager
             if ($previous === $quoteId) {
                 return false;
             }
+            // Cambiar la selección altera COMMERCIAL_FINANCIAL_SCOPE: el perfil debe poder reabrir.
+            ReopenCapability::assert();
             $DB->beginTransaction();
             try {
                 if (!$req->update([
@@ -206,6 +225,7 @@ class QuoteManager
                 $this->audit->record($requestId, PurchasingEvent::EV_QUOTE_SELECTED, (int) $req->fields['entities_id'], [
                     'from' => $previous, 'to' => $quoteId, 'suppliers_id' => (int) $quote->fields['suppliers_id'],
                 ], (string) $req->fields['correlation_id']);
+                $this->integrity->markDirty($req, [ScopeCatalog::SCOPE_COMMERCIAL_FINANCIAL], PurchasingEvent::EV_QUOTE_SELECTED, $this->lastState, $this->lastLock);
                 $DB->commit();
             } catch (\Throwable $e) {
                 $this->safeRollback($DB);
@@ -303,6 +323,9 @@ class QuoteManager
     /** @return array{quote_id:int, reference:string, suppliers_id:int, math:array<string,mixed>} */
     private function termsFor(Request $req, Quote $quote): array
     {
+        // Revalidación EN VIVO al construir el snapshot: el Supplier válido al seleccionar pudo moverse de
+        // rama después. Cadena viva de entidades (nunca caché del árbol). Fail-closed.
+        $this->refs->assertReferenceForEntity(\Supplier::class, (int) $quote->fields['suppliers_id'], (int) $req->fields['entities_id']);
         $currency = (string) $req->fields['currency_code'];
         if ((string) $quote->fields['currency_code'] !== $currency) {
             throw new \RuntimeException('la moneda de la cotización no coincide con la de la solicitud (fail-closed)');
@@ -443,12 +466,20 @@ class QuoteManager
             throw new \RuntimeException('sin acceso a la entidad');
         }
         $inst = $this->wf->loadInstance((int) $req->fields['workflow_instances_id']);
+        $state = $inst !== null ? $this->wf->stateCode($inst) : '';
+        // Estados permitidos según la política PINNEADA de la solicitud (no la configuración vigente).
         if ($inst === null || !$this->wf->isOpen($inst)
-            || !in_array($this->wf->stateCode($inst), PluginConfig::quoteStates(), true)) {
+            || !in_array($state, $this->policies->forRequest($req)->quoteStates(), true)) {
             throw new \RuntimeException('la solicitud no admite gestión de cotizaciones en su estado actual (fail-closed)');
         }
+        $this->lastState = $state;
+        $this->lastLock  = (int) $inst->fields['lock_version'];
         return $req;
     }
+
+    /** Estado y lock_version del motor leídos en la última carga comercial (para la marca de integridad). */
+    private string $lastState = '';
+    private int $lastLock = 0;
 
     private function loadQuote(int $quoteId): Quote
     {
