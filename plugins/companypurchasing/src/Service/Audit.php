@@ -53,6 +53,37 @@ class Audit
     }
 
     /**
+     * Registro IDEMPOTENTE por `idempotencyKey` (obligatoria): si el evento ya existe no se duplica ni se
+     * falla (reintentos de la saga P2D-2). Ante carrera con el UNIQUE, se re-verifica; cualquier otro fallo
+     * de persistencia LANZA (fail-closed). Devuelve true si lo registró ahora.
+     *
+     * @param array<string,mixed> $detail
+     */
+    public function recordOnce(int $requestsId, string $event, int $entitiesId, array $detail, string $correlationId, string $idempotencyKey): bool
+    {
+        if ($idempotencyKey === '') {
+            throw new \InvalidArgumentException('recordOnce exige idempotency_key');
+        }
+        if ($this->exists($idempotencyKey)) {
+            return false;
+        }
+        try {
+            $this->record($requestsId, $event, $entitiesId, $detail, $correlationId, $idempotencyKey);
+            return true;
+        } catch (\Throwable $e) {
+            if ($this->exists($idempotencyKey)) {
+                return false; // otro worker lo registró en paralelo: idempotente
+            }
+            throw $e;
+        }
+    }
+
+    public function exists(string $idempotencyKey): bool
+    {
+        return (new PurchasingEvent())->getFromDBByCrit(['idempotency_key' => substr($idempotencyKey, 0, 190)]);
+    }
+
+    /**
      * @param array<string,mixed> $detail
      * @return array<string,mixed>
      */

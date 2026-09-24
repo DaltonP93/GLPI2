@@ -155,6 +155,54 @@ ok('NullSigner provider = null', $ns->provider() === 'null' && $res->provider ==
 ok('NullSigner.verify siempre false', $ns->verify('payload', 'sig') === false);
 ok('firma certificada ≠ evidencia interna (sin firma)', $res->signature === '');
 
+echo "== Materializer::checkpointEntryId (invalidación exacta por checkpoint) ==\n";
+require_once $svc . 'Materializer.php'; // sólo el helper PURO (no toca BD/GLPI)
+$mat = 'GlpiPlugin\\Companysignature\\Service\\Materializer';
+// Ledger: start(DRAFT) → submit(A) → decisión jefe → approve(A→B) → decisión compras → invalidación(→B)
+$ledger = [
+    ['id' => 10, 'event' => 'started', 'from_code' => '', 'to_code' => 'DRAFT'],
+    ['id' => 11, 'event' => 'transitioned', 'from_code' => 'DRAFT', 'to_code' => 'A'],
+    ['id' => 12, 'event' => 'decision_recorded', 'from_code' => 'A', 'to_code' => 'A'],
+    ['id' => 13, 'event' => 'transitioned', 'from_code' => 'A', 'to_code' => 'B'],
+    ['id' => 14, 'event' => 'decision_recorded', 'from_code' => 'B', 'to_code' => 'B'],
+    ['id' => 15, 'event' => 'approval_invalidated', 'from_code' => 'B', 'to_code' => 'B'],
+];
+ok('reabrir a B ⇒ entrada = transición A→B (#13): la decisión del jefe (#12) NO se anula', $mat::checkpointEntryId($ledger, 15, 'B') === 13);
+ok('reabrir a A ⇒ entrada = submit (#11): se anulan #12 y #14', $mat::checkpointEntryId($ledger, 15, 'A') === 11);
+ok('reabrir al inicial ⇒ entrada = started (#10): se anulan todas (compatibilidad)', $mat::checkpointEntryId($ledger, 15, 'DRAFT') === 10);
+ok('checkpoint desconocido ⇒ 0 (conservador: anula todas)', $mat::checkpointEntryId($ledger, 15, 'ZZZ') === 0);
+ok('checkpoint vacío ⇒ 0', $mat::checkpointEntryId($ledger, 15, '') === 0);
+ok('sólo filas ANTERIORES a la invalidación cuentan', $mat::checkpointEntryId(array_merge($ledger, [
+    ['id' => 16, 'event' => 'transitioned', 'from_code' => 'A', 'to_code' => 'B'],
+]), 15, 'B') === 13);
+ok('una invalidación previa que reabrió a B cuenta como entrada', $mat::checkpointEntryId(array_merge($ledger, [
+    ['id' => 16, 'event' => 'decision_recorded', 'from_code' => 'B', 'to_code' => 'B'],
+    ['id' => 17, 'event' => 'approval_invalidated', 'from_code' => 'B', 'to_code' => 'B'],
+]), 17, 'B') === 15);
+
+echo "== Materializer::isVoidedByCheckpoint (por VISITA de estado; ambos órdenes del motor) ==\n";
+// Quórum: la decisión se registra ANTES de la transición que sale del estado.
+ok('quórum: reabrir a B NO anula la decisión tomada en A (#12)', $mat::isVoidedByCheckpoint($ledger, 12, 13) === false);
+ok('quórum: reabrir a B anula la decisión tomada en B (#14)', $mat::isVoidedByCheckpoint($ledger, 14, 13) === true);
+ok('quórum: reabrir a A anula ambas', $mat::isVoidedByCheckpoint($ledger, 12, 11) && $mat::isVoidedByCheckpoint($ledger, 14, 11));
+// Actor único: el motor registra la decisión DESPUÉS de la fila `transitioned` que sale del estado.
+$single = [
+    ['id' => 10, 'event' => 'started', 'from_code' => '', 'to_code' => 'DRAFT'],
+    ['id' => 11, 'event' => 'transitioned', 'from_code' => 'DRAFT', 'to_code' => 'S1'],
+    ['id' => 12, 'event' => 'transitioned', 'from_code' => 'S1', 'to_code' => 'S2'],
+    ['id' => 13, 'event' => 'decision_recorded', 'from_code' => 'S1', 'to_code' => 'S2'],
+    ['id' => 14, 'event' => 'transitioned', 'from_code' => 'S2', 'to_code' => 'OK'],
+    ['id' => 15, 'event' => 'decision_recorded', 'from_code' => 'S2', 'to_code' => 'OK'],
+    ['id' => 16, 'event' => 'approval_invalidated', 'from_code' => 'OK', 'to_code' => 'S2'],
+];
+$entryS2 = $mat::checkpointEntryId($single, 16, 'S2');
+ok('actor único: entrada a S2 = #12', $entryS2 === 12);
+ok('actor único: visita de la decisión #13 (en S1) comenzó en #11', $mat::visitStartOf($single, 13) === 11);
+ok('actor único: reabrir a S2 NO anula la decisión de S1 aunque su id (#13) sea posterior a la entrada', $mat::isVoidedByCheckpoint($single, 13, $entryS2) === false);
+ok('actor único: reabrir a S2 anula la decisión de S2 (#15)', $mat::isVoidedByCheckpoint($single, 15, $entryS2) === true);
+ok('conservador: sin entrada localizable (0) ⇒ anula', $mat::isVoidedByCheckpoint($single, 13, 0) === true);
+ok('conservador: decisión fuera del ledger ⇒ anula', $mat::isVoidedByCheckpoint($single, 999, $entryS2) === true);
+
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"
     : "\033[32mUNIT OK: {$total}/{$total}\033[0m") . "\n";

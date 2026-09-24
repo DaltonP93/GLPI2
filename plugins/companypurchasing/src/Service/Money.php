@@ -109,6 +109,23 @@ final class Money
         return new self(Decimal::addStr($this->micro, $other->micro), $this->currency, $this->scale);
     }
 
+    /**
+     * Resta exacta. FAIL-CLOSED: lanza si el resultado fuera negativo (p. ej. un descuento mayor que el
+     * subtotal): un total comercial negativo nunca se produce en silencio.
+     */
+    public function minus(self $other): self
+    {
+        $this->assertSameCurrency($other);
+        return new self(Decimal::subStr($this->micro, $other->micro), $this->currency, $this->scale);
+    }
+
+    /** -1 / 0 / 1 (misma moneda). */
+    public function compare(self $other): int
+    {
+        $this->assertSameCurrency($other);
+        return Decimal::cmpStr($this->micro, $other->micro);
+    }
+
     /** Multiplica por una cantidad ENTERA no negativa (p. ej. precio unitario × unidades). */
     public function timesInt(int $n): self
     {

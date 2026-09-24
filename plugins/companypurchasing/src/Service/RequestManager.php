@@ -12,9 +12,10 @@
  * BEGIN {mutar → recomputar total → audit} COMMIT → liberar. Esto impide "edito un DRAFT que otro worker
  * ya envió", los totales stale por mutaciones simultáneas de líneas, y solicitudes/líneas huérfanas.
  *
- * NO integra `companyworkflow` (P2D-2): el `domain_state` es un snapshot/cache local; DRAFT es el
- * estado inicial y `submitDraft()` es el evento local "abandona DRAFT". La AUTORIDAD de estados será
- * `companyworkflow`.
+ * P2D-2: la AUTORIDAD de estados es `companyworkflow` (ver `ApprovalOrchestrator`); `domain_state` es una
+ * proyección/cache. `submitDraft()` sigue siendo el paso local "abandona DRAFT" (número + scopes
+ * pinneados) que el orquestador ejecuta antes de iniciar/avanzar la instancia del motor. Con instancia
+ * enlazada, la editabilidad la decide el MOTOR (`is_editable`: DRAFT/RETURNED).
  *
  * @license GPL-3.0-or-later
  */
@@ -33,12 +34,14 @@ final class RequestManager
     private NumberingService $numbering;
     private Audit $audit;
     private AdvisoryLock $lock;
+    private WorkflowGateway $workflow;
 
-    public function __construct(?NumberingService $numbering = null, ?Audit $audit = null, ?AdvisoryLock $lock = null)
+    public function __construct(?NumberingService $numbering = null, ?Audit $audit = null, ?AdvisoryLock $lock = null, ?WorkflowGateway $workflow = null)
     {
         $this->numbering = $numbering ?? new NumberingService();
         $this->audit     = $audit ?? new Audit();
         $this->lock      = $lock ?? new AdvisoryLock();
+        $this->workflow  = $workflow ?? new WorkflowGateway();
     }
 
     // ---------------------------------------------------------------- CREATE
@@ -502,18 +505,7 @@ final class RequestManager
      */
     private function withRequestLock(int $reqId, \Closure $fn): mixed
     {
-        if ($reqId <= 0) {
-            throw new \RuntimeException('solicitud inválida');
-        }
-        $name = AdvisoryLock::name('request_' . $reqId);
-        if (!$this->lock->acquire($name, 10)) {
-            throw new \RuntimeException('no se pudo obtener el lock de la solicitud (reintente)');
-        }
-        try {
-            return $fn();
-        } finally {
-            $this->lock->release($name);
-        }
+        return $this->lock->withRequestLock($reqId, $fn);
     }
 
     private function lineRequestId(int $lineId): int
@@ -536,10 +528,90 @@ final class RequestManager
         if (!$this->canView($req)) {
             throw new \RuntimeException('sin permiso sobre la solicitud');
         }
-        if (!$req->isDraft()) {
+        if (!$this->isEditable($req)) {
             throw new \RuntimeException('la solicitud no es un borrador editable');
         }
         return $req;
+    }
+
+    /**
+     * Editabilidad AUTORITATIVA (P2D-2): con instancia de workflow enlazada decide el MOTOR (`is_editable`
+     * del estado actual: DRAFT/RETURNED); sin instancia, sólo el DRAFT local de P2D-1. Fail-closed: si hay
+     * instancia pero el motor no está disponible o no la encuentra ⇒ NO editable.
+     */
+    private function isEditable(Request $req): bool
+    {
+        $instId = (int) ($req->fields['workflow_instances_id'] ?? 0);
+        if ($instId <= 0) {
+            return $req->isDraft();
+        }
+        $inst = $this->workflow->loadInstance($instId);
+        return $inst !== null && $this->workflow->isEditable($inst);
+    }
+
+    // ---------------------------------------------------------------- P2D-2: enmienda post-aprobación
+
+    /**
+     * Enmienda de CANTIDAD por Compras DESPUÉS de la aprobación del jefe (estados `amend_states`). Sólo
+     * la mutación local ATÓMICA (línea + total estimado + evento `LINE_AMENDED`); la invalidación del
+     * scope afectado la hace el orquestador (`ApprovalOrchestrator::amendLineQuantity`) y, como red de
+     * seguridad, se re-evalúa antes de CADA decisión (nunca se aprueba sobre una aprobación obsoleta).
+     *
+     * @return array{requests_id:int, from:int, to:int}
+     */
+    public function amendLineQuantity(int $lineId, mixed $quantity): array
+    {
+        $reqId = $this->lineRequestId($lineId);
+        return $this->withRequestLock($reqId, function () use ($reqId, $lineId, $quantity): array {
+            /** @var \DBmysql $DB */
+            global $DB;
+
+            $req = new Request();
+            if (!$req->getFromDB($reqId)) {
+                throw new \RuntimeException('solicitud inexistente');
+            }
+            $this->assertRight(Request::RIGHT_MANAGE_PURCHASING);
+            $this->assertEntity((int) $req->fields['entities_id']);
+            $inst = $this->workflow->loadInstance((int) $req->fields['workflow_instances_id']);
+            if ($inst === null || !$this->workflow->isOpen($inst)
+                || !in_array($this->workflow->stateCode($inst), PluginConfig::amendStates(), true)) {
+                throw new \RuntimeException('la solicitud no admite enmiendas en su estado actual (fail-closed)');
+            }
+            $item = new RequestItem();
+            if (!$item->getFromDB($lineId) || (int) $item->fields['requests_id'] !== $reqId) {
+                throw new \RuntimeException('línea inexistente');
+            }
+            $isInv = (int) $item->fields['is_inventoriable'] === 1;
+            $qty = $this->validateQuantity($quantity, $isInv);
+            $from = (int) $item->fields['quantity'];
+            if ($qty === $from) {
+                return ['requests_id' => $reqId, 'from' => $from, 'to' => $qty];
+            }
+            $currency = (string) $req->fields['currency_code'];
+            $overrides = PluginConfig::currencyScaleOverrides();
+            $lineTotal = Money::ofStored((string) $item->fields['estimated_unit_price'], $currency, $overrides)->timesInt($qty);
+
+            $DB->beginTransaction();
+            try {
+                if (!$item->update([
+                    'id'                   => $lineId,
+                    'quantity'             => $qty,
+                    'estimated_line_total' => $lineTotal->amount(),
+                    'date_mod'             => $_SESSION['glpi_currenttime'] ?? date('Y-m-d H:i:s'),
+                ])) {
+                    throw new \RuntimeException('no se pudo enmendar la línea');
+                }
+                $this->recomputeEstimated($req);
+                $this->audit->record($reqId, PurchasingEvent::EV_LINE_AMENDED, (int) $req->fields['entities_id'], [
+                    'line_id' => $lineId, 'field' => 'quantity', 'from' => $from, 'to' => $qty,
+                ], (string) $req->fields['correlation_id']);
+                $DB->commit();
+            } catch (\Throwable $e) {
+                $this->safeRollback($DB);
+                throw $e;
+            }
+            return ['requests_id' => $reqId, 'from' => $from, 'to' => $qty];
+        });
     }
 
     /** @param array<string,mixed> $fields */
@@ -625,118 +697,24 @@ final class RequestManager
     }
 
     /**
-     * Valida una referencia a un maestro NATIVO de GLPI (Group/Supplier/Budget) contra la entidad de la
-     * SOLICITUD (no contra la sesión):
-     *   - `0` = sin referencia (OK).
-     *   - `>0` debe EXISTIR y ser APLICABLE a la entidad de la solicitud según la semántica NATIVA de
-     *     entidades/recursividad de GLPI (misma entidad, o entidad ANCESTRO con `is_recursive`).
-     *
-     * No alcanza con `Session::haveAccessToEntity($refEntity)`: un usuario con acceso simultáneo a A y B
-     * NO debe poder adjuntar a una solicitud de A un objeto exclusivo de la rama B. No se duplican
-     * maestros ni se consulta el core por SQL directo saltando sus reglas.
+     * Valida una referencia a un maestro NATIVO (Group/Supplier/Budget) PARA la entidad de la solicitud.
+     * Lógica AUTORITATIVA compartida en `ReferenceValidator` (cadena viva `entities_id`, nunca la caché
+     * del árbol; fail-closed).
      */
     private function assertReferenceForEntity(string $itemtype, int $id, int $requestEntityId): void
     {
-        if ($id <= 0) {
-            return;
-        }
-        if (!class_exists($itemtype)) {
-            throw new \RuntimeException("tipo de referencia inválido: {$itemtype}");
-        }
-        /** @var \CommonDBTM $obj */
-        $obj = new $itemtype();
-        if (!$obj->getFromDB($id)) {
-            throw new \InvalidArgumentException("referencia inexistente: {$itemtype}#{$id}");
-        }
-        // Un maestro sin dimensión de entidad (no esperado para Group/Supplier/Budget) no se restringe.
-        if (!isset($obj->fields['entities_id'])) {
-            return;
-        }
-        $refEntity    = (int) $obj->fields['entities_id'];
-        $refRecursive = (bool) ($obj->fields['is_recursive'] ?? false);
-        if (!self::isEntityApplicable($refEntity, $refRecursive, $requestEntityId)) {
-            throw new \RuntimeException("referencia no aplicable a la entidad de la solicitud: {$itemtype}#{$id}");
-        }
-    }
-
-    /** Profundidad máxima del árbol de entidades al resolver aplicabilidad (guarda dura). */
-    private const ENTITY_TREE_MAX_DEPTH = 1000;
-
-    /**
-     * ¿Un objeto en la entidad `$refEntity` (con recursividad `$refRecursive`) es APLICABLE a la entidad
-     * `$requestEntity`, según la relación AUTORITATIVA de entidades/recursividad de GLPI?
-     *   - misma entidad → siempre aplicable;
-     *   - recursivo → aplicable si `$refEntity` es la RAÍZ (0) o un ANCESTRO ACTUAL de `$requestEntity`
-     *     (la recursividad se hereda hacia abajo);
-     *   - de otra RAMA (ni misma entidad ni ancestro recursivo actual) → NO aplicable.
-     *
-     * FUENTE DE VERDAD: se recorre la cadena de padres (`entities_id`) de la SOLICITUD con el modelo nativo
-     * `Entity` (`getFromDB`), que lee el valor ACTUAL de la columna `entities_id`. Se decide de forma
-     * AUTORITATIVA, sin usar NUNCA la caché del árbol de GLPI (`getSonsOf()`/`getAncestorsOf()`): en GLPI 11
-     * ambas usan `$GLPI_CACHE` y las columnas `ancestors_cache`/`sons_cache`, que pueden quedar
-     * DESACTUALIZADAS tras mover una entidad entre ramas. Una caché stale podría autorizar una referencia
-     * cross-branch que ya NO existe (FAIL-OPEN); por eso la autorización se resuelve sólo por la cadena viva.
-     *
-     * No es SQL directo al core (usa el modelo soportado). FAIL-CLOSED ante ciclo, profundidad excesiva,
-     * `entities_id` inválido o entidad inexistente. `visited` evita bucles.
-     */
-    private static function isEntityApplicable(int $refEntity, bool $refRecursive, int $requestEntity): bool
-    {
-        // Resolver de padre ACTUAL vía modelo nativo `Entity` (lee la columna `entities_id` viva, NO la
-        // caché del árbol). Devuelve null ⇒ entidad inexistente o sin dimensión de árbol ⇒ fail-closed.
-        $parentOf = static function (int $id): ?int {
-            $ent = new \Entity();
-            if (!$ent->getFromDB($id)) {
-                return null;
-            }
-            if (!array_key_exists('entities_id', $ent->fields)) {
-                return null;
-            }
-            return (int) $ent->fields['entities_id'];
-        };
-        return self::isEntityApplicableInChain($refEntity, $refRecursive, $requestEntity, $parentOf);
+        (new ReferenceValidator())->assertReferenceForEntity($itemtype, $id, $requestEntityId);
     }
 
     /**
-     * Núcleo PURO y AUTORITATIVO de la aplicabilidad de entidad: dado `$parentOf` que devuelve el padre
-     * ACTUAL de una entidad (o `null` si no existe / es inconsistente), decide si `$refEntity` (recursivo)
-     * es la raíz o un ANCESTRO ACTUAL de `$requestEntity`. La fuente de verdad es `$parentOf` (la cadena
-     * viva `entities_id`), JAMÁS una caché de árbol que pueda quedar stale tras mover una entidad. Recorrido
-     * fail-closed: `visited` corta ciclos, `ENTITY_TREE_MAX_DEPTH` acota, y `null`/entidad inválida rechaza.
-     * Es `public static` sólo para poder verificarlo de forma DETERMINISTA (unit tests) contra cadenas de
-     * padres controladas —incluida una "movida" a otra rama— sin depender del árbol real de GLPI.
+     * Núcleo PURO de aplicabilidad de entidad (ver `ReferenceValidator::isEntityApplicableInChain`). Se
+     * conserva aquí como wrapper estable (API pública de P2D-1 y de sus unit tests).
      *
      * @param callable(int):?int $parentOf
      */
     public static function isEntityApplicableInChain(int $refEntity, bool $refRecursive, int $requestEntity, callable $parentOf): bool
     {
-        if ($refEntity === $requestEntity) {
-            return true; // misma entidad: siempre aplicable
-        }
-        if (!$refRecursive) {
-            return false; // no recursivo: sólo su propia entidad
-        }
-        $visited = [];
-        $current = $requestEntity;
-        for ($depth = 0; $depth < self::ENTITY_TREE_MAX_DEPTH; $depth++) {
-            if ($current < 0 || isset($visited[$current])) {
-                return false; // entidad inválida o ciclo → fail-closed
-            }
-            $visited[$current] = true;
-            $parent = $parentOf($current);
-            if ($parent === null) {
-                return false; // entidad inexistente / sin dimensión de árbol → fail-closed
-            }
-            $parent = (int) $parent;
-            if ($parent === $refEntity) {
-                return true; // `$refEntity` es ancestro ACTUAL (o la raíz 0) de la solicitud: aplica
-            }
-            if ($parent < 0 || $parent === $current) {
-                return false; // raíz auto-referencial / sin padre válido: refEntity no está en la cadena
-            }
-            $current = $parent;
-        }
-        return false; // profundidad máxima sin encontrar `$refEntity` → fail-closed
+        return ReferenceValidator::isEntityApplicableInChain($refEntity, $refRecursive, $requestEntity, $parentOf);
     }
 
     private function safeRollback(\DBmysql $DB): void

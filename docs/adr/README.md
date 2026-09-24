@@ -36,5 +36,6 @@ las cosas son como son.
 | [0015](ADR-0015-snipeit-integration.md) | Integración con Snipe-IT (gestión física de activos, API-only) | Aceptado (diseño) |
 | [0016](ADR-0016-timezone-init-verification.md) | Inicialización y verificación de timezones (separar configuración de verificación) | Aceptado |
 | [0017](ADR-0017-glpi-security-key-hardening.md) | Pre-provisión de `glpicrypt.key` (workaround del bug `kernel.secret` de GLPI 11) | Aceptado |
+| [0018](ADR-0018-companypurchasing-approvals.md) | `companypurchasing` P2D-2 — circuito de aprobación sobre workflow + firma | Propuesto |
 
 > Plantilla para nuevos ADR: [`adr-template.md`](adr-template.md).

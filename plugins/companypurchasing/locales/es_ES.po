@@ -59,3 +59,23 @@ msgstr "Registrar entrega"
 
 msgid "View purchasing metrics"
 msgstr "Ver métricas de compras"
+
+msgid "Quote"
+msgid_plural "Quotes"
+msgstr[0] "Cotización"
+msgstr[1] "Cotizaciones"
+
+msgid "Quote line"
+msgid_plural "Quote lines"
+msgstr[0] "Línea de cotización"
+msgstr[1] "Líneas de cotización"
+
+msgid "Document version"
+msgid_plural "Document versions"
+msgstr[0] "Versión documental"
+msgstr[1] "Versiones documentales"
+
+msgid "Document version sequence"
+msgid_plural "Document version sequences"
+msgstr[0] "Secuencia de versiones documentales"
+msgstr[1] "Secuencias de versiones documentales"

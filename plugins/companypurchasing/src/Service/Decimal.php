@@ -140,4 +140,58 @@ final class Decimal
         $res = ltrim($res, '0');
         return $res === '' ? '0' : $res;
     }
+
+    /** Compara dos strings de enteros no negativos: -1 si a<b, 0 si iguales, 1 si a>b. */
+    public static function cmpStr(string $a, string $b): int
+    {
+        $a = ltrim($a, '0');
+        $b = ltrim($b, '0');
+        if ($a === '') {
+            $a = '0';
+        }
+        if ($b === '') {
+            $b = '0';
+        }
+        if (strlen($a) !== strlen($b)) {
+            return strlen($a) < strlen($b) ? -1 : 1;
+        }
+        return $a <=> $b; // misma longitud y sólo dígitos ⇒ orden lexicográfico = orden numérico
+    }
+
+    /**
+     * Resta `a - b` de strings de enteros no negativos (schoolbook). FAIL-CLOSED: si `b > a` lanza
+     * (un importe monetario del dominio nunca queda negativo en silencio).
+     */
+    public static function subStr(string $a, string $b): string
+    {
+        if (self::cmpStr($a, $b) < 0) {
+            throw new \RuntimeException('resta con resultado negativo (fail-closed)');
+        }
+        $a = ltrim($a, '0');
+        $b = ltrim($b, '0');
+        if ($a === '') {
+            $a = '0';
+        }
+        if ($b === '') {
+            $b = '0';
+        }
+        $i = strlen($a) - 1;
+        $j = strlen($b) - 1;
+        $borrow = 0;
+        $res = '';
+        while ($i >= 0) {
+            $d = ((int) $a[$i]) - $borrow - ($j >= 0 ? (int) $b[$j] : 0);
+            if ($d < 0) {
+                $d += 10;
+                $borrow = 1;
+            } else {
+                $borrow = 0;
+            }
+            $res = ((string) $d) . $res;
+            $i--;
+            $j--;
+        }
+        $res = ltrim($res, '0');
+        return $res === '' ? '0' : $res;
+    }
 }

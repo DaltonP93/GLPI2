@@ -17,6 +17,7 @@
  *   [DELEGATION]  §5: delegado → delegated_from histórico conservado aunque cambie el grupo.
  *   [QUEUE]       §3: cron/queue durable; pendiente no bloquea a posteriores; idempotente; restart.
  *   [INVALIDATE]  §4: idempotency_key obligatoria; actor DURABLE reconstruido; exacta A/B.
+ *   [INVALIDATE-CHECKPOINT] reabrir S2 anula sólo lo decidido desde la entrada a S2 (S1 sigue válida).
  *
  * @license GPL-3.0-or-later
  */
@@ -110,6 +111,7 @@ final class SelftestCommand extends Command
         $this->scenarioDelegationContext();
         $this->scenarioQueueDurable();
         $this->scenarioInvalidation();
+        $this->scenarioInvalidationCheckpoint();
         $this->scenarioMaterializerFailClosed();
         $this->scenarioPdfLockFailClosed();
         $this->scenarioNoStarvation();
@@ -582,6 +584,57 @@ final class SelftestCommand extends Command
         $this->check('[INVALIDATE] v2 valid; v1 invalidated (exacta)', $eV2 !== null && (int) $eV2->getID() !== (int) ($e1?->getID() ?? 0)
             && $this->verifyAs($this->uReq, $this->entityA, (string) $eV2->fields['verification_token']) === VerificationService::STATUS_VALID
             && $this->verifyAs($this->uReq, $this->entityA, (string) $e1->fields['verification_token']) === VerificationService::STATUS_INVALIDATED);
+    }
+
+    // ------------------------------------------------------------------ [INVALIDATE-CHECKPOINT]
+
+    /**
+     * Invalidación EXACTA POR CHECKPOINT: reabrir la etapa 2 anula sólo lo decidido desde la última entrada
+     * en esa etapa; la aprobación de la etapa 1 (otro contenido/scope) sigue VÁLIDA.
+     */
+    private function scenarioInvalidationCheckpoint(): void
+    {
+        $this->out->writeln('== [INVALIDATE-CHECKPOINT] reabrir S2 no anula la aprobación de S1 ==');
+        $this->setListen(false);
+        $api = new WorkflowApi();
+        $sig = new SignatureApi();
+        $c = $this->makeComputer();
+        $this->applySession(2, [0, $this->entityA], ['plugin_companyworkflow' => ALLSTANDARDRIGHT, 'computer' => ALLSTANDARDRIGHT], 1);
+        $def = $api->builder()->createVersion([
+            'code' => 'sig_cp_' . $this->suffix, 'name' => 'two-stage', 'itemtype_target' => 'Computer', 'entities_id' => 0, 'is_recursive' => 1,
+            'states' => [
+                ['code' => 'DRAFT', 'kind' => StateDef::KIND_INITIAL, 'is_editable' => 1],
+                ['code' => 'S1', 'kind' => StateDef::KIND_INTERMEDIATE],
+                ['code' => 'S2', 'kind' => StateDef::KIND_INTERMEDIATE],
+                ['code' => 'OK', 'kind' => StateDef::KIND_INTERMEDIATE],
+            ],
+            'transitions' => [
+                ['from' => 'DRAFT', 'to' => 'S1', 'action' => 'submit'],
+                ['from' => 'S1', 'to' => 'S2', 'action' => 'approve', 'required_right' => WorkflowDef::RIGHT_ACT],
+                ['from' => 'S2', 'to' => 'OK', 'action' => 'approve', 'required_right' => WorkflowDef::RIGHT_ACT],
+            ],
+        ]);
+        $inst = $this->startSubmit($api, $def, $c);
+        if ($inst === null) {
+            $this->check('[INVALIDATE-CHECKPOINT] instancia', false);
+            return;
+        }
+        $dv1 = $this->recordVersion($sig, $c, 1, 'S1');
+        $this->approve($api, $inst, $this->uA1, $dv1, 'S1 ok');
+        $inst->getFromDB((int) $inst->getID());
+        $dv2 = $this->recordVersion($sig, $c, 2, 'S2');
+        $this->approve($api, $inst, $this->uA2, $dv2, 'S2 ok');
+        $this->reconcile();
+        $eS1 = $this->latestBy(['subject_itemtype' => 'Computer', 'subject_items_id' => $c, 'event_type' => ApprovalEvidence::EVENT_DECISION, 'decision' => ApprovalEvidence::DECISION_APPROVED, 'actor_users_id' => $this->uA1]);
+        $eS2 = $this->latestBy(['subject_itemtype' => 'Computer', 'subject_items_id' => $c, 'event_type' => ApprovalEvidence::EVENT_DECISION, 'decision' => ApprovalEvidence::DECISION_APPROVED, 'actor_users_id' => $this->uA2]);
+        $this->check('[INVALIDATE-CHECKPOINT] evidencias S1 y S2 materializadas', $eS1 !== null && $eS2 !== null);
+
+        $this->applySession($this->uReq, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $r = $api->invalidateApprovals((int) $inst->getID(), 'cambio etapa 2', ['idempotency_key' => 'kCP-' . $this->suffix, 'reopen_to_code' => 'S2', 'document_version' => 2]);
+        $this->check('[INVALIDATE-CHECKPOINT] invalidación reabre S2', $r->success && ($r->data['to'] ?? '') === 'S2');
+        $this->reconcile();
+        $this->check('[INVALIDATE-CHECKPOINT] S1 (antes de entrar a S2) sigue VALID', $eS1 !== null && $this->verifyAs($this->uReq, $this->entityA, (string) $eS1->fields['verification_token']) === VerificationService::STATUS_VALID);
+        $this->check('[INVALIDATE-CHECKPOINT] S2 (desde la entrada a S2) queda INVALIDATED', $eS2 !== null && $this->verifyAs($this->uReq, $this->entityA, (string) $eS2->fields['verification_token']) === VerificationService::STATUS_INVALIDATED);
     }
 
     // ------------------------------------------------------------------ [MAT-FAILCLOSED] §3

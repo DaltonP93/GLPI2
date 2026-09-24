@@ -14,7 +14,7 @@
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYSIGNATURE_VERSION', '0.4.0');
+define('PLUGIN_COMPANYSIGNATURE_VERSION', '0.5.0');
 
 // Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
 // max='12.0' => GLPI 11.x soportado; 12.x NO hasta pasar la suite de regresion.

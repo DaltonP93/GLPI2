@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Tests UNITARIOS puros de companypurchasing (sin bootstrap de GLPI) — P2D-1.
+ * Tests UNITARIOS puros de companypurchasing (sin bootstrap de GLPI) — P2D-1 + P2D-2.
  *
  * Ejercitan la lógica que NO depende del core: dinero EXACTO (sin float; PYG sin decimales),
  * determinismo del snapshot de scope, invariante "comercial no contamina REQUEST_SCOPE", formato de
@@ -23,9 +23,18 @@ require $svc . 'NumberingService.php';
 require $svc . 'QuantityPolicy.php';
 // RequestManager sólo se CARGA (no se instancia): permite verificar de forma pura y determinista el núcleo
 // autoritativo `isEntityApplicableInChain()` sin bootstrap de GLPI (las dependencias GLPI son sólo `use`).
+require $svc . 'ReferenceValidator.php';
 require $svc . 'RequestManager.php';
+// P2D-2 (lógica PURA; los archivos sólo se CARGAN, sin bootstrap de GLPI).
+require $svc . 'QuoteMath.php';
+require $svc . 'PurchasingWorkflow.php';
+require $svc . 'DocumentVersionAllocator.php';
 
 use GlpiPlugin\Companypurchasing\Service\CurrencyPolicy;
+use GlpiPlugin\Companypurchasing\Service\Decimal;
+use GlpiPlugin\Companypurchasing\Service\DocumentVersionAllocator;
+use GlpiPlugin\Companypurchasing\Service\PurchasingWorkflow;
+use GlpiPlugin\Companypurchasing\Service\QuoteMath;
 use GlpiPlugin\Companypurchasing\Service\Money;
 use GlpiPlugin\Companypurchasing\Service\NumberingService;
 use GlpiPlugin\Companypurchasing\Service\QuantityPolicy;
@@ -153,6 +162,141 @@ $ascending = static fn(int $id): ?int => $id + 1; // cadena infinita ascendente 
 ok('profundidad excesiva → fail-closed (NO aplicable)', RequestManager::isEntityApplicableInChain(5, true, 100, $ascending) === false);
 $missing = static fn(int $id): ?int => null; // entidad inexistente
 ok('entidad inexistente en la cadena → fail-closed (NO aplicable)', RequestManager::isEntityApplicableInChain(10, true, 30, $missing) === false);
+
+
+// ============================================================================ P2D-2
+echo "== P2D-2 · Decimal/Money: resta y comparación EXACTAS (fail-closed si negativo) ==\n";
+ok('cmpStr 10 < 9? no (10 > 9)', Decimal::cmpStr('10', '9') === 1 && Decimal::cmpStr('9', '10') === -1 && Decimal::cmpStr('007', '7') === 0);
+ok('subStr 1000000 - 1 = 999999 (préstamos)', Decimal::subStr('1000000', '1') === '999999');
+ok('subStr a - a = 0', Decimal::subStr('123456789012345678', '123456789012345678') === '0');
+ok('subStr negativo → lanza (fail-closed)', throws(fn () => Decimal::subStr('5', '6')));
+ok('Money minus PYG 5100 - 300 = 4800', Money::of('5100', 'PYG')->minus(Money::of('300', 'PYG'))->amount() === '4800');
+ok('Money minus USD 10.05 - 0.10 = 9.95', Money::of('10.05', 'USD')->minus(Money::of('0.10', 'USD'))->amount() === '9.95');
+ok('Money minus con resultado negativo → lanza', throws(fn () => Money::of('1', 'PYG')->minus(Money::of('2', 'PYG'))));
+ok('Money minus entre monedas distintas → lanza', throws(fn () => Money::of('1', 'PYG')->minus(Money::of('1', 'USD'))));
+ok('Money compare', Money::of('2', 'PYG')->compare(Money::of('10', 'PYG')) === -1);
+
+echo "== P2D-2 · QuoteMath (términos comerciales exactos, derivados) ==\n";
+$qm = QuoteMath::compute([
+    ['line_id' => 11, 'quantity' => 2, 'final_unit_price' => '1400'],
+    ['line_id' => 12, 'quantity' => 1, 'final_unit_price' => '2300'],
+], '300', '550', '100', 'PYG');
+ok('subtotal = 2×1400 + 1×2300 = 5100', $qm['subtotal'] === '5100');
+ok('total = 5100 + 550 + 100 − 300 = 5450 (string exacto)', $qm['total'] === '5450' && is_string($qm['total']));
+ok('line_total derivado por línea + orden conservado', $qm['lines'][0] === ['line_id' => 11, 'quantity' => '2', 'final_unit_price' => '1400', 'line_total' => '2800'] && $qm['lines'][1]['line_id'] === 12);
+ok('PYG con decimales → rechazado', throws(fn () => QuoteMath::compute([['line_id' => 1, 'quantity' => 1, 'final_unit_price' => '10.5']], '0', '0', '0', 'PYG')));
+ok('descuento > subtotal+impuestos+flete → rechazado (total negativo)', throws(fn () => QuoteMath::compute([['line_id' => 1, 'quantity' => 1, 'final_unit_price' => '100']], '201', '50', '50', 'PYG')));
+ok('descuento = subtotal+impuestos+flete → total 0 (no negativo)', QuoteMath::compute([['line_id' => 1, 'quantity' => 1, 'final_unit_price' => '100']], '200', '50', '50', 'PYG')['total'] === '0');
+ok('sin líneas → rechazado', throws(fn () => QuoteMath::compute([], '0', '0', '0', 'PYG')));
+ok('cantidad < 1 → rechazada', throws(fn () => QuoteMath::compute([['line_id' => 1, 'quantity' => 0, 'final_unit_price' => '1']], '0', '0', '0', 'PYG')));
+ok('USD escala 2 exacta: 3 × 19.99 = 59.97', QuoteMath::compute([['line_id' => 1, 'quantity' => 3, 'final_unit_price' => '19.99']], '0', '0', '0', 'USD')['total'] === '59.97');
+ok('cobertura completa OK', !throws(fn () => QuoteMath::assertCoverage([11, 12], [12, 11])));
+ok('cobertura: falta una línea → rechazado', throws(fn () => QuoteMath::assertCoverage([11, 12], [11])));
+ok('cobertura: línea ajena → rechazado', throws(fn () => QuoteMath::assertCoverage([11], [11, 99])));
+ok('cobertura: línea repetida → rechazado', throws(fn () => QuoteMath::assertCoverage([11], [11, 11])));
+
+echo "== P2D-2 · DocumentVersionAllocator::payloadHash (reuso sólo si el contenido NO cambió) ==\n";
+$semA = ['schema' => 's', 'subject_id' => 7, 'payload' => ['b' => '2', 'a' => '1', 'lines' => [['q' => '1'], ['q' => '2']]]];
+$semB = ['payload' => ['lines' => [['q' => '1'], ['q' => '2']], 'a' => '1', 'b' => '2'], 'subject_id' => 7, 'schema' => 's'];
+ok('orden de claves de objeto irrelevante (determinista)', DocumentVersionAllocator::payloadHash($semA) === DocumentVersionAllocator::payloadHash($semB));
+$semC = $semA;
+$semC['payload']['lines'] = [['q' => '2'], ['q' => '1']];
+ok('orden de LISTAS relevante (líneas)', DocumentVersionAllocator::payloadHash($semA) !== DocumentVersionAllocator::payloadHash($semC));
+$semD = $semA;
+$semD['payload']['lines'][0]['q'] = '5';
+ok('cambio de cantidad ⇒ hash distinto', DocumentVersionAllocator::payloadHash($semA) !== DocumentVersionAllocator::payloadHash($semD));
+ok('document_version NO participa del hash', DocumentVersionAllocator::payloadHash($semA + ['document_version' => 9]) === DocumentVersionAllocator::payloadHash($semA));
+ok('float → fail-closed', throws(fn () => DocumentVersionAllocator::payloadHash(['payload' => ['total' => 1.5]])));
+ok('hash sha256 hex', preg_match('/^[0-9a-f]{64}$/', DocumentVersionAllocator::payloadHash($semA)) === 1);
+
+echo "== P2D-2 · PurchasingWorkflow::spec (definición desde configuración) ==\n";
+$cfg = ['groups' => ['PENDING_AREA_HEAD' => 11, 'PURCHASING' => 12, 'PENDING_FINANCE' => 13], 'quorum' => ['PENDING_AREA_HEAD' => 2], 'sla' => ['PENDING_FINANCE' => 48]];
+$spec = PurchasingWorkflow::spec('cp_test', 'X\\Request', $cfg);
+$initials = array_filter($spec['states'], static fn ($st) => $st['kind'] === 'initial');
+ok('exactamente un estado inicial (DRAFT, editable)', count($initials) === 1 && array_values($initials)[0]['code'] === 'DRAFT' && array_values($initials)[0]['is_editable'] === 1);
+$byCode = [];
+foreach ($spec['states'] as $st) {
+    $byCode[$st['code']] = $st;
+}
+ok('APPROVED es INTERMEDIO (invalidación post-aprobación posible; P2D-3 continúa)', $byCode['APPROVED']['kind'] === 'intermediate');
+ok('REJECTED/CANCELLED finales; RETURNED editable', $byCode['REJECTED']['kind'] === 'final' && $byCode['CANCELLED']['kind'] === 'final' && $byCode['RETURNED']['is_editable'] === 1);
+ok('SLA configurable por etapa (48h Gerencia; resto sin SLA)', $byCode['PENDING_FINANCE']['sla_hours'] === 48 && $byCode['PENDING_AREA_HEAD']['sla_hours'] === null);
+$approves = array_values(array_filter($spec['transitions'], static fn ($t) => $t['action'] === 'approve'));
+ok('3 aprobaciones, todas con RIGHT_ACT + condición evidence_bound + step de GRUPO', count($approves) === 3 && array_reduce($approves, static fn ($c, $t) => $c
+    && $t['required_right'] === 2 && $t['condition'] === PurchasingWorkflow::EVIDENCE_CONDITION && $t['steps'][0]['approver_kind'] === 'group', true));
+ok('grupos/quórum salen de la CONFIGURACIÓN (jefe: grupo 11, quórum 2)', $approves[0]['from'] === 'PENDING_AREA_HEAD' && $approves[0]['steps'][0]['approver_ref'] === 11 && $approves[0]['steps'][0]['quorum_value'] === 2);
+$rejRet = array_filter($spec['transitions'], static fn ($t) => in_array($t['action'], ['reject', 'return'], true));
+ok('reject/return exigen comentario y RIGHT_ACT', $rejRet !== [] && array_reduce($rejRet, static fn ($c, $t) => $c && $t['requires_comment'] === 1 && $t['required_right'] === 2, true));
+ok('Gerencia devuelve a Compras (re-cotizar)', count(array_filter($spec['transitions'], static fn ($t) => $t['from'] === 'PENDING_FINANCE' && $t['action'] === 'return' && $t['to'] === 'PURCHASING')) === 1);
+ok('grupo sin configurar → fail-closed', throws(fn () => PurchasingWorkflow::spec('cp_test', 'X', ['groups' => ['PENDING_AREA_HEAD' => 11, 'PURCHASING' => 12, 'PENDING_FINANCE' => 0]])));
+ok('quórum inválido → fail-closed', throws(fn () => PurchasingWorkflow::spec('cp_test', 'X', ['groups' => $cfg['groups'], 'quorum' => ['PURCHASING' => 0]])));
+ok('code inválido → fail-closed', throws(fn () => PurchasingWorkflow::spec('x y', 'X', $cfg)));
+ok('ningún aprobador hardcodeado (sin config → sin spec)', throws(fn () => PurchasingWorkflow::spec('cp_test', 'X', ['groups' => []])));
+
+echo "== P2D-2 · etapas, reinicio de scopes y mapas configurables ==\n";
+ok('stageIndex: circuito 0..3; DRAFT/RETURNED -1; finales -2', PurchasingWorkflow::stageIndex('PENDING_AREA_HEAD') === 0 && PurchasingWorkflow::stageIndex('APPROVED') === 3
+    && PurchasingWorkflow::stageIndex('RETURNED') === -1 && PurchasingWorkflow::stageIndex('REJECTED') === -2);
+ok('entrar a PURCHASING reinicia COMMERCIAL (checkpoint PURCHASING) pero NO REQUEST', PurchasingWorkflow::resetsScope('PURCHASING', 'PURCHASING') && !PurchasingWorkflow::resetsScope('PURCHASING', 'PENDING_AREA_HEAD'));
+ok('entrar a RETURNED reinicia ambos scopes', PurchasingWorkflow::resetsScope('RETURNED', 'PENDING_AREA_HEAD') && PurchasingWorkflow::resetsScope('RETURNED', 'PURCHASING'));
+ok('entrar a PENDING_FINANCE no reinicia nada', !PurchasingWorkflow::resetsScope('PENDING_FINANCE', 'PURCHASING') && !PurchasingWorkflow::resetsScope('PENDING_FINANCE', 'PENDING_AREA_HEAD'));
+$stageScopes = ['PENDING_AREA_HEAD' => 'REQUEST_SCOPE', 'PURCHASING' => 'COMMERCIAL_FINANCIAL_SCOPE', 'PENDING_FINANCE' => 'COMMERCIAL_FINANCIAL_SCOPE'];
+$cps = ['REQUEST_SCOPE' => 'PENDING_AREA_HEAD', 'COMMERCIAL_FINANCIAL_SCOPE' => 'PURCHASING'];
+$known = ['REQUEST_SCOPE', 'COMMERCIAL_FINANCIAL_SCOPE'];
+ok('mapas por defecto válidos', !throws(fn () => PurchasingWorkflow::validateMaps($stageScopes, $cps, $known)));
+ok('checkpoint POSTERIOR a la etapa que lo usa → rechazado', throws(fn () => PurchasingWorkflow::validateMaps($stageScopes, ['REQUEST_SCOPE' => 'PENDING_FINANCE', 'COMMERCIAL_FINANCIAL_SCOPE' => 'PURCHASING'], $known)));
+ok('scope desconocido → rechazado', throws(fn () => PurchasingWorkflow::validateMaps(['PENDING_AREA_HEAD' => 'X'] + $stageScopes, $cps, $known)));
+ok('etapa no aprobatoria en stage_scopes → rechazado', throws(fn () => PurchasingWorkflow::validateMaps($stageScopes + ['APPROVED' => 'REQUEST_SCOPE'], $cps, $known)));
+
+echo "== P2D-2 · liveDecisions: aprobaciones VIVAS derivadas del LEDGER del motor ==\n";
+$ev = static fn (int $id, string $event, string $from, string $to, array $meta = []): array => ['id' => $id, 'event' => $event, 'from_code' => $from, 'to_code' => $to, 'meta_json' => $meta === [] ? '' : json_encode($meta)];
+$appr = static fn (int $v): array => ['decision' => 'approved', 'evidence_ref' => ['document_versions_id' => 100 + $v, 'document_version' => $v, 'content_sha256' => str_repeat('a', 64)]];
+$base = [
+    $ev(1, 'started', '', 'DRAFT'),
+    $ev(2, 'transitioned', 'DRAFT', 'PENDING_AREA_HEAD'),
+    $ev(3, 'decision_recorded', 'PENDING_AREA_HEAD', 'PENDING_AREA_HEAD', $appr(1)),
+    $ev(4, 'transitioned', 'PENDING_AREA_HEAD', 'PURCHASING'),
+    $ev(5, 'decision_recorded', 'PURCHASING', 'PURCHASING', $appr(2)),
+    $ev(6, 'transitioned', 'PURCHASING', 'PENDING_FINANCE'),
+    $ev(7, 'decision_recorded', 'PENDING_FINANCE', 'PENDING_FINANCE', $appr(2)),
+    $ev(8, 'transitioned', 'PENDING_FINANCE', 'APPROVED'),
+];
+$ids = static fn (array $l): array => array_map(static fn ($d) => $d['id'], $l);
+ok('REQUEST: la decisión del jefe está viva', $ids(PurchasingWorkflow::liveDecisions($base, 'REQUEST_SCOPE', 'PENDING_AREA_HEAD', $stageScopes)) === [3]);
+ok('COMMERCIAL: Compras + Gerencia vivas', $ids(PurchasingWorkflow::liveDecisions($base, 'COMMERCIAL_FINANCIAL_SCOPE', 'PURCHASING', $stageScopes)) === [5, 7]);
+$afterComm = array_merge($base, [$ev(9, 'approval_invalidated', 'APPROVED', 'PURCHASING', ['idempotency_key' => 'k1'])]);
+ok('invalidación a PURCHASING: COMMERCIAL ya no vivas; el JEFE sigue viva', $ids(PurchasingWorkflow::liveDecisions($afterComm, 'COMMERCIAL_FINANCIAL_SCOPE', 'PURCHASING', $stageScopes)) === []
+    && $ids(PurchasingWorkflow::liveDecisions($afterComm, 'REQUEST_SCOPE', 'PENDING_AREA_HEAD', $stageScopes)) === [3]);
+$afterReq = array_merge($base, [$ev(9, 'approval_invalidated', 'PURCHASING', 'PENDING_AREA_HEAD', ['idempotency_key' => 'k2'])]);
+ok('invalidación al jefe: NINGÚN scope queda vivo', PurchasingWorkflow::liveDecisions($afterReq, 'REQUEST_SCOPE', 'PENDING_AREA_HEAD', $stageScopes) === []
+    && PurchasingWorkflow::liveDecisions($afterReq, 'COMMERCIAL_FINANCIAL_SCOPE', 'PURCHASING', $stageScopes) === []);
+$returned = array_merge(array_slice($base, 0, 5), [$ev(6, 'transitioned', 'PURCHASING', 'RETURNED')]);
+ok('devolución (RETURNED) reinicia todo', PurchasingWorkflow::liveDecisions($returned, 'REQUEST_SCOPE', 'PENDING_AREA_HEAD', $stageScopes) === []);
+$partial = [$ev(1, 'started', '', 'DRAFT'), $ev(2, 'transitioned', 'DRAFT', 'PENDING_AREA_HEAD'), $ev(3, 'decision_recorded', 'PENDING_AREA_HEAD', 'PENDING_AREA_HEAD', $appr(1))];
+ok('voto parcial de quórum (sin avanzar) también está vivo', $ids(PurchasingWorkflow::liveDecisions($partial, 'REQUEST_SCOPE', 'PENDING_AREA_HEAD', $stageScopes)) === [3]);
+$rej = array_merge($partial, [$ev(4, 'decision_recorded', 'PENDING_AREA_HEAD', 'REJECTED', ['decision' => 'rejected'])]);
+ok('decisiones no aprobatorias no cuentan', $ids(PurchasingWorkflow::liveDecisions($rej, 'REQUEST_SCOPE', 'PENDING_AREA_HEAD', $stageScopes)) === [3]);
+// Motor con actor ÚNICO: la decisión se registra DESPUÉS de la fila `transitioned` que sale del estado.
+$singleActor = [
+    $ev(1, 'started', '', 'DRAFT'),
+    $ev(2, 'transitioned', 'DRAFT', 'PENDING_AREA_HEAD'),
+    $ev(3, 'transitioned', 'PENDING_AREA_HEAD', 'PURCHASING'),
+    $ev(4, 'decision_recorded', 'PENDING_AREA_HEAD', 'PURCHASING', $appr(1)),
+];
+ok('actor único: la decisión del jefe (id posterior a la entrada a PURCHASING) sigue VIVA para REQUEST', $ids(PurchasingWorkflow::liveDecisions($singleActor, 'REQUEST_SCOPE', 'PENDING_AREA_HEAD', $stageScopes)) === [4]);
+$reopenSame = array_merge(array_slice($base, 0, 5), [
+    $ev(6, 'approval_invalidated', 'PURCHASING', 'PURCHASING', ['idempotency_key' => 'k3']),
+    $ev(7, 'decision_recorded', 'PURCHASING', 'PURCHASING', $appr(3)),
+]);
+ok('reapertura a la MISMA etapa: votos previos no vivos, posteriores sí', $ids(PurchasingWorkflow::liveDecisions($reopenSame, 'COMMERCIAL_FINANCIAL_SCOPE', 'PURCHASING', $stageScopes)) === [7]);
+ok('orden del ledger irrelevante (se ordena por id)', $ids(PurchasingWorkflow::liveDecisions(array_reverse($base), 'COMMERCIAL_FINANCIAL_SCOPE', 'PURCHASING', $stageScopes)) === [5, 7]);
+
+echo "== P2D-2 · ScopeSnapshotBuilder::commercialRecord ==\n";
+$terms = ['quote_id' => 5, 'reference' => 'Q-1', 'suppliers_id' => 9, 'math' => $qm];
+$cr = ScopeSnapshotBuilder::commercialRecord($terms, 'PYG');
+ok('claves comerciales del vocabulario cerrado', array_diff(array_keys($cr), ScopeCatalog::ALLOWED_KEYS) === [] && $cr['total'] === '5450' && $cr['suppliers_id_selected'] === 9 && $cr['selected_quote']['id'] === 5);
+ok('moneda distinta a la de la solicitud → fail-closed', throws(fn () => ScopeSnapshotBuilder::commercialRecord($terms, 'USD')));
+ok('términos incompletos → fail-closed', throws(fn () => ScopeSnapshotBuilder::commercialRecord(['quote_id' => 5, 'suppliers_id' => 9, 'math' => ['currency' => 'PYG']], 'PYG')));
+ok('COMMERCIAL_FINANCIAL (v1) = REQUEST + claves comerciales producibles', array_diff(ScopeCatalog::defaultFields('COMMERCIAL_FINANCIAL_SCOPE'), array_merge(ScopeCatalog::REQUEST_KEYS, ['currency', 'total'], array_keys($cr))) === []);
 
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"

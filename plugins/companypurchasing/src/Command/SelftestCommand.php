@@ -1,11 +1,11 @@
 <?php
 
 /**
- * Autotest de INTEGRACIÓN + E2E de companypurchasing — P2D-1 (corre DENTRO de un GLPI arrancado, en CI).
+ * Autotest de INTEGRACIÓN + E2E de companypurchasing — P2D-1 + P2D-2 (corre DENTRO de un GLPI arrancado, en CI).
  *
  * Nombre: `plugins:companypurchasing:selftest`. Fail-closed → exit 1 si algo falla.
  *
- * Cobertura (núcleo P2D-1; SIN companyworkflow/companysignature/recepción/outbox):
+ * Cobertura núcleo P2D-1 (sin recepción/outbox):
  *   [PERSIST]     5 tablas propias + derecho de plugin.
  *   [MONEY]       amount_estimated exacto vía BD (PYG sin decimales; suma de líneas).
  *   [NUMBERING]   asignación transaccional; distinta por proceso; independiente por entidad/año.
@@ -22,7 +22,13 @@
  *                 PYG con fracción; cantidad inválida.
  *   [CONCURRENCY] (A) procesos REALES en paralelo: numeración, doble submit, edit/addline vs submit.
  *   [CRASH-SAFE]  (D) submit + auditoría atómicos/durables: fallo del evento → rollback (no PENDING).
- *   [MIGRATE]     install/uninstall/reinstall reversible (al final, tras limpiar objetos core).
+ *   [MIGRATE]     install/uninstall/reinstall reversible + UPGRADE desde el esquema P2D-1 (al final).
+ *
+ * P2D-2 (trait `ApprovalSelftestScenarios`, parte de ESTE selftest): definición publicada desde config,
+ * flujo jefe→Compras→Gerencia, rechazo, devolución, quórum (secuencial + concurrente), delegación,
+ * selección concurrente de cotización, invalidación por scope (REQUEST / COMMERCIAL), allocator de
+ * versiones concurrente, evidence_ref exacta, caídas antes/después de transition, PDF ok/falla, ACL,
+ * multi-entidad y referencias cross-branch.
  *
  * @license GPL-3.0-or-later
  */
@@ -50,6 +56,9 @@ use Symfony\Component\Console\Output\OutputInterface;
 
 final class SelftestCommand extends Command
 {
+    // P2D-2: escenarios del circuito de aprobación en ESTE MISMO selftest obligatorio (no uno paralelo).
+    use ApprovalSelftestScenarios;
+
     private int $failures = 0;
     private OutputInterface $out;
     private string $suffix = '';
@@ -105,6 +114,8 @@ final class SelftestCommand extends Command
             $this->scenarioConcurrentMutations();
             $this->scenarioSubmitCrashSafe();
             $this->scenarioMutationRollback();
+            // P2D-2 (obligatorio): circuito de aprobación sobre companyworkflow + companysignature.
+            $this->runApprovalScenarios();
         } catch (\Throwable $e) {
             $this->out->writeln('<error>EXCEPCIÓN: ' . $e->getMessage() . '</error>');
             $this->failures++;
@@ -112,8 +123,13 @@ final class SelftestCommand extends Command
             $this->cleanup();
         }
 
-        // Reversibilidad de migraciones (al final, ya sin datos de negocio propios).
-        $this->scenarioReinstall();
+        // Reversibilidad de migraciones (al final, ya sin datos de negocio propios). Una excepción aquí se
+        // reporta como comprobación FALLIDA (fail-closed) en vez de abortar sin resumen.
+        try {
+            $this->scenarioReinstall();
+        } catch (\Throwable $e) {
+            $this->check('[MIGRATE] sin excepción: ' . $e->getMessage(), false);
+        }
 
         if ($this->failures > 0) {
             $this->out->writeln("<error>SELFTEST: {$this->failures} comprobación(es) fallaron.</error>");
@@ -872,6 +888,27 @@ final class SelftestCommand extends Command
             $seeded++;
         }
         $this->check('[MIGRATE] reinstall re-siembra los scopes v1', $seeded >= 2);
+        foreach (['quotes', 'quote_items', 'doc_versions', 'docseq'] as $t) {
+            $this->check("[MIGRATE] reinstall recrea glpi_plugin_companypurchasing_{$t}", $this->tableExistsLive("glpi_plugin_companypurchasing_{$t}"));
+        }
+
+        // UPGRADE P2D-1 → P2D-2: sobre un esquema SIN las columnas nuevas, install() las agrega (idempotente).
+        foreach (['quotes_id_selected', 'workflow_lock_version', 'workflow_synced_at'] as $col) {
+            $DB->doQuery("ALTER TABLE `{$table}` DROP COLUMN `{$col}`");
+        }
+        $this->check('[MIGRATE] esquema P2D-1 simulado (sin columnas P2D-2)', !$this->columnExistsLive($table, 'quotes_id_selected'));
+        plugin_companypurchasing_install();
+        plugin_companypurchasing_install(); // idempotente: segunda pasada no falla ni duplica
+        $this->check('[MIGRATE] upgrade agrega quotes_id_selected / workflow_lock_version / workflow_synced_at',
+            $this->columnExistsLive($table, 'quotes_id_selected') && $this->columnExistsLive($table, 'workflow_lock_version') && $this->columnExistsLive($table, 'workflow_synced_at'));
+    }
+
+    private function columnExistsLive(string $table, string $column): bool
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $res = $DB->doQuery("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
+        return $res !== false && $DB->numrows($res) > 0;
     }
 
     // ---------------------------------------------------------------- helpers
@@ -1085,6 +1122,10 @@ final class SelftestCommand extends Command
         try {
             // Datos de negocio propios (por si el reinstall no corre).
             foreach ([
+                'glpi_plugin_companypurchasing_quote_items',
+                'glpi_plugin_companypurchasing_quotes',
+                'glpi_plugin_companypurchasing_doc_versions',
+                'glpi_plugin_companypurchasing_docseq',
                 'glpi_plugin_companypurchasing_events',
                 'glpi_plugin_companypurchasing_items',
                 'glpi_plugin_companypurchasing_requests',

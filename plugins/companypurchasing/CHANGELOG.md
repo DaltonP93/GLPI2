@@ -3,6 +3,64 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.3.0] — Fase 2D · P2D-2 (circuito de aprobación)
+Ver `../../docs/adr/ADR-0018-companypurchasing-approvals.md`.
+
+### Added
+- **Integración con `companyworkflow` (único motor):** `PurchasingWorkflow` describe el proceso
+  (`DRAFT → PENDING_AREA_HEAD → PURCHASING → PENDING_FINANCE → APPROVED`, más `RETURNED`/`REJECTED`/
+  `CANCELLED`) y `ApprovalOrchestrator::publishDefinition()` lo publica con `DefinitionBuilder` desde la
+  **configuración** (grupo aprobador, quórum y SLA por etapa; sin grupos ⇒ no publica). `APPROVED` es
+  intermedio (P2D-3 continúa; la invalidación post-aprobación sigue siendo posible). Las transiciones
+  `approve` exigen la condición `evidence_bound = 1` (la UI genérica del motor no aprueba sin evidencia).
+- **Saga idempotente `ApprovalOrchestrator`** (`submit`/`decide`): snapshot del scope de la etapa →
+  `DocumentVersionAllocator` → `SignatureApi::recordDocumentVersion()` → `evidence_ref =
+  {document_versions_id, document_version, content_sha256}` → `WorkflowApi::transition()` con
+  `expected_lock_version` → auditoría → proyección. **Ninguna llamada a workflow/firma dentro de una
+  transacción local.** Reintentos convergen sin duplicar versión, transición ni evento. Una aprobación se
+  liga SIEMPRE al scope de su etapa (no producible ⇒ fail-closed); un rechazo/devolución se liga a
+  `REQUEST_SCOPE` si el scope de la etapa aún no es producible (Compras puede devolver sin cotización).
+- **`REQUEST_SCOPE` / `COMMERCIAL_FINANCIAL_SCOPE`:** el snapshot comercial incluye proveedor y cotización
+  seleccionados, `final_unit_price`/`line_total` por línea, descuentos, impuestos, flete, moneda, total
+  final y presupuesto — importes como **string exacto** (PYG escala 0).
+- **Allocator de versión documental de dominio** (`..._docseq` + ledger `..._doc_versions`):
+  monotónico por solicitud, concurrency-safe, no reutilizable; reutiliza la última versión del scope sólo
+  si el contenido semántico no cambió. Nunca `document_version = 1` hardcodeada ni inferida por fecha.
+- **Invalidación por scope/checkpoint** derivada del **ledger del motor** (aprobaciones vivas por visita de
+  estado): cambio de un scope aprobado ⇒ nueva versión + `invalidateApprovals()` con `idempotency_key` y
+  `reopen_to_code` del checkpoint (cantidad tras el jefe → reabre al jefe; precio final tras Gerencia →
+  reabre Compras, el jefe sigue válido). Se re-evalúa tras cada mutación comercial y **antes de cada
+  decisión** (red de seguridad fail-closed).
+- **Cotizaciones (`QuoteManager`)**: `Supplier` nativo y `Document`/`Document_Item` nativos (N adjuntos)
+  validados PARA la entidad de la solicitud; selección con `requests.quotes_id_selected` como **única**
+  fuente de verdad (lock común + `lock_version` esperado); totales derivados (`QuoteMath`, sin float).
+- **Enmienda post-aprobación** (`RequestManager::amendLineQuantity`, `MANAGE_PURCHASING`, estados
+  `amend_states`).
+- **PDF**: `composePdf()` explícito tras aprobar una etapa `pdf_stages`; fallo ⇒ `pdf_status=error` +
+  `pdf.failed`, **sin** revertir workflow/evidencia; `retryPdf()` idempotente.
+- **Proyección `domain_state`** (`StateProjection`): cache del estado confirmado del motor (el motor gana);
+  listener best-effort `companyworkflow:transitioned/approval_invalidated`; `reconcile()`/`reconcileAll()`
+  y comando `plugins:companypurchasing:reconcile` (idempotente; re-enlaza instancia tras caída).
+- Editabilidad **autoritativa**: con instancia enlazada decide `is_editable` del estado del motor
+  (`DRAFT`/`RETURNED`); `ReferenceValidator` extraído (misma semántica P2D-1) y compartido.
+- Eventos de negocio P2D-2 (`workflow.*`, `checkpoint.recorded`, `approval.decided`, `scope.invalidated`,
+  `quote.*`, `line.amended`, `pdf.*`, `state.reconciled`); `Audit::recordOnce()` idempotente.
+- Esquema: tablas `quotes`, `quote_items`, `doc_versions`, `docseq`; columnas `requests.quotes_id_selected`,
+  `workflow_lock_version`, `workflow_synced_at` (con **upgrade** idempotente desde P2D-1). i18n ES/EN.
+
+### Fixed
+- `install()` idempotente en **upgrade**: ya no re-agrega el derecho del plugin (UNIQUE de
+  `glpi_profilerights`) ni pisa la configuración ajustada por un administrador (sólo siembra claves ausentes).
+
+### Tests
+- Unit: 113 (resta exacta, `QuoteMath`, hash de payload, spec de la definición, reinicio de scopes,
+  aprobaciones vivas desde el ledger —ambos órdenes del motor—, mapas, registro comercial).
+- Selftest obligatorio (mismo comando, trait `ApprovalSelftestScenarios`): flujo completo, rechazo,
+  devolución, quórum secuencial y **concurrente**, delegación, selección concurrente de cotización,
+  invalidación REQUEST/COMMERCIAL (evidencia del jefe válida / Gerencia invalidada), allocator concurrente,
+  `evidence_ref` exacta, caída antes/después de `transition`, PDF ok/falla/retry, ACL, multi-entidad,
+  cross-branch, dinero; `[MIGRATE]` con upgrade desde el esquema P2D-1.
+
 ## [0.2.0] — Fase 2D · P2D-1 (núcleo de compras)
 ### Hardening — atomicidad de mutaciones (pasada final acotada P2D-1)
 - **Mutación + auditoría atómicas (todas las mutaciones):** además de `submitDraft`, ahora `createDraft`,

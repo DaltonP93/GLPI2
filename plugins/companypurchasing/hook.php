@@ -16,6 +16,13 @@
  *   - glpi_plugin_companypurchasing_numbering    : secuencias UNIQUE(entities_id, scope, year).
  *   - glpi_plugin_companypurchasing_events       : auditoría de negocio APPEND-ONLY.
  *   - glpi_plugin_companypurchasing_scope_defs    : scopes de aprobación VERSIONADOS/configurables.
+ * Tablas propias P2D-2:
+ *   - glpi_plugin_companypurchasing_quotes         : cotizaciones (Supplier nativo; sin `is_selected`).
+ *   - glpi_plugin_companypurchasing_quote_items    : precio final por línea (FK items.id, no line_no).
+ *   - glpi_plugin_companypurchasing_doc_versions   : ledger de versiones documentales de dominio.
+ *   - glpi_plugin_companypurchasing_docseq         : contador monotónico de document_version por solicitud.
+ * y columnas nuevas en `requests` (`quotes_id_selected`, `workflow_lock_version`, `workflow_synced_at`),
+ * añadidas también en UPGRADE (ALTER idempotente) sobre una instalación P2D-1.
  *
  * @license GPL-3.0-or-later
  */
@@ -56,6 +63,9 @@ function plugin_companypurchasing_install() {
         `domain_state` VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
         `scopes_version` INT UNSIGNED NOT NULL DEFAULT 0,
         `workflow_instances_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `quotes_id_selected` INT UNSIGNED NOT NULL DEFAULT 0,
+        `workflow_lock_version` INT UNSIGNED NOT NULL DEFAULT 0,
+        `workflow_synced_at` TIMESTAMP NULL DEFAULT NULL,
         `correlation_id` VARCHAR(64) NOT NULL DEFAULT '',
         `users_id_creator` INT UNSIGNED NOT NULL DEFAULT 0,
         `lock_version` INT UNSIGNED NOT NULL DEFAULT 0,
@@ -130,8 +140,86 @@ function plugin_companypurchasing_install() {
         UNIQUE KEY `ver_scope` (`scopes_version`,`scope_key`)
     ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
 
-    // Derecho propio del plugin en todos los perfiles (valor 0 por defecto).
-    if (class_exists('ProfileRight')) {
+    // --- P2D-2: UPGRADE idempotente de una instalación P2D-1 (columnas nuevas en `requests`). ---
+    foreach ([
+        'quotes_id_selected'    => "INT UNSIGNED NOT NULL DEFAULT 0",
+        'workflow_lock_version' => "INT UNSIGNED NOT NULL DEFAULT 0",
+        'workflow_synced_at'    => "TIMESTAMP NULL DEFAULT NULL",
+    ] as $col => $ddl) {
+        plugin_companypurchasing_add_column_if_missing('glpi_plugin_companypurchasing_requests', $col, $ddl);
+    }
+
+    // Cotizaciones: proveedor = Supplier NATIVO; adjuntos = Document/Document_Item NATIVOS. SIN `is_selected`
+    // (la única fuente de verdad de la selección es `requests.quotes_id_selected`). Totales DERIVADOS.
+    $DB->doQuery("CREATE TABLE IF NOT EXISTS `glpi_plugin_companypurchasing_quotes` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `requests_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `entities_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `is_recursive` TINYINT NOT NULL DEFAULT 0,
+        `suppliers_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `reference` VARCHAR(190) NOT NULL DEFAULT '',
+        `currency_code` CHAR(3) NOT NULL DEFAULT 'PYG',
+        `discounts` DECIMAL(20,6) NOT NULL DEFAULT 0,
+        `taxes` DECIMAL(20,6) NOT NULL DEFAULT 0,
+        `freight` DECIMAL(20,6) NOT NULL DEFAULT 0,
+        `valid_until` DATE NULL DEFAULT NULL,
+        `notes` TEXT DEFAULT NULL,
+        `users_id_creator` INT UNSIGNED NOT NULL DEFAULT 0,
+        `lock_version` INT UNSIGNED NOT NULL DEFAULT 0,
+        `date_creation` TIMESTAMP NULL DEFAULT NULL,
+        `date_mod` TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (`id`),
+        KEY `requests_id` (`requests_id`),
+        KEY `suppliers_id` (`suppliers_id`),
+        KEY `entities_id` (`entities_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+
+    // Precio final por línea: identidad = items_id (FK ..._items.id), nunca line_no.
+    $DB->doQuery("CREATE TABLE IF NOT EXISTS `glpi_plugin_companypurchasing_quote_items` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `quotes_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `items_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `final_unit_price` DECIMAL(20,6) NOT NULL DEFAULT 0,
+        `date_creation` TIMESTAMP NULL DEFAULT NULL,
+        `date_mod` TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (`id`),
+        UNIQUE KEY `quote_item` (`quotes_id`,`items_id`),
+        KEY `items_id` (`items_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+
+    // Ledger de versiones documentales de DOMINIO (Compras numera; Firma valida/inmoviliza).
+    $DB->doQuery("CREATE TABLE IF NOT EXISTS `glpi_plugin_companypurchasing_doc_versions` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `requests_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `scope_key` VARCHAR(60) NOT NULL DEFAULT '',
+        `document_version` INT UNSIGNED NOT NULL DEFAULT 0,
+        `payload_sha256` CHAR(64) NOT NULL DEFAULT '',
+        `document_versions_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `content_sha256` VARCHAR(64) NOT NULL DEFAULT '',
+        `pdf_status` VARCHAR(20) NOT NULL DEFAULT '',
+        `correlation_id` VARCHAR(64) NOT NULL DEFAULT '',
+        `date_creation` TIMESTAMP NULL DEFAULT NULL,
+        `date_mod` TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (`id`),
+        UNIQUE KEY `req_version` (`requests_id`,`document_version`),
+        KEY `req_scope` (`requests_id`,`scope_key`)
+    ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+
+    // Contador monotónico por solicitud (incremento atómico; nunca se recicla).
+    $DB->doQuery("CREATE TABLE IF NOT EXISTS `glpi_plugin_companypurchasing_docseq` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `requests_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `next_version` INT UNSIGNED NOT NULL DEFAULT 1,
+        `date_mod` TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (`id`),
+        UNIQUE KEY `requests_id` (`requests_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+
+    // Derecho propio del plugin en todos los perfiles (valor 0 por defecto). IDEMPOTENTE: GLPI vuelve a
+    // llamar install() al ACTUALIZAR el plugin (p. ej. 0.2.0 → 0.3.0); re-agregarlo violaría el UNIQUE
+    // (profiles_id, name) de glpi_profilerights y abortaría el upgrade.
+    if (class_exists('ProfileRight')
+        && countElementsInTable(ProfileRight::getTable(), ['name' => 'plugin_companypurchasing']) === 0) {
         ProfileRight::addProfileRights(['plugin_companypurchasing']);
     }
 
@@ -147,8 +235,14 @@ function plugin_companypurchasing_install() {
         ['profiles_id' => 4, 'name' => 'plugin_companypurchasing']
     );
 
-    // Configuración por defecto (contexto plugin:companypurchasing). Sin secretos.
-    Config::setConfigurationValues(PluginConfig::CONTEXT, PluginConfig::DEFAULTS);
+    // Configuración por defecto (contexto plugin:companypurchasing). Sin secretos. Sólo se siembran las
+    // claves AUSENTES: un reinstall/upgrade NO pisa la configuración que un administrador ya ajustó
+    // (grupos aprobadores, quórum, mapas de scopes…).
+    $current = Config::getConfigurationValues(PluginConfig::CONTEXT);
+    $missing = array_diff_key(PluginConfig::DEFAULTS, is_array($current) ? $current : []);
+    if ($missing !== []) {
+        Config::setConfigurationValues(PluginConfig::CONTEXT, $missing);
+    }
 
     // Sembrar la versión 1 del catálogo de scopes de aprobación (idempotente).
     ScopeCatalog::seedVersion1();
@@ -165,6 +259,10 @@ function plugin_companypurchasing_uninstall() {
     global $DB;
 
     foreach ([
+        'glpi_plugin_companypurchasing_quote_items',
+        'glpi_plugin_companypurchasing_quotes',
+        'glpi_plugin_companypurchasing_doc_versions',
+        'glpi_plugin_companypurchasing_docseq',
         'glpi_plugin_companypurchasing_scope_defs',
         'glpi_plugin_companypurchasing_events',
         'glpi_plugin_companypurchasing_numbering',
@@ -181,4 +279,44 @@ function plugin_companypurchasing_uninstall() {
     Config::deleteConfigurationValues(PluginConfig::CONTEXT, array_keys(PluginConfig::DEFAULTS));
 
     return true;
+}
+
+/**
+ * Añade una columna a una tabla PROPIA si no existe (upgrade idempotente). Comprobación EN VIVO
+ * (`SHOW COLUMNS`), independiente de la caché de esquema de GLPI. Sólo tablas `glpi_plugin_companypurchasing_*`.
+ */
+function plugin_companypurchasing_add_column_if_missing(string $table, string $column, string $ddl): void {
+    /** @var DBmysql $DB */
+    global $DB;
+    if (preg_match('/^glpi_plugin_companypurchasing_[a-z_]+$/', $table) !== 1 || preg_match('/^[a-z_]+$/', $column) !== 1) {
+        throw new \InvalidArgumentException('tabla/columna inválida para migración');
+    }
+    $res = $DB->doQuery("SHOW COLUMNS FROM `{$table}` LIKE '{$column}'");
+    if ($res !== false && $DB->numrows($res) > 0) {
+        return;
+    }
+    $DB->doQuery("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$ddl}");
+}
+
+/**
+ * Listener best-effort de `companyworkflow:transitioned` / `companyworkflow:approval_invalidated`:
+ * PROYECTA el estado confirmado del motor en `requests.domain_state` (cache). Nunca lanza: la
+ * transición ya está confirmada y la reconciliación (`plugins:companypurchasing:reconcile`) garantiza
+ * la convergencia si este listener se pierde.
+ *
+ * @param mixed $payload
+ * @return mixed
+ */
+function plugin_companypurchasing_on_workflow_event($payload) {
+    if (!is_array($payload)) {
+        return $payload;
+    }
+    try {
+        if (\GlpiPlugin\Companypurchasing\Service\PluginConfig::syncOnWorkflowEvents()) {
+            (new \GlpiPlugin\Companypurchasing\Service\StateProjection())->syncInstance((int) ($payload['instances_id'] ?? 0));
+        }
+    } catch (\Throwable) {
+        // best-effort: la proyección nunca compromete la transición ya confirmada.
+    }
+    return $payload;
 }

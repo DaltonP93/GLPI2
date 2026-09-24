@@ -3,6 +3,18 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.5.0] — Fase 2D · P2D-2 (invalidación exacta por checkpoint)
+### Changed
+- **Invalidación EXACTA POR CHECKPOINT** (domain-agnostic): al materializar `approval_invalidated`, sólo se
+  anulan las aprobaciones tomadas en una **visita de estado** iniciada en/después de la última entrada de
+  la instancia en el checkpoint de reapertura (`reopen_to_code`). Antes se anulaban **todas** las
+  aprobaciones previas de la instancia, lo que invalidaba evidencia de scopes no afectados (p. ej. la del
+  jefe de área al reabrir la etapa comercial en `companypurchasing`). La visita se deriva del ledger porque
+  el motor registra la decisión de un actor único **después** de la fila `transitioned` (en quórum, antes).
+  Sin ledger/checkpoint localizable ⇒ comportamiento previo (anula todas; conservador).
+- Tests: unit (`checkpointEntryId`, `visitStartOf`, `isVoidedByCheckpoint` en ambos órdenes) + selftest
+  `[INVALIDATE-CHECKPOINT]` (reabrir S2 deja S1 `valid` y S2 `invalidated`).
+
 ## [0.4.0] — Fase 2C (integridad probatoria)
 ### Hardening — durabilidad fail-closed (cola de reconciliación + lock del PDF)
 - **Watermark FAIL-CLOSED (§1):** `ReconcileService::harvest()` sólo avanza `last_seen_history_id`

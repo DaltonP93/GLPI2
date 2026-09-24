@@ -59,3 +59,23 @@ msgstr "Deliver goods"
 
 msgid "View purchasing metrics"
 msgstr "View purchasing metrics"
+
+msgid "Quote"
+msgid_plural "Quotes"
+msgstr[0] "Quote"
+msgstr[1] "Quotes"
+
+msgid "Quote line"
+msgid_plural "Quote lines"
+msgstr[0] "Quote line"
+msgstr[1] "Quote lines"
+
+msgid "Document version"
+msgid_plural "Document versions"
+msgstr[0] "Document version"
+msgstr[1] "Document versions"
+
+msgid "Document version sequence"
+msgid_plural "Document version sequences"
+msgstr[0] "Document version sequence"
+msgstr[1] "Document version sequences"

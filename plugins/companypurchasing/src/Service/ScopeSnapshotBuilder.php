@@ -4,8 +4,8 @@
  * Constructor DETERMINISTA del snapshot semántico de un scope de aprobación (gate §Approval scopes).
  *
  * SEPARACIÓN (gate §document_version):
- *   - `build()` produce SÓLO el snapshot SEMÁNTICO (metadata de sujeto/scope + payload). En P2D-1 NO
- *     inventa una `document_version` (el DOMINIO la declara; su allocator pertenece a P2D-2).
+ *   - `build()` produce SÓLO el snapshot SEMÁNTICO (metadata de sujeto/scope + payload). NO inventa una
+ *     `document_version`: la asigna el DOMINIO con `DocumentVersionAllocator` (P2D-2).
  *   - `envelope()` arma la envoltura probatoria que espera `SignatureApi::recordDocumentVersion()`
  *     (`{ schema, subject_type, subject_id, entity_id, document_version, payload }`), exigiendo
  *     `document_version > 0` como PARÁMETRO (nunca hardcodeado). Se usará en P2D-2.
@@ -32,9 +32,12 @@ final class ScopeSnapshotBuilder
      * Construye el snapshot de un scope para una solicitud ya cargada + sus líneas.
      *
      * @param array<int,RequestItem> $items
+     * @param array<string,mixed>|null $commercial  términos de la cotización SELECCIONADA (P2D-2,
+     *        `QuoteManager::commercialTerms()`); null ⇒ no hay claves comerciales (un scope que las exija
+     *        falla cerrado en `selectFields`).
      * @return array<string,mixed>
      */
-    public function build(Request $request, array $items, string $scopeKey, ?int $version = null): array
+    public function build(Request $request, array $items, string $scopeKey, ?int $version = null, ?array $commercial = null): array
     {
         if ($version === null) {
             $version = (int) ($request->fields['scopes_version'] ?? 0);
@@ -43,7 +46,7 @@ final class ScopeSnapshotBuilder
             }
         }
         $fields  = ScopeCatalog::fields($version, $scopeKey);
-        $full    = $this->fullRecord($request, $items);
+        $full    = $this->fullRecord($request, $items, $commercial);
         $payload = self::selectFields($full, $fields);
 
         // Snapshot SEMÁNTICO — SIN `document_version` (la declara el dominio en P2D-2, ver `envelope()`).
@@ -106,13 +109,15 @@ final class ScopeSnapshotBuilder
 
     /**
      * Record completo (todas las claves posibles) del cual cada scope SELECCIONA su subconjunto.
-     * En P2D-1 no existen aún proveedor/cotización/precios finales seleccionados: esas claves no se
-     * emiten (se incorporan en P2D-2). El total estimado se expone como string EXACTO en la moneda.
+     * Sin cotización seleccionada NO se emiten proveedor/cotización/precios finales/descuentos/impuestos/
+     * flete y `total` es el ESTIMADO; con cotización seleccionada (P2D-2) se emiten desde
+     * `commercialRecord()` y `total` pasa a ser el TOTAL FINAL. Importes siempre como string EXACTO.
      *
      * @param array<int,RequestItem> $items
+     * @param array<string,mixed>|null $commercial
      * @return array<string,mixed>
      */
-    private function fullRecord(Request $request, array $items): array
+    private function fullRecord(Request $request, array $items, ?array $commercial = null): array
     {
         $currency = (string) ($request->fields['currency_code'] ?? 'PYG');
         $overrides = PluginConfig::currencyScaleOverrides();
@@ -120,7 +125,7 @@ final class ScopeSnapshotBuilder
         // snapshot que luego se firmará). Sin fallback silencioso.
         $total = Money::ofStored((string) ($request->fields['amount_estimated'] ?? '0'), $currency, $overrides)->amount();
 
-        return [
+        $record = [
             'requester'    => (int) ($request->fields['users_id_requester'] ?? 0),
             'department'   => (int) ($request->fields['groups_id_department'] ?? 0),
             'category'     => (string) ($request->fields['category'] ?? ''),
@@ -131,6 +136,46 @@ final class ScopeSnapshotBuilder
             'currency'     => $currency,
             'total'        => $total,
             'lines'        => $this->lines($items),
+        ];
+        if ($commercial !== null) {
+            $record = array_merge($record, self::commercialRecord($commercial, $currency));
+        }
+        return $record;
+    }
+
+    /**
+     * Claves COMMERCIAL_FINANCIAL a partir de los términos de la cotización seleccionada. PURA.
+     * FAIL-CLOSED: moneda distinta a la de la solicitud, o términos incompletos ⇒ excepción.
+     *
+     * @param array{quote_id:int, reference:string, suppliers_id:int, math:array<string,mixed>} $commercial
+     * @return array<string,mixed>
+     */
+    public static function commercialRecord(array $commercial, string $requestCurrency): array
+    {
+        $math = $commercial['math'] ?? null;
+        if (!is_array($math) || (int) ($commercial['quote_id'] ?? 0) <= 0 || (int) ($commercial['suppliers_id'] ?? 0) <= 0) {
+            throw new \RuntimeException('términos comerciales incompletos (fail-closed)');
+        }
+        if ((string) ($math['currency'] ?? '') !== $requestCurrency) {
+            throw new \RuntimeException('la moneda de la cotización no coincide con la de la solicitud (fail-closed)');
+        }
+        foreach (['lines', 'discounts', 'taxes', 'freight', 'total'] as $k) {
+            if (!array_key_exists($k, $math)) {
+                throw new \RuntimeException("términos comerciales sin '{$k}' (fail-closed)");
+            }
+        }
+        return [
+            'suppliers_id_selected' => (int) $commercial['suppliers_id'],
+            'selected_quote'        => [
+                'id'           => (int) $commercial['quote_id'],
+                'reference'    => (string) ($commercial['reference'] ?? ''),
+                'suppliers_id' => (int) $commercial['suppliers_id'],
+            ],
+            'final_prices'          => array_values($math['lines']),
+            'discounts'             => (string) $math['discounts'],
+            'taxes'                 => (string) $math['taxes'],
+            'freight'               => (string) $math['freight'],
+            'total'                 => (string) $math['total'],
         ];
     }
 
