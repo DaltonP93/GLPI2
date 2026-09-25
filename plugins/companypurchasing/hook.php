@@ -1,6 +1,6 @@
 <?php
 /**
- * Hooks de ciclo de vida de Company Purchasing (companypurchasing) — P2D-1 (núcleo).
+ * Hooks de ciclo de vida de Company Purchasing (companypurchasing) — P2D-1 (núcleo) … P2D-3 (recepción).
  *
  * install()/uninstall() usan MIGRACIONES REVERSIBLES con prefijo propio de tabla
  * (glpi_plugin_companypurchasing_*). NO se accede por SQL directo a tablas del core para saltar reglas
@@ -26,6 +26,14 @@
  * y columnas nuevas en `requests` (`quotes_id_selected`, `workflow_lock_version`, `workflow_synced_at`,
  * `policies_id`, `integrity_state`),
  * añadidas también en UPGRADE (ALTER idempotente) sobre una instalación P2D-1.
+ * Tablas propias P2D-3 (recepción física + handoff a SI-4; gate §5–§7):
+ *   - glpi_plugin_companypurchasing_receipt_batches  : lote/evento de recepción (idempotency_key UNIQUE).
+ *   - glpi_plugin_companypurchasing_receipt_units    : UNA fila por unidad física (receipt_unit_uuid UNIQUE).
+ *   - glpi_plugin_companypurchasing_inventory_outbox : handoff por unidad inventariable (payload inmutable).
+ *   - glpi_plugin_companypurchasing_cost_policies    : versiones INMUTABLES de la política de costo.
+ * y columnas nuevas en `items` (`ordered_qty`, `received_qty`, `purchase_unit_price`, `line_cost_total`) y en
+ * `requests` (`purchase_started_at`, `purchase_quotes_id`, `purchase_suppliers_id`, `cost_policies_id`,
+ * `receiving_seq`, `receiving_synced_seq`), añadidas también en UPGRADE (ALTER idempotente) sobre P2D-2.
  *
  * @license GPL-3.0-or-later
  */
@@ -252,6 +260,121 @@ function plugin_companypurchasing_install() {
         KEY `req_status` (`requests_id`,`status`)
     ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
 
+    // --- P2D-3: recepción física, costo atribuible y handoff (outbox) a SI-4. ---
+    // Contadores por línea: `ordered_qty` (cantidad aprobada CONGELADA al iniciar la compra) y `received_qty`
+    // (hecho físico). `pending = ordered_qty − received_qty` se DERIVA (no se almacena). `purchase_unit_price` y
+    // `line_cost_total` son el snapshot del precio final y del costo atribuible de la línea (política pinneada).
+    foreach ([
+        'ordered_qty'         => "INT UNSIGNED NOT NULL DEFAULT 0",
+        'received_qty'        => "INT UNSIGNED NOT NULL DEFAULT 0",
+        'purchase_unit_price' => "DECIMAL(20,6) NOT NULL DEFAULT 0",
+        'line_cost_total'     => "DECIMAL(20,6) NOT NULL DEFAULT 0",
+    ] as $col => $ddl) {
+        plugin_companypurchasing_add_column_if_missing('glpi_plugin_companypurchasing_items', $col, $ddl);
+    }
+    // Cabecera: inicio de compra (congelamiento), proveedor/cotización de la compra, política de costo pinneada
+    // y marcador DURABLE de sincronización con el motor (`receiving_seq` > `receiving_synced_seq` ⇒ pendiente).
+    foreach ([
+        'purchase_started_at'   => "TIMESTAMP NULL DEFAULT NULL",
+        'purchase_quotes_id'    => "INT UNSIGNED NOT NULL DEFAULT 0",
+        'purchase_suppliers_id' => "INT UNSIGNED NOT NULL DEFAULT 0",
+        'cost_policies_id'      => "INT UNSIGNED NOT NULL DEFAULT 0",
+        'receiving_seq'         => "INT UNSIGNED NOT NULL DEFAULT 0",
+        'receiving_synced_seq'  => "INT UNSIGNED NOT NULL DEFAULT 0",
+    ] as $col => $ddl) {
+        plugin_companypurchasing_add_column_if_missing('glpi_plugin_companypurchasing_requests', $col, $ddl);
+    }
+
+    // Lote/evento de recepción (APPEND-ONLY). `idempotency_key` de la OPERACIÓN (UNIQUE): reintentar la misma
+    // recepción devuelve el mismo lote. `input_sha256` detecta la reutilización de una clave con otra entrada.
+    $DB->doQuery("CREATE TABLE IF NOT EXISTS `glpi_plugin_companypurchasing_receipt_batches` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `requests_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `entities_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `idempotency_key` VARCHAR(190) NOT NULL,
+        `input_sha256` CHAR(64) NOT NULL DEFAULT '',
+        `actor_users_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `received_at` TIMESTAMP NULL DEFAULT NULL,
+        `notes` TEXT DEFAULT NULL,
+        `documents_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `cost_policies_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `units_count` INT UNSIGNED NOT NULL DEFAULT 0,
+        `correlation_id` VARCHAR(64) NOT NULL DEFAULT '',
+        `date_creation` TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (`id`),
+        UNIQUE KEY `idempotency_key` (`idempotency_key`),
+        KEY `requests_id` (`requests_id`),
+        KEY `entities_id` (`entities_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+
+    // UNA fila por unidad física. IDENTIDAD CANÓNICA = `receipt_unit_uuid` (UUID v4 CSPRNG, inmutable, UNIQUE);
+    // FK lógica = `items_id` (la línea real; NUNCA line_no). `unit_index`/`correlation_key` sólo display.
+    // `unit_cost` = snapshot INMUTABLE (exacto, DECIMAL). `serial` NULL = sin serial; UNIQUE por línea.
+    $DB->doQuery("CREATE TABLE IF NOT EXISTS `glpi_plugin_companypurchasing_receipt_units` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `receipt_batches_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `requests_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `items_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `entities_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `receipt_unit_uuid` CHAR(36) NOT NULL,
+        `serial` VARCHAR(190) DEFAULT NULL,
+        `currency_code` CHAR(3) NOT NULL DEFAULT 'PYG',
+        `unit_cost` DECIMAL(20,6) NOT NULL DEFAULT 0,
+        `is_inventoriable` TINYINT NOT NULL DEFAULT 0,
+        `physical_state` VARCHAR(30) NOT NULL DEFAULT 'RECEIVED',
+        `unit_index` INT UNSIGNED NOT NULL DEFAULT 0,
+        `correlation_key` VARCHAR(190) NOT NULL DEFAULT '',
+        `date_creation` TIMESTAMP NULL DEFAULT NULL,
+        `date_mod` TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (`id`),
+        UNIQUE KEY `receipt_unit_uuid` (`receipt_unit_uuid`),
+        UNIQUE KEY `item_serial` (`items_id`,`serial`),
+        KEY `receipt_batches_id` (`receipt_batches_id`),
+        KEY `items_id` (`items_id`),
+        KEY `requests_id` (`requests_id`),
+        KEY `entities_id` (`entities_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+
+    // Handoff a SI-4 (gate §7): una fila por unidad INVENTARIABLE, creada en la MISMA transacción que la unidad.
+    // Payload INMUTABLE y versionado (`payload_version`, `payload_json`, `payload_sha256`); sólo mutan los campos
+    // de ENTREGA (status, attempts, lease_*, next_retry_at, last_error, processed_at, date_mod).
+    $DB->doQuery("CREATE TABLE IF NOT EXISTS `glpi_plugin_companypurchasing_inventory_outbox` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `receipt_unit_uuid` CHAR(36) NOT NULL,
+        `receipt_units_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `requests_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `entities_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `payload_version` INT UNSIGNED NOT NULL DEFAULT 1,
+        `payload_json` LONGTEXT NOT NULL,
+        `payload_sha256` CHAR(64) NOT NULL DEFAULT '',
+        `status` VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+        `attempts` INT UNSIGNED NOT NULL DEFAULT 0,
+        `lease_token` CHAR(64) DEFAULT NULL,
+        `leased_by` VARCHAR(190) DEFAULT NULL,
+        `leased_until` TIMESTAMP NULL DEFAULT NULL,
+        `next_retry_at` TIMESTAMP NULL DEFAULT NULL,
+        `last_error` VARCHAR(255) DEFAULT NULL,
+        `processed_at` TIMESTAMP NULL DEFAULT NULL,
+        `date_creation` TIMESTAMP NULL DEFAULT NULL,
+        `date_mod` TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (`id`),
+        UNIQUE KEY `receipt_unit_uuid` (`receipt_unit_uuid`),
+        KEY `status_retry` (`status`,`next_retry_at`),
+        KEY `leased_until` (`leased_until`),
+        KEY `requests_id` (`requests_id`),
+        KEY `entities_id` (`entities_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+
+    // Versiones INMUTABLES de la política de costo (pinneadas por solicitud en `requests.cost_policies_id`).
+    $DB->doQuery("CREATE TABLE IF NOT EXISTS `glpi_plugin_companypurchasing_cost_policies` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `policy_hash` CHAR(64) NOT NULL DEFAULT '',
+        `policy_json` LONGTEXT NOT NULL,
+        `date_creation` TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (`id`),
+        UNIQUE KEY `policy_hash` (`policy_hash`)
+    ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+
     // Derecho propio del plugin en todos los perfiles (valor 0 por defecto). IDEMPOTENTE: GLPI vuelve a
     // llamar install() al ACTUALIZAR el plugin (p. ej. 0.2.0 → 0.3.0); re-agregarlo violaría el UNIQUE
     // (profiles_id, name) de glpi_profilerights y abortaría el upgrade.
@@ -265,7 +388,7 @@ function plugin_companypurchasing_install() {
         | Request::RIGHT_CREATE_REQUEST | Request::RIGHT_VIEW_OWN | Request::RIGHT_VIEW_ENTITY
         | Request::RIGHT_EDIT_DRAFT | Request::RIGHT_MANAGE_CONFIG
         | Request::RIGHT_MANAGE_PURCHASING | Request::RIGHT_RECEIVE | Request::RIGHT_DELIVER
-        | Request::RIGHT_VIEW_METRICS;
+        | Request::RIGHT_VIEW_METRICS | Request::RIGHT_INTEGRATION;
     $DB->update(
         'glpi_profilerights',
         ['rights' => $full],
@@ -312,6 +435,10 @@ function plugin_companypurchasing_uninstall() {
     }
 
     foreach ([
+        'glpi_plugin_companypurchasing_inventory_outbox',
+        'glpi_plugin_companypurchasing_receipt_units',
+        'glpi_plugin_companypurchasing_receipt_batches',
+        'glpi_plugin_companypurchasing_cost_policies',
         'glpi_plugin_companypurchasing_integrity',
         'glpi_plugin_companypurchasing_policies',
         'glpi_plugin_companypurchasing_quote_items',

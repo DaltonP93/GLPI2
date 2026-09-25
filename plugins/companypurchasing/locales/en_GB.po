@@ -95,3 +95,26 @@ msgstr "Purchasing state reconciliation"
 
 msgid "Reconcile purchase request states with the workflow engine"
 msgstr "Reconcile purchase request states with the workflow engine"
+
+msgid "Consume inventory handoff (integration)"
+msgstr "Consume inventory handoff (integration)"
+
+msgid "Receipt batch"
+msgid_plural "Receipt batches"
+msgstr[0] "Receipt batch"
+msgstr[1] "Receipt batches"
+
+msgid "Received unit"
+msgid_plural "Received units"
+msgstr[0] "Received unit"
+msgstr[1] "Received units"
+
+msgid "Inventory handoff"
+msgid_plural "Inventory handoffs"
+msgstr[0] "Inventory handoff"
+msgstr[1] "Inventory handoffs"
+
+msgid "Cost policy version"
+msgid_plural "Cost policy versions"
+msgstr[0] "Cost policy version"
+msgstr[1] "Cost policy versions"

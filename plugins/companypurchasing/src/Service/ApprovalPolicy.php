@@ -61,6 +61,13 @@ final class ApprovalPolicy
         if (array_diff($data['pdf_stages'], PurchasingWorkflow::APPROVAL_STAGES) !== []) {
             throw new \RuntimeException('política: pdf_stages sólo admite etapas de aprobación (fail-closed)');
         }
+        // P2D-3: en la fase de compra/recepción el contenido aprobado está CONGELADO; ninguna política puede
+        // habilitar cotizar/enmendar ahí.
+        foreach (['quote_states', 'amend_states'] as $k) {
+            if (array_intersect($data[$k], PurchasingWorkflow::PURCHASE_STATES) !== []) {
+                throw new \RuntimeException("política: '{$k}' no admite estados de la fase de compra/recepción (fail-closed)");
+            }
+        }
         return new self($data, $id);
     }
 

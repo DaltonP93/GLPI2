@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Probe INTERNO de concurrencia (numeración / envío). Ejecuta UNA operación y imprime el resultado en
+ * Probe INTERNO de concurrencia (numeración / envío / aprobación / recepción / claim del outbox). Ejecuta UNA operación y imprime el resultado en
  * stdout (`OK:<seq>` / `ERR:<motivo>`), pensado para lanzarse en PARALELO desde el selftest (procesos
  * reales contra MariaDB) y demostrar que la numeración y `submitDraft()` son concurrency-safe.
  *
@@ -15,11 +15,13 @@ declare(strict_types=1);
 
 namespace GlpiPlugin\Companypurchasing\Command;
 
+use GlpiPlugin\Companypurchasing\Api\PurchasingIntegrationApi;
 use GlpiPlugin\Companypurchasing\Model\Request;
 use GlpiPlugin\Companypurchasing\Service\ApprovalOrchestrator;
 use GlpiPlugin\Companypurchasing\Service\DocumentVersionAllocator;
 use GlpiPlugin\Companypurchasing\Service\NumberingService;
 use GlpiPlugin\Companypurchasing\Service\QuoteManager;
+use GlpiPlugin\Companypurchasing\Service\ReceivingService;
 use GlpiPlugin\Companypurchasing\Service\RequestManager;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
@@ -32,7 +34,7 @@ final class ConcurrencyProbeCommand extends Command
     {
         $this->setName('plugins:companypurchasing:concurrency-probe')
             ->setDescription('Probe INTERNO de concurrencia (numeración/submit/cotización/versiones/aprobación). Sólo para pruebas.')
-            ->addOption('op', null, InputOption::VALUE_REQUIRED, 'assign | submit | edit | addline | select-quote | docversion | approve')
+            ->addOption('op', null, InputOption::VALUE_REQUIRED, 'assign | submit | edit | addline | select-quote | docversion | approve | receive | claim')
             ->addOption('entity', null, InputOption::VALUE_OPTIONAL, 'entities_id', '0')
             ->addOption('year', null, InputOption::VALUE_OPTIONAL, 'año', '0')
             ->addOption('request', null, InputOption::VALUE_OPTIONAL, 'requests_id', '0')
@@ -42,7 +44,14 @@ final class ConcurrencyProbeCommand extends Command
             ->addOption('expect', null, InputOption::VALUE_OPTIONAL, 'lock_version esperado (select-quote)', '-1')
             ->addOption('scope', null, InputOption::VALUE_OPTIONAL, 'scope (docversion)', 'REQUEST_SCOPE')
             ->addOption('hash', null, InputOption::VALUE_OPTIONAL, 'sha256 del payload (docversion)', '')
-            ->addOption('state', null, InputOption::VALUE_OPTIONAL, 'etapa esperada (approve; obligatoria)', '');
+            ->addOption('state', null, InputOption::VALUE_OPTIONAL, 'etapa esperada (approve; obligatoria)', '')
+            // P2D-3
+            ->addOption('item', null, InputOption::VALUE_OPTIONAL, 'items_id (receive)', '0')
+            ->addOption('qty', null, InputOption::VALUE_OPTIONAL, 'cantidad (receive)', '0')
+            ->addOption('key', null, InputOption::VALUE_OPTIONAL, 'idempotency_key (receive)', '')
+            ->addOption('worker', null, InputOption::VALUE_OPTIONAL, 'workerId (claim)', '')
+            ->addOption('limit', null, InputOption::VALUE_OPTIONAL, 'límite (claim)', '10')
+            ->addOption('lease', null, InputOption::VALUE_OPTIONAL, 'segundos de lease (claim)', '60');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -60,6 +69,20 @@ final class ConcurrencyProbeCommand extends Command
                     (int) $input->getOption('year')
                 );
                 $output->writeln('OK:' . $seq);
+                return Command::SUCCESS;
+            }
+
+            // P2D-3: toma CONCURRENTE del outbox por la API pública (sin solicitud): sesión de integración con
+            // SÓLO el bit RIGHT_INTEGRATION en la entidad indicada (mínimo privilegio).
+            if ($op === 'claim') {
+                $entity = (int) $input->getOption('entity');
+                $this->applyIntegrationSession((int) $input->getOption('user'), $entity);
+                $got = (new PurchasingIntegrationApi())->claimPending(
+                    (string) $input->getOption('worker'),
+                    (int) $input->getOption('limit'),
+                    (int) $input->getOption('lease')
+                );
+                $output->writeln('OK:' . implode(',', array_map(static fn (array $c): string => $c['receipt_unit_uuid'], $got)));
                 return Command::SUCCESS;
             }
 
@@ -89,6 +112,13 @@ final class ConcurrencyProbeCommand extends Command
                     $r = (new ApprovalOrchestrator())->decide($reqId, 'approve', (string) $input->getOption('state'), 'probe-' . getmypid());
                     $output->writeln('OK:' . $r['status'] . ':v' . (int) ($r['document_version'] ?? 0));
                     return Command::SUCCESS;
+                // ---- P2D-3 ----
+                case 'receive':
+                    $r = (new ReceivingService())->receive($reqId, (string) $input->getOption('key'), [[
+                        'items_id' => (int) $input->getOption('item'), 'quantity' => (string) $input->getOption('qty'),
+                    ]]);
+                    $output->writeln('OK:' . $r['status'] . ':' . count($r['units']) . ':' . $r['batch_id']);
+                    return Command::SUCCESS;
                 case 'submit':
                     $output->writeln('OK:' . $rm->submitDraft($reqId));
                     return Command::SUCCESS;
@@ -117,7 +147,8 @@ final class ConcurrencyProbeCommand extends Command
     {
         $full = READ
             | Request::RIGHT_CREATE_REQUEST | Request::RIGHT_VIEW_OWN | Request::RIGHT_VIEW_ENTITY
-            | Request::RIGHT_EDIT_DRAFT | Request::RIGHT_MANAGE_CONFIG | Request::RIGHT_MANAGE_PURCHASING;
+            | Request::RIGHT_EDIT_DRAFT | Request::RIGHT_MANAGE_CONFIG | Request::RIGHT_MANAGE_PURCHASING
+            | Request::RIGHT_RECEIVE;
         $_SESSION['glpiID']                      = $userId;
         $_SESSION['glpiname']                    = 'cpur_probe';
         $_SESSION['glpiactive_entity']           = $entity;
@@ -134,6 +165,23 @@ final class ConcurrencyProbeCommand extends Command
             'plugin_companypurchasing' => $full,
             'plugin_companyworkflow'   => READ | 2,
             'plugin_companysignature'  => ALLSTANDARDRIGHT,
+        ];
+    }
+
+    /** P2D-3: sesión de worker de integración (sólo RIGHT_INTEGRATION; nada de Compras ni del motor). */
+    private function applyIntegrationSession(int $userId, int $entity): void
+    {
+        $_SESSION['glpiID']                      = $userId;
+        $_SESSION['glpiname']                    = 'cpur_probe_integration';
+        $_SESSION['glpiactive_entity']           = $entity;
+        $_SESSION['glpiactiveentities']          = [$entity];
+        $_SESSION['glpiactiveentities_string']   = "'" . $entity . "'";
+        $_SESSION['glpiactive_entity_recursive'] = 0;
+        $_SESSION['glpigroups']                  = [];
+        $_SESSION['glpi_currenttime']            = date('Y-m-d H:i:s');
+        $_SESSION['glpiactiveprofile']           = [
+            'id' => 1, 'interface' => 'central', 'entities_id' => $entity,
+            'plugin_companypurchasing' => Request::RIGHT_INTEGRATION,
         ];
     }
 }
