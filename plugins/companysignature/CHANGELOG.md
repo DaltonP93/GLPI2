@@ -3,6 +3,39 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.5.0] — Fase 2D · P2D-2 (invalidación exacta por checkpoint)
+### Changed
+- **Invalidación EXACTA POR CHECKPOINT** (domain-agnostic): al materializar `approval_invalidated`, sólo se
+  anulan las aprobaciones tomadas en una **visita de estado** iniciada en/después de la última entrada de
+  la instancia en el checkpoint de reapertura (`reopen_to_code`). Antes se anulaban **todas** las
+  aprobaciones previas de la instancia, lo que invalidaba evidencia de scopes no afectados (p. ej. la del
+  jefe de área al reabrir la etapa comercial en `companypurchasing`). La visita se deriva del ledger porque
+  el motor registra la decisión de un actor único **después** de la fila `transitioned` (en quórum, antes).
+  Sin ledger/checkpoint localizable ⇒ comportamiento previo (anula todas; conservador).
+- **Lectura incierta del ledger ⇒ PENDING, nunca "anular todo"**: `resolveCheckpoint()` devuelve un
+  resultado explícito (`ok`/`pending`/`error`/`legacy`). Con `reopen_to_code`, si `history()` falla o la lectura
+  no contiene la propia invalidación ⇒ `R_PENDING` (retryable) y **cero** evidencias de invalidación; ledger
+  legible pero checkpoint nunca ingresado ⇒ `R_ERROR` visible. Sólo una invalidación legacy sin
+  `reopen_to_code` anula todas (documentado).
+- Tests: unit (`checkpointEntryId`, `visitStartOf`, `isVoidedByCheckpoint` en ambos órdenes,
+  `resolveCheckpoint`) + selftest `[INVALIDATE-CHECKPOINT]` (reabrir S2 deja S1 `valid` y S2 `invalidated`) y
+  `[INVALIDATE-LEDGER-FAIL]` (`history()` caído con `historyById()` disponible ⇒ pending, nada anulado; al
+  volver, anulación exacta).
+
+### Fixed — `install()` seguro en upgrade (0.4.0 → 0.5.0)
+- GLPI vuelve a llamar `plugin_companysignature_install()` al actualizar el plugin. Antes,
+  `ProfileRight::addProfileRights()` re-insertaba el derecho y el upgrade abortaba con
+  `Duplicate entry '<perfil>-plugin_companysignature' for key 'unicity'`; ahora sólo se agrega si falta.
+- La configuración ya no se sobrescribe: se siembran **sólo las claves ausentes**. Un upgrade conserva lo
+  que ajustó el administrador y el high-watermark durable de la reconciliación (`last_seen_history_id`),
+  que antes volvía a `0`.
+- `CronTask::register()` es idempotente (no inserta si ya existe `(itemtype, name)`): el upgrade no duplica
+  la Acción automática `reconcile` ni pisa su frecuencia/estado.
+- Test: selftest `[UPGRADE]` sobre una instalación existente con derecho, configuración, derecho de perfil y
+  frecuencia personalizados + evidencias reales: `install()` ×2 sin excepción; derecho una vez por perfil;
+  personalizaciones preservadas; default ausente agregado; Acción automática única (mismo id);
+  evidencias/versiones/cola intactas (conteo + huella sha256).
+
 ## [0.4.0] — Fase 2C (integridad probatoria)
 ### Hardening — durabilidad fail-closed (cola de reconciliación + lock del PDF)
 - **Watermark FAIL-CLOSED (§1):** `ReconcileService::harvest()` sólo avanza `last_seen_history_id`

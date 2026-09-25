@@ -59,3 +59,39 @@ msgstr "Registrar entrega"
 
 msgid "View purchasing metrics"
 msgstr "Ver métricas de compras"
+
+msgid "Quote"
+msgid_plural "Quotes"
+msgstr[0] "Cotización"
+msgstr[1] "Cotizaciones"
+
+msgid "Quote line"
+msgid_plural "Quote lines"
+msgstr[0] "Línea de cotización"
+msgstr[1] "Líneas de cotización"
+
+msgid "Document version"
+msgid_plural "Document versions"
+msgstr[0] "Versión documental"
+msgstr[1] "Versiones documentales"
+
+msgid "Document version sequence"
+msgid_plural "Document version sequences"
+msgstr[0] "Secuencia de versiones documentales"
+msgstr[1] "Secuencias de versiones documentales"
+
+msgid "Approval policy version"
+msgid_plural "Approval policy versions"
+msgstr[0] "Versión de política de aprobación"
+msgstr[1] "Versiones de política de aprobación"
+
+msgid "Approval integrity mark"
+msgid_plural "Approval integrity marks"
+msgstr[0] "Marca de integridad de aprobación"
+msgstr[1] "Marcas de integridad de aprobación"
+
+msgid "Purchasing state reconciliation"
+msgstr "Reconciliación de estados de compras"
+
+msgid "Reconcile purchase request states with the workflow engine"
+msgstr "Reconciliar el estado de las solicitudes de compra con el motor de workflow"

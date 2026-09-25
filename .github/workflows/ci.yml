@@ -174,6 +174,9 @@ jobs:
           # selftests (recupera evidencia si un listener se pierde). También obligatorio.
           echo "== reconcile companysignature (idempotente) =="
           docker compose exec -T -u www-data glpi php bin/console plugins:companysignature:reconcile --no-interaction
+          # Proyección domain_state de companypurchasing (P2D-2): el motor gana; idempotente y sin errores.
+          echo "== reconcile companypurchasing (idempotente) =="
+          docker compose exec -T -u www-data glpi php bin/console plugins:companypurchasing:reconcile --no-interaction
 
       - name: Autotest de integración companyqr (ACL multi-entidad, no-fuga, ciclo, etiqueta) — FAIL-CLOSED
         working-directory: infra/docker

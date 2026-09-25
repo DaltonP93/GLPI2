@@ -14,7 +14,7 @@
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYPURCHASING_VERSION', '0.2.0');
+define('PLUGIN_COMPANYPURCHASING_VERSION', '0.3.0');
 
 // Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
 // max='12.0' => GLPI 11.x soportado; 12.x NO hasta pasar la suite de regresion.
@@ -34,13 +34,23 @@ function plugin_init_companypurchasing() {
     $PLUGIN_HOOKS['csrf_compliant']['companypurchasing'] = true;
 
     // Registrar la clase de solicitud (para derechos/perfiles y futuras pestañas). El derecho
-    // `plugin_companypurchasing` y sus bits (ACL por acción) viven en este modelo.
+    // `plugin_companypurchasing` y sus bits (ACL por acción) viven en este modelo. `document_types`: el PDF
+    // aprobado (companysignature) se vincula a la solicitud como `Document_Item` NATIVO.
     if (class_exists(\GlpiPlugin\Companypurchasing\Model\Request::class)) {
-        Plugin::registerClass(\GlpiPlugin\Companypurchasing\Model\Request::class);
+        Plugin::registerClass(\GlpiPlugin\Companypurchasing\Model\Request::class, ['document_types' => true]);
+    }
+    // P2D-2: cotizaciones con N adjuntos vía `Document` + `Document_Item` NATIVOS (sin duplicar maestros).
+    if (class_exists(\GlpiPlugin\Companypurchasing\Model\Quote::class)) {
+        Plugin::registerClass(\GlpiPlugin\Companypurchasing\Model\Quote::class, ['document_types' => true]);
     }
 
-    // P2D-2…P2D-4 (no implementado en el núcleo): integración con companyworkflow/companysignature,
-    // recepción/outbox y UI (portal/formularios/bandejas/métricas).
+    // P2D-2: proyección best-effort del estado del motor (companyworkflow es la AUTORIDAD). Si el listener se
+    // pierde, converge la Acción automática NATIVA `reconcileprojection` (lotes con cursor + wrap-around; ver
+    // hook.php) o el comando `plugins:companypurchasing:reconcile`.
+    $PLUGIN_HOOKS['companyworkflow:transitioned']['companypurchasing']         = 'plugin_companypurchasing_on_workflow_event';
+    $PLUGIN_HOOKS['companyworkflow:approval_invalidated']['companypurchasing'] = 'plugin_companypurchasing_on_workflow_event';
+
+    // P2D-3…P2D-4 (no implementado): recepción/outbox y UI (portal/formularios/bandejas/métricas).
 }
 
 /**

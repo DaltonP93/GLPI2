@@ -43,6 +43,29 @@ final class AdvisoryLock
         }
     }
 
+    /**
+     * Ejecuta `$fn` bajo el LOCK COMÚN de una solicitud (`request_<id>`): el MISMO lock que serializa las
+     * mutaciones de `RequestManager` (P2D-1), las de cotizaciones y los pasos de la saga de aprobación
+     * (P2D-2). No anidar: quien lo sostiene no llama a otro método que lo adquiera.
+     *
+     * @return mixed lo que devuelva `$fn`
+     */
+    public function withRequestLock(int $requestId, \Closure $fn, int $timeoutSeconds = 10): mixed
+    {
+        if ($requestId <= 0) {
+            throw new \RuntimeException('solicitud inválida');
+        }
+        $name = self::name('request_' . $requestId);
+        if (!$this->acquire($name, $timeoutSeconds)) {
+            throw new \RuntimeException('no se pudo obtener el lock de la solicitud (reintente)');
+        }
+        try {
+            return $fn();
+        } finally {
+            $this->release($name);
+        }
+    }
+
     /** Libera el lock (`RELEASE_LOCK`). Best-effort. */
     public function release(string $name): void
     {

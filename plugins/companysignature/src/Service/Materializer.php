@@ -197,8 +197,27 @@ class Materializer
         }
         $docVersion = (int) ($meta['document_version'] ?? 0);
         $actor = (int) ($meta['actor'] ?? 0); // ACTOR DURABLE reconstruido del ledger (§4)
+        // Invalidación EXACTA POR CHECKPOINT: sólo se anulan las aprobaciones tomadas en una VISITA de estado
+        // que comenzó desde la última entrada de la instancia en el checkpoint de reapertura. Las anteriores
+        // (p. ej. la del jefe de área cuando se reabre la etapa comercial) protegían OTRO contenido y siguen
+        // vigentes. Si el ledger NO se puede leer con certeza ⇒ PENDING (reintento) y CERO evidencias: una
+        // falla temporal jamás degenera en "anular todo". Sólo una invalidación LEGACY sin `reopen_to_code`
+        // conserva el comportamiento global previo (anula todas).
+        $rows = $this->instanceLedger($instanceId);
+        $cp = self::resolveCheckpoint($rows, $historyId, (string) ($meta['reopen_to_code'] ?? ''));
+        if ($cp['status'] === 'pending') {
+            return ['created' => 0, 'status' => self::R_PENDING, 'reason' => 'ledger de la instancia no legible con certeza (reintentar)'];
+        }
+        if ($cp['status'] === 'error') {
+            return ['created' => 0, 'status' => self::R_ERROR, 'reason' => 'checkpoint de reapertura nunca ingresado según el ledger (inconsistente)'];
+        }
+        $rows = $rows ?? [];
+        $entryHid = $cp['entry']; // 0 sólo en 'legacy' ⇒ anula todas (documentado)
         $created = 0;
         foreach ($this->standingApprovals($instanceId, $historyId) as $approval) {
+            if (!self::isVoidedByCheckpoint($rows, (int) $approval->fields['workflow_history_id'], $entryHid)) {
+                continue; // decidida en una visita ANTERIOR al checkpoint: sigue vigente
+            }
             $key = $this->keys->forInvalidation($historyId, $docVersion, (int) $approval->getID());
             if ($this->recorder->findByKey($key) !== null) {
                 continue;
@@ -401,6 +420,135 @@ class Materializer
             'entities_id'  => (int) ($inst->fields['entities_id'] ?? 0),
             'is_recursive' => (int) ($inst->fields['is_recursive'] ?? 0),
         ]];
+    }
+
+    /**
+     * Ledger de la instancia, o NULL si no se pudo leer (dependencia ausente o falla temporal). NULL NUNCA se
+     * confunde con "ledger vacío": quien lo consume debe tratarlo como incertidumbre (PENDING).
+     *
+     * @return array<int,array<string,mixed>>|null
+     */
+    private function instanceLedger(int $instanceId): ?array
+    {
+        $api = $this->workflowApi();
+        if ($api === null || !method_exists($api, 'history')) {
+            return null;
+        }
+        try {
+            $rows = $api->history(['instances_id' => $instanceId]);
+            return is_array($rows) ? $rows : null;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * PURO: resuelve el checkpoint de una invalidación con resultado EXPLÍCITO:
+     *   - `legacy`  sin `reopen_to_code` (invalidación antigua) ⇒ entry 0 ⇒ anula todas (comportamiento previo);
+     *   - `pending` ledger no legible (`null`) o incompleto (no contiene la propia invalidación) ⇒ reintentar;
+     *   - `error`   ledger legible y completo pero el checkpoint NUNCA fue ingresado ⇒ inconsistente, visible;
+     *   - `ok`      entrada localizada con certeza.
+     *
+     * @param array<int,array<string,mixed>>|null $rows
+     * @return array{status:string, entry:int}
+     */
+    public static function resolveCheckpoint(?array $rows, int $invalidationHid, string $reopenCode): array
+    {
+        if ($reopenCode === '') {
+            return ['status' => 'legacy', 'entry' => 0];
+        }
+        if ($rows === null) {
+            return ['status' => 'pending', 'entry' => 0];
+        }
+        $complete = false;
+        foreach ($rows as $r) {
+            if ((int) ($r['id'] ?? 0) === $invalidationHid) {
+                $complete = true;
+                break;
+            }
+        }
+        if (!$complete) {
+            return ['status' => 'pending', 'entry' => 0];
+        }
+        $entry = self::checkpointEntryId($rows, $invalidationHid, $reopenCode);
+        return $entry > 0 ? ['status' => 'ok', 'entry' => $entry] : ['status' => 'error', 'entry' => 0];
+    }
+
+    /** Eventos del ledger que hacen ENTRAR la instancia a un estado (`to_code`). */
+    private const ENTRY_EVENTS = ['started', 'transitioned', 'approval_invalidated'];
+
+    /**
+     * PURO: inicio de la VISITA de estado en la que se tomó la decisión `$decisionHid`: la última entrada
+     * (anterior a la decisión) al estado `from_code` de la decisión. 0 si no se puede determinar.
+     *
+     * Necesario porque el motor registra la decisión de un actor ÚNICO *después* de la fila `transitioned`
+     * que sale del estado (en quórum, antes): el orden de ids no basta para saber en qué visita se decidió.
+     *
+     * @param array<int,array<string,mixed>> $rows
+     */
+    public static function visitStartOf(array $rows, int $decisionHid): int
+    {
+        $from = null;
+        foreach ($rows as $r) {
+            if ((int) ($r['id'] ?? 0) === $decisionHid) {
+                $from = (string) ($r['from_code'] ?? '');
+                break;
+            }
+        }
+        if ($from === null || $from === '') {
+            return 0;
+        }
+        $start = 0;
+        foreach ($rows as $r) {
+            $id = (int) ($r['id'] ?? 0);
+            if ($id > 0 && $id < $decisionHid && $id > $start
+                && in_array((string) ($r['event'] ?? ''), self::ENTRY_EVENTS, true)
+                && (string) ($r['to_code'] ?? '') === $from) {
+                $start = $id;
+            }
+        }
+        return $start;
+    }
+
+    /**
+     * PURO: ¿la invalidación (cuyo checkpoint fue ingresado por última vez en `$entryHid`) anula la
+     * decisión `$decisionHid`? Sí si su visita comenzó en/después de esa entrada. `$entryHid = 0` sólo llega
+     * aquí para una invalidación LEGACY sin checkpoint (`resolveCheckpoint()` ⇒ `legacy`) ⇒ anula todas; una
+     * lectura incierta del ledger NUNCA llega aquí (queda PENDING). Visita no determinable ⇒ se anula.
+     *
+     * @param array<int,array<string,mixed>> $rows
+     */
+    public static function isVoidedByCheckpoint(array $rows, int $decisionHid, int $entryHid): bool
+    {
+        if ($entryHid <= 0) {
+            return true;
+        }
+        $visit = self::visitStartOf($rows, $decisionHid);
+        return $visit === 0 || $visit >= $entryHid;
+    }
+
+    /**
+     * PURO (unit-testable): última fila del ledger ANTERIOR a `$beforeHistoryId` que hace ENTRAR la
+     * instancia al estado `$checkpointCode` (`started`/`transitioned`/`approval_invalidated` con
+     * `to_code` = checkpoint). 0 si no existe.
+     *
+     * @param array<int,array<string,mixed>> $rows
+     */
+    public static function checkpointEntryId(array $rows, int $beforeHistoryId, string $checkpointCode): int
+    {
+        $entry = 0;
+        foreach ($rows as $r) {
+            $id = (int) ($r['id'] ?? 0);
+            if ($id <= 0 || $id >= $beforeHistoryId || $checkpointCode === '') {
+                continue;
+            }
+            if (in_array((string) ($r['event'] ?? ''), self::ENTRY_EVENTS, true)
+                && (string) ($r['to_code'] ?? '') === $checkpointCode
+                && $id > $entry) {
+                $entry = $id;
+            }
+        }
+        return $entry;
     }
 
     /** @return object|null instancia de WorkflowApi de companyworkflow, o null si no está disponible */
