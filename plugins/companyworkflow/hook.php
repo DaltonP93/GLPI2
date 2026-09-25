@@ -194,8 +194,11 @@ function plugin_companyworkflow_install() {
         ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
     }
 
-    // --- ACL: derecho propio del plugin en todos los perfiles (0 por defecto) ---
-    if (class_exists('ProfileRight')) {
+    // --- ACL: derecho propio del plugin en todos los perfiles (0 por defecto). Sólo si FALTA: GLPI
+    // vuelve a llamar install() al ACTUALIZAR el plugin; re-agregarlo violaría el UNIQUE
+    // (profiles_id, name) de glpi_profilerights y abortaría el upgrade. ---
+    if (class_exists('ProfileRight')
+        && countElementsInTable(ProfileRight::getTable(), ['name' => WorkflowDef::$rightname]) === 0) {
         ProfileRight::addProfileRights([WorkflowDef::$rightname]);
     }
     // Otorgar todos los bits al perfil Super-Admin (id 4 por defecto en GLPI).
@@ -207,12 +210,20 @@ function plugin_companyworkflow_install() {
         ['profiles_id' => 4, 'name' => WorkflowDef::$rightname]
     );
 
-    // --- Configuración por defecto (sin secretos) ---
+    // --- Configuración por defecto (sin secretos). Sólo se siembran las claves AUSENTES: un
+    // reinstall/upgrade NO pisa lo que ajustó un administrador (SLA/escalamiento, límites operativos
+    // ni claves agregadas por versiones futuras). ---
     if (class_exists('Config')) {
-        Config::setConfigurationValues(PluginConfig::CONTEXT, PluginConfig::DEFAULTS);
+        $current = Config::getConfigurationValues(PluginConfig::CONTEXT);
+        $missing = array_diff_key(PluginConfig::DEFAULTS, is_array($current) ? $current : []);
+        if ($missing !== []) {
+            Config::setConfigurationValues(PluginConfig::CONTEXT, $missing);
+        }
     }
 
-    // --- CronTask nativo para SLA/escalamiento (nunca aprueba solo) ---
+    // --- CronTask nativo para SLA/escalamiento (nunca aprueba solo). Idempotente:
+    // CronTask::register() no inserta si ya existe (itemtype, name), así que un upgrade conserva la
+    // Acción automática (y su frecuencia/estado ajustados) sin duplicarla. ---
     if (class_exists('CronTask')) {
         CronTask::register(
             Instance::class,

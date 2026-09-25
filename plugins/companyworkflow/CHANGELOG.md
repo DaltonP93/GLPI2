@@ -3,6 +3,24 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [Unreleased]
+### Fixed — `install()` seguro en upgrade (issue #14)
+- GLPI vuelve a llamar `plugin_companyworkflow_install()` al actualizar el plugin. Antes,
+  `ProfileRight::addProfileRights()` re-insertaba el derecho y el upgrade abortaba con
+  `Duplicate entry '<perfil>-plugin_companyworkflow' for key 'unicity'`; ahora sólo se agrega si falta
+  (Super-Admin sigue recibiendo todos los bits, como antes).
+- La configuración ya no se sobrescribe: se siembran **sólo las claves ausentes**. Un upgrade conserva lo
+  que ajustó el administrador (SLA/escalamiento, `max_resolved_approvers`) y cualquier clave agregada por
+  otra versión.
+- `CronTask::register()` es idempotente (no inserta si ya existe `(itemtype, name)`): el upgrade no duplica
+  la Acción automática `escalation` ni pisa su frecuencia/estado/retención de logs.
+- Sin cambios en la lógica del motor ni en la versión del plugin: la corrección protege el **próximo**
+  upgrade.
+- Test: selftest `[UPGRADE]` sobre una instalación existente con derecho, configuración (incluida una clave
+  desconocida), derecho de perfil y Acción automática personalizados + datos reales del motor:
+  `install()` ×2 sin excepción; derecho una vez por perfil; personalizaciones preservadas; default ausente
+  agregado; Acción automática única (mismo id); las 8 tablas del motor intactas (conteo + huella sha256).
+
 ## [0.5.0]
 ### Fixed — selftest / CI (corrección de "falso verde")
 - **CI ejecuta de verdad los selftests Fase 2:** se descubrió que el paso de integración los
