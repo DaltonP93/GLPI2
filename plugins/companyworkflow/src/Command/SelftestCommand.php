@@ -25,6 +25,9 @@
  *   [VERSION]     una instancia conserva la versión de definición con que fue iniciada.
  *   [AUDIT]       historial append-only.
  *   [SLA]         detección de vencimiento + escalamiento (nunca aprueba solo).
+ *   [UPGRADE]     install() sobre una instalación EXISTENTE (×2): sin UNIQUE, derecho una vez por perfil,
+ *                 configuración/derecho/Acción automática personalizados PRESERVADOS, sólo defaults
+ *                 ausentes agregados, Acción automática única, datos del motor intactos.
  *
  * @license GPL-3.0-or-later
  */
@@ -34,6 +37,8 @@ declare(strict_types=1);
 namespace GlpiPlugin\Companyworkflow\Command;
 
 use Computer;
+use Config;
+use CronTask;
 use Entity;
 use Glpi\Http\Firewall;
 use Glpi\Security\Attribute\SecurityStrategy;
@@ -54,7 +59,9 @@ use GlpiPlugin\Companyworkflow\Service\Engine;
 use GlpiPlugin\Companyworkflow\Service\PluginConfig;
 use GlpiPlugin\Companyworkflow\Service\SlaService;
 use GlpiPlugin\Companyworkflow\Service\TransitionResult;
+use Profile;
 use Profile_User;
+use ProfileRight;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -110,6 +117,14 @@ final class SelftestCommand extends Command
         $this->scenarioStartInstanceValidation();
         $this->scenarioSla();
         $this->scenarioVersioning();
+
+        // Upgrade al final (con definiciones/instancias/historial/delegaciones de esta corrida presentes).
+        // Una excepción se reporta como comprobación FALLIDA (fail-closed) en vez de abortar sin resumen.
+        try {
+            $this->scenarioUpgradeReinstall();
+        } catch (\Throwable $e) {
+            $this->check('[UPGRADE] sin excepción: ' . $e->getMessage(), false);
+        }
 
         $this->cleanup();
 
@@ -835,6 +850,160 @@ final class SelftestCommand extends Command
             return ((int) $row['c']) > 0;
         }
         return false;
+    }
+
+    // ------------------------------------------------------------------ [UPGRADE]
+
+    /**
+     * [UPGRADE] install() sobre una instalación EXISTENTE: lo que hace GLPI al actualizar el plugin (vuelve a
+     * llamar `plugin_companyworkflow_install()` con tablas, derecho, configuración, Acción automática y datos
+     * del motor ya presentes). Se ejecuta DOS veces (idempotencia) y al final se restaura el estado previo
+     * (config, derecho, Acción automática) para no afectar a los pasos siguientes de CI.
+     */
+    private function scenarioUpgradeReinstall(): void
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $this->out->writeln('== [UPGRADE] install() sobre una instalación existente ==');
+        if (!function_exists('plugin_companyworkflow_install')) {
+            include_once dirname(__DIR__, 2) . '/hook.php';
+        }
+        if (!function_exists('plugin_companyworkflow_install')) {
+            $this->check('[UPGRADE] plugin_companyworkflow_install() disponible', false);
+            return;
+        }
+        $right = WorkflowDef::$rightname;
+
+        // --- Instalación existente: derecho, datos del motor y Acción automática ya presentes.
+        $profiles = countElementsInTable(Profile::getTable());
+        $this->check('[UPGRADE] precondición: derecho ya existente (una fila por perfil)', $profiles > 0 && countElementsInTable(ProfileRight::getTable(), ['name' => $right]) === $profiles);
+        $before = $this->engineFingerprint();
+        $this->check(sprintf(
+            '[UPGRADE] precondición: datos del motor existentes (defs=%d instancias=%d historial=%d delegaciones=%d)',
+            $before['defs']['count'],
+            $before['instances']['count'],
+            $before['history']['count'],
+            $before['delegations']['count']
+        ), $before['defs']['count'] > 0 && $before['instances']['count'] > 0 && $before['history']['count'] > 0 && $before['delegations']['count'] > 0);
+
+        // Configuración administrativa personalizada (SLA/escalamiento, límite operativo) + una clave que el
+        // plugin no conoce (p. ej. un cursor/opción agregado por otra versión): nada de eso debe pisarse.
+        $orig = Config::getConfigurationValues(PluginConfig::CONTEXT);
+        $extraKey = 'selftest_upgrade_marker_' . $this->suffix;
+        $custom = [
+            'sla_check_enabled'      => '0',
+            'escalation_enabled'     => '0',
+            'max_resolved_approvers' => '37',
+            $extraKey                => 'keep',
+        ];
+        Config::setConfigurationValues(PluginConfig::CONTEXT, $custom);
+        // Default AUSENTE en la instalación existente (lo que ocurre cuando una versión nueva agrega una clave).
+        Config::deleteConfigurationValues(PluginConfig::CONTEXT, ['notifications_enabled']);
+
+        // Derecho personalizado por el administrador en un perfil que NO es Super-Admin.
+        $otherProfile = 0;
+        foreach ($DB->request(['SELECT' => 'id', 'FROM' => Profile::getTable(), 'WHERE' => ['NOT' => ['id' => 4]], 'ORDER' => 'id', 'LIMIT' => 1]) as $row) {
+            $otherProfile = (int) $row['id'];
+        }
+        $otherOrig = $this->profileRight($otherProfile);
+        ProfileRight::updateProfileRights($otherProfile, [$right => READ | WorkflowDef::RIGHT_DELEGATE]);
+
+        // Acción automática existente con configuración operacional ajustada por el administrador.
+        $cron = new CronTask();
+        $cronId = $cron->getFromDBbyName(Instance::class, 'escalation') ? (int) $cron->getID() : 0;
+        $cronOrig = ['frequency' => (int) ($cron->fields['frequency'] ?? 0), 'state' => (int) ($cron->fields['state'] ?? 0), 'logs_lifetime' => (int) ($cron->fields['logs_lifetime'] ?? 0)];
+        $cronCustom = ['frequency' => 7200, 'state' => CronTask::STATE_DISABLE, 'logs_lifetime' => 7];
+        $this->check('[UPGRADE] precondición: Acción automática escalation registrada (una)', $cronId > 0 && countElementsInTable(CronTask::getTable(), ['itemtype' => Instance::class]) === 1);
+        $cron->update(['id' => $cronId] + $cronCustom);
+
+        try {
+            $errors = [];
+            foreach ([1, 2] as $pass) {
+                try {
+                    if (plugin_companyworkflow_install() !== true) {
+                        $errors[] = "pasada {$pass}: install() no devolvió true";
+                    }
+                } catch (\Throwable $e) {
+                    $errors[] = "pasada {$pass}: " . $e->getMessage();
+                }
+            }
+            $this->check('[UPGRADE] install() ×2 sin excepción ni violación UNIQUE' . ($errors !== [] ? ' — ' . implode(' | ', $errors) : ''), $errors === []);
+
+            $perProfile = [];
+            foreach ($DB->request(['SELECT' => 'profiles_id', 'FROM' => ProfileRight::getTable(), 'WHERE' => ['name' => $right]]) as $row) {
+                $perProfile[(int) $row['profiles_id']] = ($perProfile[(int) $row['profiles_id']] ?? 0) + 1;
+            }
+            $this->check(sprintf('[UPGRADE] el derecho sigue EXACTAMENTE una vez por perfil (%d perfiles, %d filas)', $profiles, array_sum($perProfile)), count($perProfile) === $profiles && $perProfile !== [] && max($perProfile) === 1);
+            $this->check('[UPGRADE] derecho personalizado de un perfil PRESERVADO', $this->profileRight($otherProfile) === (READ | WorkflowDef::RIGHT_DELEGATE));
+            $full = READ | WorkflowDef::RIGHT_ACT | WorkflowDef::RIGHT_ADMIN | WorkflowDef::RIGHT_DELEGATE | WorkflowDef::RIGHT_CONFIG;
+            $this->check('[UPGRADE] Super-Admin conserva todos los bits', $this->profileRight(4) === $full);
+
+            $now = Config::getConfigurationValues(PluginConfig::CONTEXT);
+            $kept = array_filter($custom, static fn (string $v, string $k): bool => (string) ($now[$k] ?? '') === $v, ARRAY_FILTER_USE_BOTH);
+            $this->check('[UPGRADE] configuración personalizada PRESERVADA (sla_check_enabled, escalation_enabled, max_resolved_approvers, clave desconocida)', count($kept) === count($custom));
+            $this->check('[UPGRADE] default ausente agregado (notifications_enabled=' . PluginConfig::DEFAULTS['notifications_enabled'] . ')', (string) ($now['notifications_enabled'] ?? '') === PluginConfig::DEFAULTS['notifications_enabled']);
+            $this->check('[UPGRADE] ninguna clave por defecto falta tras el upgrade', array_diff_key(PluginConfig::DEFAULTS, $now) === []);
+
+            $cron2 = new CronTask();
+            $this->check('[UPGRADE] Acción automática escalation NO duplicada (una sola, mismo id)', countElementsInTable(CronTask::getTable(), ['itemtype' => Instance::class]) === 1
+                && $cron2->getFromDBbyName(Instance::class, 'escalation') && (int) $cron2->getID() === $cronId);
+            $this->check('[UPGRADE] configuración operacional de la Acción automática PRESERVADA (frecuencia, estado, retención de logs)',
+                (int) ($cron2->fields['frequency'] ?? 0) === $cronCustom['frequency']
+                && (int) ($cron2->fields['state'] ?? -1) === $cronCustom['state']
+                && (int) ($cron2->fields['logs_lifetime'] ?? 0) === $cronCustom['logs_lifetime']);
+
+            $after = $this->engineFingerprint();
+            $this->check('[UPGRADE] tablas propias siguen existiendo', count($after) === 8 && array_reduce(array_keys($after), static fn (bool $c, string $t): bool => $c && $DB->tableExists("glpi_plugin_companyworkflow_{$t}"), true));
+            $this->check(sprintf(
+                '[UPGRADE] datos del motor INTACTOS en las 8 tablas (conteo + huella sha256: defs=%d instancias=%d historial=%d delegaciones=%d)',
+                $after['defs']['count'],
+                $after['instances']['count'],
+                $after['history']['count'],
+                $after['delegations']['count']
+            ), $after === $before);
+        } finally {
+            // Restaurar el estado previo (el stack de CI sigue con otros selftests y reconciles).
+            Config::setConfigurationValues(PluginConfig::CONTEXT, $orig);
+            Config::deleteConfigurationValues(PluginConfig::CONTEXT, [$extraKey]);
+            if ($otherProfile > 0 && $otherOrig >= 0) {
+                ProfileRight::updateProfileRights($otherProfile, [$right => $otherOrig]);
+            }
+            if ($cronId > 0) {
+                (new CronTask())->update(['id' => $cronId] + $cronOrig);
+            }
+        }
+    }
+
+    /**
+     * Huella de las 8 tablas del motor: conteo + sha256 de todas las columnas en orden de id.
+     * @return array<string,array{count:int,sha:string}>
+     */
+    private function engineFingerprint(): array
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $out = [];
+        foreach (['defs', 'statedefs', 'transitions', 'steps', 'instances', 'assignments', 'delegations', 'history'] as $t) {
+            $ctx = hash_init('sha256');
+            $n = 0;
+            foreach ($DB->request(['FROM' => "glpi_plugin_companyworkflow_{$t}", 'ORDER' => 'id']) as $row) {
+                hash_update($ctx, json_encode($row) . "\n");
+                $n++;
+            }
+            $out[$t] = ['count' => $n, 'sha' => hash_final($ctx)];
+        }
+        return $out;
+    }
+
+    /** Bits del derecho del plugin para un perfil (-1 si la fila no existe). */
+    private function profileRight(int $profileId): int
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        foreach ($DB->request(['SELECT' => 'rights', 'FROM' => ProfileRight::getTable(), 'WHERE' => ['profiles_id' => $profileId, 'name' => WorkflowDef::$rightname]]) as $row) {
+            return (int) $row['rights'];
+        }
+        return -1;
     }
 
     /**
