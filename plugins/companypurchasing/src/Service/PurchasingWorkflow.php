@@ -7,8 +7,17 @@
  * publicarlo con `DefinitionBuilder::createVersion()`. Aprobadores (grupos), quórum y SLA salen de la
  * CONFIGURACIÓN (nunca hardcodeados): publicar sin grupos configurados falla cerrado.
  *
+ * P2D-3 extiende el MISMO proceso (nueva VERSIÓN de la definición; nunca se edita una publicada):
+ * `APPROVED →start_purchase→ IN_PURCHASE →receive_partial→ PARTIALLY_RECEIVED →receive_complete→ RECEIVED`
+ * (e `IN_PURCHASE →receive_complete→ RECEIVED`). Todos son estados del motor: no hay una segunda máquina de
+ * estados. Las transiciones de compra/recepción exigen condiciones (`purchase_bound` / `receipt_bound`) que
+ * sólo aporta el código de Compras tras confirmar el hecho local (la superficie HTTP genérica del motor no
+ * pasa `fields`, así que no puede forzarlas). RECEIVED es INTERMEDIO (P2D-4 continúa: entrega).
+ *
  * Reglas puras (unit-testables, sin GLPI):
  *   - `spec()`                → especificación declarativa de la definición.
+ *   - `receivingTarget()`     → estado de recepción que corresponde a los contadores físicos.
+ *   - `syncPath()`            → transiciones para llevar el motor del estado actual al objetivo.
  *   - `stageIndex()`          → orden de las etapas de aprobación.
  *   - `resetsScope()`         → ¿entrar a un estado reinicia las aprobaciones de un scope?
  *   - `liveDecisions()`       → decisiones `approved` VIVAS de un scope, derivadas del LEDGER autoritativo
@@ -33,9 +42,36 @@ final class PurchasingWorkflow
     public const S_RETURNED          = 'RETURNED';
     public const S_REJECTED          = 'REJECTED';
     public const S_CANCELLED         = 'CANCELLED';
+    // P2D-3: fase de compra/recepción (posteriores a APPROVED).
+    public const S_IN_PURCHASE        = 'IN_PURCHASE';
+    public const S_PARTIALLY_RECEIVED = 'PARTIALLY_RECEIVED';
+    public const S_RECEIVED           = 'RECEIVED';
 
-    /** Etapas de aprobación EN ORDEN (índice = posición en el circuito). */
-    public const STAGES = [self::S_PENDING_AREA_HEAD, self::S_PURCHASING, self::S_PENDING_FINANCE, self::S_APPROVED];
+    /**
+     * Circuito EN ORDEN (índice = posición). Incluye la fase de compra/recepción POSTERIOR a APPROVED: entrar
+     * a esos estados NO reinicia aprobaciones (su índice es mayor que el de cualquier checkpoint).
+     */
+    public const STAGES = [
+        self::S_PENDING_AREA_HEAD, self::S_PURCHASING, self::S_PENDING_FINANCE, self::S_APPROVED,
+        self::S_IN_PURCHASE, self::S_PARTIALLY_RECEIVED, self::S_RECEIVED,
+    ];
+
+    /** Estados de la fase de compra/recepción: el contenido aprobado está CONGELADO. */
+    public const PURCHASE_STATES = [self::S_IN_PURCHASE, self::S_PARTIALLY_RECEIVED, self::S_RECEIVED];
+
+    /** Estados del motor en los que se admite registrar una recepción física. */
+    public const RECEIVING_STATES = [self::S_IN_PURCHASE, self::S_PARTIALLY_RECEIVED];
+
+    // Acciones P2D-3 (códigos de transición de la definición publicada).
+    public const A_START_PURCHASE   = 'start_purchase';
+    public const A_RECEIVE_PARTIAL  = 'receive_partial';
+    public const A_RECEIVE_COMPLETE = 'receive_complete';
+
+    /** Condición: el inicio de compra (congelamiento local) ya está confirmado por Compras. */
+    public const PURCHASE_CONDITION = ['field' => 'purchase_bound', 'op' => 'eq', 'value' => 1];
+
+    /** Condición: el avance de recepción está respaldado por contadores físicos confirmados. */
+    public const RECEIPT_CONDITION = ['field' => 'receipt_bound', 'op' => 'eq', 'value' => 1];
 
     /** Etapas con paso de aprobación (grupo + quórum configurables). */
     public const APPROVAL_STAGES = [self::S_PENDING_AREA_HEAD, self::S_PURCHASING, self::S_PENDING_FINANCE];
@@ -108,6 +144,11 @@ final class PurchasingWorkflow
             'from' => $from, 'to' => $to, 'action' => $action, 'required_right' => self::WF_RIGHT_ACT,
             'requires_comment' => 1,
         ];
+        // P2D-3: sin paso de aprobación ni derecho extra del motor (READ): la autorización de negocio la da
+        // Compras (MANAGE_PURCHASING / RECEIVE) y la CONDICIÓN impide dispararlas desde fuera de Compras.
+        $bound = static fn (string $from, string $to, string $action, array $condition): array => [
+            'from' => $from, 'to' => $to, 'action' => $action, 'condition' => $condition,
+        ];
 
         return [
             'code'            => $code,
@@ -124,6 +165,10 @@ final class PurchasingWorkflow
                 // (instancia abierta) sigue siendo posible.
                 $state(self::S_APPROVED, self::WF_KIND_INTERMEDIATE),
                 $state(self::S_RETURNED, self::WF_KIND_INTERMEDIATE, 1),
+                // P2D-3: fase de compra/recepción. RECEIVED es INTERMEDIO (la entrega llega en P2D-4).
+                $state(self::S_IN_PURCHASE, self::WF_KIND_INTERMEDIATE),
+                $state(self::S_PARTIALLY_RECEIVED, self::WF_KIND_INTERMEDIATE),
+                $state(self::S_RECEIVED, self::WF_KIND_INTERMEDIATE),
                 $state(self::S_REJECTED, self::WF_KIND_FINAL),
                 $state(self::S_CANCELLED, self::WF_KIND_FINAL),
             ],
@@ -142,11 +187,19 @@ final class PurchasingWorkflow
                 $decide(self::S_PENDING_FINANCE, self::S_REJECTED, 'reject'),
                 // Gerencia devuelve a Compras (re-cotizar), no al solicitante.
                 $decide(self::S_PENDING_FINANCE, self::S_PURCHASING, 'return'),
+                // P2D-3: compra y recepción (proyección del hecho físico confirmado por Compras).
+                $bound(self::S_APPROVED, self::S_IN_PURCHASE, self::A_START_PURCHASE, self::PURCHASE_CONDITION),
+                $bound(self::S_IN_PURCHASE, self::S_PARTIALLY_RECEIVED, self::A_RECEIVE_PARTIAL, self::RECEIPT_CONDITION),
+                $bound(self::S_IN_PURCHASE, self::S_RECEIVED, self::A_RECEIVE_COMPLETE, self::RECEIPT_CONDITION),
+                $bound(self::S_PARTIALLY_RECEIVED, self::S_RECEIVED, self::A_RECEIVE_COMPLETE, self::RECEIPT_CONDITION),
             ],
         ];
     }
 
-    /** Índice de etapa: 0..3 en el circuito; -1 = antes del circuito (DRAFT/RETURNED); -2 = final/desconocido. */
+    /**
+     * Índice de etapa: 0..3 en el circuito de aprobación, 4..6 en la fase de compra/recepción; -1 = antes del
+     * circuito (DRAFT/RETURNED); -2 = final/desconocido.
+     */
     public static function stageIndex(string $code): int
     {
         $i = array_search($code, self::STAGES, true);
@@ -239,6 +292,66 @@ final class PurchasingWorkflow
             }
         }
         return $start;
+    }
+
+    /**
+     * Estado de recepción que corresponde a los CONTADORES FÍSICOS (autoridad del hecho de recepción):
+     * 0 recibido ⇒ IN_PURCHASE; 0 < recibido < ordenado (en alguna línea) ⇒ PARTIALLY_RECEIVED; todas las
+     * líneas completas ⇒ RECEIVED. FAIL-CLOSED ante contadores imposibles (sin líneas, ordenado < 1,
+     * recibido negativo o mayor que lo ordenado).
+     *
+     * @param array<int,array{ordered_qty:int, received_qty:int}> $lines
+     * @throws \RuntimeException
+     */
+    public static function receivingTarget(array $lines): string
+    {
+        if ($lines === []) {
+            throw new \RuntimeException('solicitud sin líneas: no hay objetivo de recepción (fail-closed)');
+        }
+        $ordered = 0;
+        $received = 0;
+        foreach ($lines as $l) {
+            $o = (int) ($l['ordered_qty'] ?? 0);
+            $r = (int) ($l['received_qty'] ?? 0);
+            if ($o < 1 || $r < 0 || $r > $o) {
+                throw new \RuntimeException('contadores de recepción inconsistentes (fail-closed)');
+            }
+            $ordered += $o;
+            $received += $r;
+        }
+        if ($received === 0) {
+            return self::S_IN_PURCHASE;
+        }
+        return $received === $ordered ? self::S_RECEIVED : self::S_PARTIALLY_RECEIVED;
+    }
+
+    /**
+     * Transiciones (acciones) para llevar el motor de `$current` a `$target` dentro de la fase de compra, en
+     * orden, SUPONIENDO que la compra ya se inició localmente (hecho durable). Desde APPROVED primero
+     * `start_purchase`. `[]` = ya convergido. `null` = NO convergible hacia adelante (el motor está "más
+     * avanzado" que los contadores, o en un estado fuera de la fase): ANOMALÍA a reportar; jamás se retrocede el
+     * motor ni se deshacen unidades físicas para seguirlo.
+     *
+     * @return array<int,string>|null
+     */
+    public static function syncPath(string $current, string $target): ?array
+    {
+        if (!in_array($target, self::PURCHASE_STATES, true)) {
+            return null;
+        }
+        if ($current === $target) {
+            return [];
+        }
+        if ($current === self::S_APPROVED) {
+            $rest = self::syncPath(self::S_IN_PURCHASE, $target);
+            return $rest === null ? null : array_merge([self::A_START_PURCHASE], $rest);
+        }
+        return match ([$current, $target]) {
+            [self::S_IN_PURCHASE, self::S_PARTIALLY_RECEIVED]  => [self::A_RECEIVE_PARTIAL],
+            [self::S_IN_PURCHASE, self::S_RECEIVED]            => [self::A_RECEIVE_COMPLETE],
+            [self::S_PARTIALLY_RECEIVED, self::S_RECEIVED]     => [self::A_RECEIVE_COMPLETE],
+            default                                            => null,
+        };
     }
 
     /** Claves EXACTAS del contrato `evidence_ref` (companysignature `Materializer::resolveRef`). */

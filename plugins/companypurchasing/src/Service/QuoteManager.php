@@ -465,6 +465,10 @@ class QuoteManager
         if (!Session::haveAccessToEntity((int) $req->fields['entities_id'])) {
             throw new \RuntimeException('sin acceso a la entidad');
         }
+        // P2D-3: iniciada la compra, cotizaciones/precios quedan CONGELADOS (el costo por unidad ya se fijó).
+        if (!empty($req->fields['purchase_started_at'])) {
+            throw new \RuntimeException('compra iniciada: cotizaciones y precios congelados (fail-closed)');
+        }
         $inst = $this->wf->loadInstance((int) $req->fields['workflow_instances_id']);
         $state = $inst !== null ? $this->wf->stateCode($inst) : '';
         // Estados permitidos según la política PINNEADA de la solicitud (no la configuración vigente).

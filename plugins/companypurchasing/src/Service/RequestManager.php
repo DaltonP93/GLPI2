@@ -581,6 +581,10 @@ final class RequestManager
             }
             $this->assertRight(Request::RIGHT_MANAGE_PURCHASING);
             $this->assertEntity((int) $req->fields['entities_id']);
+            // P2D-3: iniciada la compra, la cantidad aprobada quedó congelada como `ordered_qty` (fail-closed).
+            if (!empty($req->fields['purchase_started_at'])) {
+                throw new \RuntimeException('compra iniciada: cantidades congeladas (fail-closed)');
+            }
             // Puede requerir invalidar aprobaciones: el perfil debe poder REABRIRLAS (RIGHT_ACT del motor +
             // registrar la nueva versión en Firma) ANTES de aceptar el cambio. Fail-closed.
             ReopenCapability::assert();

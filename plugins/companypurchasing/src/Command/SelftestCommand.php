@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Autotest de INTEGRACIÓN + E2E de companypurchasing — P2D-1 + P2D-2 (corre DENTRO de un GLPI arrancado, en CI).
+ * Autotest de INTEGRACIÓN + E2E de companypurchasing — P2D-1 + P2D-2 + P2D-3 (corre DENTRO de un GLPI arrancado, en CI).
  *
  * Nombre: `plugins:companypurchasing:selftest`. Fail-closed → exit 1 si algo falla.
  *
@@ -29,6 +29,11 @@
  * selección concurrente de cotización, invalidación por scope (REQUEST / COMMERCIAL), allocator de
  * versiones concurrente, evidence_ref exacta, caídas antes/después de transition, PDF ok/falla, ACL,
  * multi-entidad y referencias cross-branch.
+ *
+ * P2D-3 (trait `ReceivingSelftestScenarios`, parte de ESTE selftest): upgrade 0.3.0 → 0.4.0 con datos,
+ * inicio de compra (congelamiento + costo pinneado), recepción parcial 4 + 6, idempotencia, atomicidad
+ * recepción + outbox, caída tras el COMMIT + convergencia por la Acción automática nativa, concurrencia real
+ * (recepción y claim), lease/token del outbox, ACL/multi-entidad y definición anterior (legacy).
  *
  * @license GPL-3.0-or-later
  */
@@ -58,6 +63,8 @@ final class SelftestCommand extends Command
 {
     // P2D-2: escenarios del circuito de aprobación en ESTE MISMO selftest obligatorio (no uno paralelo).
     use ApprovalSelftestScenarios;
+    // P2D-3: recepción física + outbox + saga del motor, también en ESTE selftest obligatorio.
+    use ReceivingSelftestScenarios;
 
     private int $failures = 0;
     private OutputInterface $out;
@@ -878,7 +885,8 @@ final class SelftestCommand extends Command
         plugin_companypurchasing_uninstall();
         // Comprobación EN VIVO (SHOW TABLES): la caché de esquema de GLPI no se invalida tras un DROP por
         // SQL crudo dentro del mismo proceso, así que no se usa $DB->tableExists() aquí.
-        $this->check('[MIGRATE] uninstall elimina las tablas propias', !$this->tableExistsLive($table) && !$this->tableExistsLive('glpi_plugin_companypurchasing_integrity'));
+        $this->check('[MIGRATE] uninstall elimina las tablas propias', !$this->tableExistsLive($table) && !$this->tableExistsLive('glpi_plugin_companypurchasing_integrity')
+            && !$this->tableExistsLive('glpi_plugin_companypurchasing_receipt_units') && !$this->tableExistsLive('glpi_plugin_companypurchasing_inventory_outbox'));
         $this->check('[MIGRATE] uninstall desregistra la Acción automática', countElementsInTable(\CronTask::getTable(), ['itemtype' => \GlpiPlugin\Companypurchasing\Model\ProjectionTask::class]) === 0);
 
         plugin_companypurchasing_install();
@@ -889,7 +897,7 @@ final class SelftestCommand extends Command
             $seeded++;
         }
         $this->check('[MIGRATE] reinstall re-siembra los scopes v1', $seeded >= 2);
-        foreach (['quotes', 'quote_items', 'doc_versions', 'docseq', 'policies', 'integrity'] as $t) {
+        foreach (['quotes', 'quote_items', 'doc_versions', 'docseq', 'policies', 'integrity', 'receipt_batches', 'receipt_units', 'inventory_outbox', 'cost_policies'] as $t) {
             $this->check("[MIGRATE] reinstall recrea glpi_plugin_companypurchasing_{$t}", $this->tableExistsLive("glpi_plugin_companypurchasing_{$t}"));
         }
         $ct = new \CronTask();
@@ -1109,6 +1117,10 @@ final class SelftestCommand extends Command
      */
     private function applySession(int $userId, array $entities, array $rights, int $recursive = 0): void
     {
+        // `CronTask::launch()` deja `glpicronuserrunning` en la sesión CLI (GLPI no lo limpia) y, con él,
+        // `Session::haveRight()` devuelve SIEMPRE true: cada cambio de sesión sale del modo cron para que las
+        // comprobaciones de ACL posteriores sean reales.
+        unset($_SESSION['glpicronuserrunning']);
         $_SESSION['glpiID']                      = $userId;
         $_SESSION['glpiname']                    = 'cp_selftest';
         $_SESSION['glpiactive_entity']           = $entities[0] ?? 0;
@@ -1128,6 +1140,10 @@ final class SelftestCommand extends Command
         try {
             // Datos de negocio propios (por si el reinstall no corre).
             foreach ([
+                'glpi_plugin_companypurchasing_inventory_outbox',
+                'glpi_plugin_companypurchasing_receipt_units',
+                'glpi_plugin_companypurchasing_receipt_batches',
+                'glpi_plugin_companypurchasing_cost_policies',
                 'glpi_plugin_companypurchasing_quote_items',
                 'glpi_plugin_companypurchasing_quotes',
                 'glpi_plugin_companypurchasing_doc_versions',

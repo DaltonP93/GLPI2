@@ -3,6 +3,59 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.4.0] — Fase 2D · P2D-3 (recepción física + handoff a SI-4)
+Ver `../../docs/adr/ADR-0019-companypurchasing-receiving.md` (sólo decisiones nuevas; el resto lo fija el gate §5–§7).
+
+### Added
+- **Fase de compra en el motor** (nueva VERSIÓN de la definición; las instancias previas conservan la suya):
+  `APPROVED →start_purchase→ IN_PURCHASE →receive_partial→ PARTIALLY_RECEIVED →receive_complete→ RECEIVED`
+  (+ `IN_PURCHASE →receive_complete→ RECEIVED`), con condiciones `purchase_bound`/`receipt_bound` que sólo
+  aporta Compras. `RECEIVED` es intermedio (no cierra la instancia). `domain_state` sigue siendo proyección.
+- **`ReceivingService::startPurchase()`**: exige integridad limpia + APPROVED; congela `ordered_qty`, precio
+  final, costo de línea, proveedor/cotización y política de costo (pinneada) en una transacción.
+- **`ReceivingService::receive()`** atómico con `idempotency_key` obligatoria: `FOR UPDATE` de las líneas, lote,
+  unidades con `receipt_unit_uuid` (UUID v4 CSPRNG), costo exacto por unidad, outbox por unidad inventariable,
+  contadores y marcador de sincronización en la MISMA transacción; rollback total ante cualquier fallo; misma
+  clave ⇒ mismo lote. Recepción parcial por lotes; serial opcional único por línea; tope de unidades por lote.
+- **Saga `ReceivingSync`** post-COMMIT con marcador durable (`receiving_seq` / `receiving_synced_seq`);
+  convergencia en vivo o por la Acción automática nativa; anomalías reportadas sin mutar.
+- **Costo atribuible exacto** (`CostPolicy`/`CostPolicyStore`/`CostAllocator`): base `final_unit_price`;
+  descuentos/impuestos/flete de cabecera sólo si se incluyen (por defecto no); asignación por valor de línea con
+  mayor resto; reparto por unidad sin pérdida (Σ unidades = costo de línea). `Decimal::mulStr/divModStr`.
+- **Outbox + `Api\PurchasingIntegrationApi`** (`claimPending`, `getHandoff`, `acknowledgeProcessed`,
+  `markRetry`, `markError`): payload v1 inmutable (canónico + sha256), lease con token y reloj de la BD
+  (`FOR UPDATE SKIP LOCKED`), token viejo rechazado, RETRY con `next_retry_at`, ERROR final, intentos máximos,
+  `last_error` saneado. Nuevo derecho de mínimo privilegio `RIGHT_INTEGRATION` (1024).
+- Esquema (upgrade idempotente desde 0.3.0): tablas `receipt_batches`, `receipt_units`, `inventory_outbox`,
+  `cost_policies`; columnas `items.ordered_qty/received_qty/purchase_unit_price/line_cost_total` y
+  `requests.purchase_started_at/purchase_quotes_id/purchase_suppliers_id/cost_policies_id/receiving_seq/
+  receiving_synced_seq`. Configuración nueva sembrada sólo si falta.
+- i18n ES/EN de los textos nuevos; eventos de auditoría `purchase.started`, `receipt.recorded`,
+  `receiving.synced`, `receiving.anomaly`, `handoff.done/retry/error`.
+
+### Changed
+- `RIGHT_RECEIVE` pasa de reservado a **activo**. Super-Admin recibe también `RIGHT_INTEGRATION`.
+- Congelamiento tras iniciar la compra: `QuoteManager` y `amendLineQuantity` rechazan cambios (fail-closed);
+  una política no puede habilitar cotizar/enmendar en estados de la fase de compra.
+- Deriva de integridad tras iniciar la compra: `enforceIntegrity()` **no reabre** el circuito (reporta; la
+  recepción queda bloqueada hasta resolverla).
+- Reconciliación (`reconcile`/`reconcileAll`/comando/Acción automática): converge la saga de recepción y reporta
+  `recepcion_pendiente`, `anomalias_recepcion` y `definicion_anterior` (falla si hay instancias APROBADAS con una
+  versión anterior sin fase de compra: requieren decisión humana).
+
+### Fixed
+- Selftest: `CronTask::launch()` deja `glpicronuserrunning` en la sesión CLI (GLPI no lo limpia) y, con él,
+  `Session::haveRight()` devolvía siempre `true` en los escenarios POSTERIORES; `applySession()` ahora sale del
+  modo cron en cada cambio de sesión (las comprobaciones de ACL posteriores vuelven a ser reales).
+
+### Tests
+- Unit: +46 (definición/`syncPath`/`receivingTarget`, política, Decimal, CostPolicy, CostAllocator con
+  propiedades aleatorias, HandoffPayload, UUID v4, saneamiento, escaneo estático de límites).
+- Selftest: `[UPGRADE-P2D3]`, `[P2D3-PERSIST]`, `[PURCHASE-START]`, `[FREEZE]`, `[RECEIVE-PARTIAL]`,
+  `[RECEIVE-IDEMPOTENT]`, `[RECEIVE-VALIDATION]`, `[RECEIVE-ATOMIC]`, `[RECEIVE-CRASH-SYNC]`, `[RECEIVE-CONC]`
+  (procesos reales), `[POST-PURCHASE-INTEGRITY]`, `[RECEIVE-ACL]`, `[OUTBOX]` (claim concurrente real, lease,
+  token), `[LEGACY-DEF]`, `[NO-SIDE-EFFECTS]`; `[MIGRATE]` cubre las tablas nuevas.
+
 ## [0.3.0] — Fase 2D · P2D-2 (circuito de aprobación)
 Ver `../../docs/adr/ADR-0018-companypurchasing-approvals.md`.
 

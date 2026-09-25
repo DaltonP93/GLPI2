@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Tests UNITARIOS puros de companypurchasing (sin bootstrap de GLPI) — P2D-1 + P2D-2.
+ * Tests UNITARIOS puros de companypurchasing (sin bootstrap de GLPI) — P2D-1 + P2D-2 + P2D-3.
  *
  * Ejercitan la lógica que NO depende del core: dinero EXACTO (sin float; PYG sin decimales),
  * determinismo del snapshot de scope, invariante "comercial no contamina REQUEST_SCOPE", formato de
@@ -31,8 +31,19 @@ require $svc . 'PurchasingWorkflow.php';
 require $svc . 'DocumentVersionAllocator.php';
 require $svc . 'ApprovalPolicy.php';
 require $svc . 'ApprovalOrchestrator.php'; // sólo el helper PURO planBatch()
+// P2D-3 (lógica PURA; los servicios con GLPI sólo se CARGAN para sus helpers estáticos puros).
+require $svc . 'CostPolicy.php';
+require $svc . 'CostAllocator.php';
+require $svc . 'HandoffPayload.php';
+require $svc . 'ReceivingService.php'; // sólo uuidV4()
+require dirname(__DIR__, 2) . '/src/Api/PurchasingIntegrationApi.php'; // sólo sanitizeError()
 
+use GlpiPlugin\Companypurchasing\Api\PurchasingIntegrationApi;
 use GlpiPlugin\Companypurchasing\Service\ApprovalOrchestrator;
+use GlpiPlugin\Companypurchasing\Service\CostAllocator;
+use GlpiPlugin\Companypurchasing\Service\CostPolicy;
+use GlpiPlugin\Companypurchasing\Service\HandoffPayload;
+use GlpiPlugin\Companypurchasing\Service\ReceivingService;
 use GlpiPlugin\Companypurchasing\Service\ApprovalPolicy;
 use GlpiPlugin\Companypurchasing\Service\CurrencyPolicy;
 use GlpiPlugin\Companypurchasing\Service\Decimal;
@@ -355,6 +366,192 @@ for ($run = 0; $run < 3; $run++) {
     $cur = $plan['cursor'];
 }
 ok('7 solicitudes, límite 3: en 3 corridas se revisan TODAS (incluida la de mayor id)', array_diff($all, $visited) === []);
+
+echo "== P2D-3 · definición: fase de compra/recepción (misma máquina de estados) ==\n";
+$spec3 = PurchasingWorkflow::spec('cp_test', 'X\\Request', $cfg);
+$codes = array_column($spec3['states'], 'kind', 'code');
+ok('estados IN_PURCHASE / PARTIALLY_RECEIVED / RECEIVED son INTERMEDIOS (RECEIVED no cierra la instancia)',
+    ($codes['IN_PURCHASE'] ?? '') === 'intermediate' && ($codes['PARTIALLY_RECEIVED'] ?? '') === 'intermediate' && ($codes['RECEIVED'] ?? '') === 'intermediate');
+$tr = static fn (string $from, string $action): array => array_values(array_filter($spec3['transitions'], static fn ($t) => $t['from'] === $from && $t['action'] === $action));
+$sp = $tr('APPROVED', 'start_purchase');
+ok('APPROVED —start_purchase→ IN_PURCHASE con condición purchase_bound (no forzable por HTTP)',
+    count($sp) === 1 && $sp[0]['to'] === 'IN_PURCHASE' && $sp[0]['condition'] === PurchasingWorkflow::PURCHASE_CONDITION && !isset($sp[0]['steps']));
+$rp = $tr('IN_PURCHASE', 'receive_partial');
+$rc1 = $tr('IN_PURCHASE', 'receive_complete');
+$rc2 = $tr('PARTIALLY_RECEIVED', 'receive_complete');
+ok('receive_partial / receive_complete (×2) con condición receipt_bound',
+    count($rp) === 1 && $rp[0]['to'] === 'PARTIALLY_RECEIVED' && count($rc1) === 1 && $rc1[0]['to'] === 'RECEIVED' && count($rc2) === 1 && $rc2[0]['to'] === 'RECEIVED'
+    && $rp[0]['condition'] === PurchasingWorkflow::RECEIPT_CONDITION && $rc2[0]['condition'] === PurchasingWorkflow::RECEIPT_CONDITION);
+ok('las aprobaciones siguen siendo 3 (la fase de compra no agrega etapas de aprobación)', count(array_filter($spec3['transitions'], static fn ($t) => $t['action'] === 'approve')) === 3);
+ok('stageIndex: IN_PURCHASE 4, PARTIALLY_RECEIVED 5, RECEIVED 6', PurchasingWorkflow::stageIndex('IN_PURCHASE') === 4
+    && PurchasingWorkflow::stageIndex('PARTIALLY_RECEIVED') === 5 && PurchasingWorkflow::stageIndex('RECEIVED') === 6);
+ok('entrar a la fase de compra NO reinicia aprobaciones (ningún checkpoint)', !PurchasingWorkflow::resetsScope('IN_PURCHASE', 'PENDING_AREA_HEAD')
+    && !PurchasingWorkflow::resetsScope('PARTIALLY_RECEIVED', 'PURCHASING') && !PurchasingWorkflow::resetsScope('RECEIVED', 'PURCHASING'));
+$rows3 = [
+    ['id' => 1, 'event' => 'started', 'to_code' => 'DRAFT'],
+    ['id' => 2, 'event' => 'transitioned', 'from_code' => 'DRAFT', 'to_code' => 'PENDING_AREA_HEAD'],
+    ['id' => 3, 'event' => 'transitioned', 'from_code' => 'PENDING_AREA_HEAD', 'to_code' => 'PURCHASING'],
+    ['id' => 4, 'event' => 'decision_recorded', 'from_code' => 'PENDING_AREA_HEAD', 'meta' => ['decision' => 'approved']],
+    ['id' => 5, 'event' => 'transitioned', 'from_code' => 'APPROVED', 'to_code' => 'IN_PURCHASE'],
+    ['id' => 6, 'event' => 'transitioned', 'from_code' => 'IN_PURCHASE', 'to_code' => 'RECEIVED'],
+];
+ok('aprobaciones siguen VIVAS tras IN_PURCHASE/RECEIVED (la integridad post-compra no es vacua)',
+    count(PurchasingWorkflow::liveDecisions($rows3, 'REQUEST_SCOPE', 'PENDING_AREA_HEAD', ['PENDING_AREA_HEAD' => 'REQUEST_SCOPE'])) === 1);
+
+echo "== P2D-3 · receivingTarget / syncPath (contadores físicos → estado del motor) ==\n";
+ok('0 recibido ⇒ IN_PURCHASE', PurchasingWorkflow::receivingTarget([['ordered_qty' => 10, 'received_qty' => 0], ['ordered_qty' => 3, 'received_qty' => 0]]) === 'IN_PURCHASE');
+ok('0 < recibido < ordenado ⇒ PARTIALLY_RECEIVED', PurchasingWorkflow::receivingTarget([['ordered_qty' => 10, 'received_qty' => 4]]) === 'PARTIALLY_RECEIVED');
+ok('una línea completa y otra no ⇒ PARTIALLY_RECEIVED', PurchasingWorkflow::receivingTarget([['ordered_qty' => 10, 'received_qty' => 10], ['ordered_qty' => 3, 'received_qty' => 0]]) === 'PARTIALLY_RECEIVED');
+ok('todas completas ⇒ RECEIVED', PurchasingWorkflow::receivingTarget([['ordered_qty' => 10, 'received_qty' => 10], ['ordered_qty' => 3, 'received_qty' => 3]]) === 'RECEIVED');
+ok('contadores imposibles ⇒ fail-closed (sin líneas / ordenado 0 / recibido > ordenado / negativo)',
+    throws(fn () => PurchasingWorkflow::receivingTarget([])) && throws(fn () => PurchasingWorkflow::receivingTarget([['ordered_qty' => 0, 'received_qty' => 0]]))
+    && throws(fn () => PurchasingWorkflow::receivingTarget([['ordered_qty' => 2, 'received_qty' => 3]])) && throws(fn () => PurchasingWorkflow::receivingTarget([['ordered_qty' => 2, 'received_qty' => -1]])));
+ok('syncPath: convergido ⇒ []', PurchasingWorkflow::syncPath('PARTIALLY_RECEIVED', 'PARTIALLY_RECEIVED') === []);
+ok('syncPath: IN_PURCHASE → PARTIALLY_RECEIVED / RECEIVED', PurchasingWorkflow::syncPath('IN_PURCHASE', 'PARTIALLY_RECEIVED') === ['receive_partial']
+    && PurchasingWorkflow::syncPath('IN_PURCHASE', 'RECEIVED') === ['receive_complete'] && PurchasingWorkflow::syncPath('PARTIALLY_RECEIVED', 'RECEIVED') === ['receive_complete']);
+ok('syncPath: APPROVED (compra iniciada, motor sin mover) ⇒ start_purchase primero', PurchasingWorkflow::syncPath('APPROVED', 'IN_PURCHASE') === ['start_purchase']
+    && PurchasingWorkflow::syncPath('APPROVED', 'PARTIALLY_RECEIVED') === ['start_purchase', 'receive_partial']);
+ok('syncPath: motor ADELANTADO o fuera de la fase ⇒ null (anomalía; jamás retrocede)', PurchasingWorkflow::syncPath('RECEIVED', 'PARTIALLY_RECEIVED') === null
+    && PurchasingWorkflow::syncPath('PARTIALLY_RECEIVED', 'IN_PURCHASE') === null && PurchasingWorkflow::syncPath('PURCHASING', 'IN_PURCHASE') === null
+    && PurchasingWorkflow::syncPath('IN_PURCHASE', 'APPROVED') === null);
+
+echo "== P2D-3 · política de aprobación: congelamiento en la fase de compra ==\n";
+$pol3 = $polRaw;
+ok('quote_states con IN_PURCHASE ⇒ fail-closed', throws(fn () => ApprovalPolicy::fromArray(['quote_states' => ['PURCHASING', 'IN_PURCHASE']] + $pol3)));
+ok('amend_states con RECEIVED ⇒ fail-closed', throws(fn () => ApprovalPolicy::fromArray(['amend_states' => ['RECEIVED']] + $pol3)));
+ok('política P2D-2 existente sigue válida', !throws(fn () => ApprovalPolicy::fromArray(['quote_states' => ['PURCHASING', 'PENDING_FINANCE', 'APPROVED'], 'amend_states' => ['PURCHASING', 'PENDING_FINANCE', 'APPROVED']] + $pol3)));
+
+echo "== P2D-3 · Decimal: producto y división exactos de enteros grandes ==\n";
+ok('mulStr 99999999999999999999² exacto', Decimal::mulStr('99999999999999999999', '99999999999999999999') === '9999999999999999999800000000000000000001');
+ok('divModStr exacto', Decimal::divModStr('123456789012345678901234567890', '97') === ['1272750402189130710322005854', '52']);
+ok('divModStr por cero / entrada no numérica ⇒ fail-closed', throws(fn () => Decimal::divModStr('10', '0')) && throws(fn () => Decimal::mulStr('1.5', '2')) && throws(fn () => Decimal::divModStr('-1', '2')));
+$okRand = true;
+mt_srand(20260925);
+for ($i = 0; $i < 400; $i++) {
+    $a = mt_rand(0, 2000000000);
+    $b = mt_rand(1, 2000000000);
+    [$q, $r] = Decimal::divModStr((string) ($a * $b + $a % $b), (string) $b);
+    $okRand = $okRand && Decimal::mulStr((string) $a, (string) $b) === (string) ($a * $b)
+        && $q === (string) intdiv($a * $b + $a % $b, $b) && $r === (string) (($a * $b + $a % $b) % $b);
+}
+ok('400 casos aleatorios: mulStr/divModStr == aritmética entera nativa', $okRand);
+
+echo "== P2D-3 · CostPolicy (pinneable, hash determinista) ==\n";
+$cpAll = CostPolicy::fromArray(['include_discounts' => 1, 'include_taxes' => '1', 'include_freight' => true]);
+$cpNone = CostPolicy::fromArray(['include_discounts' => '0', 'include_taxes' => '0', 'include_freight' => '0']);
+ok('canónica (claves ordenadas) + hash estable', $cpAll->canonical() === '{"allocation":"line_value_largest_remainder","include_discounts":1,"include_freight":1,"include_taxes":1,"schema":1,"unit_split":"floor_remainder_to_first_units"}'
+    && $cpAll->hash() === hash('sha256', $cpAll->canonical()) && $cpAll->hash() !== $cpNone->hash());
+ok('mismo contenido ⇒ mismo hash (orden de entrada irrelevante)', CostPolicy::fromArray(['include_freight' => 1, 'include_taxes' => 1, 'include_discounts' => 1])->hash() === $cpAll->hash());
+ok('flag inválido / faltante / método no soportado ⇒ fail-closed', throws(fn () => CostPolicy::fromArray(['include_discounts' => 'yes', 'include_taxes' => 0, 'include_freight' => 0]))
+    && throws(fn () => CostPolicy::fromArray(['include_taxes' => 0, 'include_freight' => 0]))
+    && throws(fn () => CostPolicy::fromArray(['include_discounts' => 0, 'include_taxes' => 0, 'include_freight' => 0, 'allocation' => 'total_div_qty'])));
+
+echo "== P2D-3 · CostAllocator: costo atribuible EXACTO por línea y por unidad ==\n";
+$lines3 = [['line_id' => 1, 'quantity' => '10', 'final_unit_price' => '1400'], ['line_id' => 2, 'quantity' => '3', 'final_unit_price' => '2300']];
+$al = CostAllocator::allocate($lines3, '300', '550', '100', 'PYG', $cpAll);
+ok('prorrateo por valor de línea (mayor resto): impuestos 368/182, flete 67/33, descuentos 201/99',
+    [$al[0]['taxes'], $al[1]['taxes'], $al[0]['freight'], $al[1]['freight'], $al[0]['discounts'], $al[1]['discounts']] === ['368', '182', '67', '33', '201', '99']);
+ok('costo de línea 14234 / 7016 y Σ = total de la cotización (21250)', $al[0]['line_cost'] === '14234' && $al[1]['line_cost'] === '7016' && (int) $al[0]['line_cost'] + (int) $al[1]['line_cost'] === 20900 + 550 + 100 - 300);
+$u1 = array_map(static fn ($k) => CostAllocator::unitCost('14234', 10, $k, 'PYG'), range(1, 10));
+ok('unidades: 1424 ×4 + 1423 ×6 (resto a las primeras; nunca total ÷ cantidad)', $u1 === array_merge(array_fill(0, 4, '1424'), array_fill(0, 6, '1423')));
+ok('unidades línea 2: 2339, 2339, 2338', array_map(static fn ($k) => CostAllocator::unitCost('7016', 3, $k, 'PYG'), [1, 2, 3]) === ['2339', '2339', '2338']);
+$none = CostAllocator::allocate($lines3, '300', '550', '100', 'PYG', $cpNone);
+ok('política por DEFECTO (sin ajustes): costo = final_unit_price × cantidad (sin prorrateo)', $none[0]['line_cost'] === '14000' && $none[1]['line_cost'] === '6900' && $none[0]['taxes'] === '0');
+ok('USD escala 2: 11.00 entre 3 ⇒ 3.67, 3.67, 3.66', array_map(static fn ($k) => CostAllocator::unitCost('11.00', 3, $k, 'USD'), [1, 2, 3]) === ['3.67', '3.67', '3.66']);
+ok('descuento mayor que el valor de la línea ⇒ fail-closed', throws(fn () => CostAllocator::allocate([['line_id' => 1, 'quantity' => '1', 'final_unit_price' => '10']], '50', '0', '0', 'PYG', $cpAll)));
+ok('líneas de valor 0 ⇒ pesos = cantidad (sin división por cero)', CostAllocator::allocate([['line_id' => 1, 'quantity' => '1', 'final_unit_price' => '0'], ['line_id' => 2, 'quantity' => '3', 'final_unit_price' => '0']], '0', '0', '4', 'PYG', $cpAll)[1]['freight'] === '3');
+ok('empate de restos ⇒ gana la línea que aparece antes (determinista)', CostAllocator::largestRemainder('1', [5 => '7', 9 => '7']) === [5 => '1', 9 => '0']);
+ok('ordinal fuera de rango / cantidad inválida / PYG con decimales ⇒ fail-closed', throws(fn () => CostAllocator::unitCost('100', 3, 4, 'PYG'))
+    && throws(fn () => CostAllocator::unitCost('100', 0, 1, 'PYG')) && throws(fn () => CostAllocator::allocate([['line_id' => 1, 'quantity' => '2.5', 'final_unit_price' => '1']], '0', '0', '0', 'PYG', $cpAll))
+    && throws(fn () => CostAllocator::allocate([['line_id' => 1, 'quantity' => '1', 'final_unit_price' => '1.5']], '0', '0', '0', 'PYG', $cpAll)));
+$propOk = true;
+mt_srand(3);
+for ($i = 0; $i < 150; $i++) {
+    $n = mt_rand(1, 5);
+    $ls = [];
+    $sum = 0;
+    for ($j = 0; $j < $n; $j++) {
+        $qty = mt_rand(1, 40);
+        $price = mt_rand(0, 900000);
+        $ls[] = ['line_id' => $j + 1, 'quantity' => (string) $qty, 'final_unit_price' => (string) $price];
+        $sum += $qty * $price;
+    }
+    $tx = mt_rand(0, 99999);
+    $fr = mt_rand(0, 9999);
+    $ds = mt_rand(0, min($sum, 99999));
+    $res = CostAllocator::allocate($ls, (string) $ds, (string) $tx, (string) $fr, 'PYG', $cpAll);
+    $tot = 0;
+    foreach ($res as $k => $r) {
+        $units = 0;
+        for ($o = 1; $o <= (int) $ls[$k]['quantity']; $o++) {
+            $units += (int) CostAllocator::unitCost($r['line_cost'], (int) $ls[$k]['quantity'], $o, 'PYG');
+        }
+        $propOk = $propOk && $units === (int) $r['line_cost'];
+        $tot += (int) $r['line_cost'];
+    }
+    $propOk = $propOk && $tot === $sum + $tx + $fr - $ds;
+}
+ok('150 compras aleatorias: Σ unidades = costo de línea y Σ líneas = subtotal + impuestos + flete − descuentos (exacto)', $propOk);
+
+echo "== P2D-3 · HandoffPayload (versionado, inmutable, hash) ==\n";
+$hp = [
+    'receipt_unit_uuid' => '3f2b8c1e-9a4d-4e6f-8b2a-1c3d5e7f9a0b', 'request_id' => 12, 'request_number' => 'REQUEST-2026-0007',
+    'item_id' => 55, 'entity_id' => 0, 'serial' => 'SN-1', 'description' => 'Notebook', 'category' => 'HW', 'supplier_id' => 9,
+    'currency' => 'PYG', 'unit_cost' => '1424', 'received_at' => '2026-09-25T10:00:00-03:00', 'correlation_id' => 'corr-1',
+];
+$pl = HandoffPayload::build($hp);
+$keysPl = array_keys($pl);
+$keysExp = HandoffPayload::KEYS;
+sort($keysExp);
+ok('schema v1 con las claves EXACTAS (ordenadas) y costo como string', $keysPl === $keysExp && $pl['schema_version'] === 1 && $pl['unit_cost'] === '1424');
+$json = HandoffPayload::canonical($pl);
+ok('canónico + hash; verify() lo reconoce', HandoffPayload::hash($pl) === hash('sha256', $json) && HandoffPayload::verify($json, hash('sha256', $json)) === $pl);
+$tampered = str_replace('"unit_cost":"1424"', '"unit_cost":"1"', $json);
+ok('payload alterado ⇒ verify() null (hash original)', HandoffPayload::verify($tampered, hash('sha256', $json)) === null);
+$pretty = json_encode($pl, JSON_PRETTY_PRINT);
+ok('JSON NO canónico (aunque su hash coincida) ⇒ null', HandoffPayload::verify($pretty, hash('sha256', $pretty)) === null);
+ok('float / clave extra / UUID inválido / serial vacío / PYG con decimales ⇒ fail-closed',
+    throws(fn () => HandoffPayload::build(['unit_cost' => 1424.0] + $hp)) && throws(fn () => HandoffPayload::validate(['x' => 1] + $pl))
+    && throws(fn () => HandoffPayload::build(['receipt_unit_uuid' => 'not-a-uuid'] + $hp)) && throws(fn () => HandoffPayload::build(['serial' => ''] + $hp))
+    && throws(fn () => HandoffPayload::build(['unit_cost' => '1.5'] + $hp)));
+ok('serial ausente permitido (null)', HandoffPayload::build(['serial' => null] + $hp)['serial'] === null);
+
+echo "== P2D-3 · identidad canónica: UUID v4 (CSPRNG) ==\n";
+$uu = [];
+for ($i = 0; $i < 3000; $i++) {
+    $uu[] = ReceivingService::uuidV4();
+}
+ok('3000 UUID v4 RFC 4122 válidos y todos distintos', count(array_unique($uu)) === 3000
+    && array_reduce($uu, static fn (bool $c, string $u): bool => $c && preg_match(HandoffPayload::UUID_PATTERN, $u) === 1, true));
+
+echo "== P2D-3 · last_error sin secretos ==\n";
+$san = PurchasingIntegrationApi::sanitizeError("fail password=hunter2 token: abc Authorization: Bearer eyJ.x.y https://u:pw@h/x\x01" . str_repeat('z', 400));
+ok('redacta password/token/Bearer/credenciales en URL, quita controles y acota a 250',
+    !str_contains($san, 'hunter2') && !str_contains($san, ' abc') && !str_contains($san, 'eyJ') && !str_contains($san, 'u:pw') && !str_contains($san, "\x01") && mb_strlen($san) <= 250);
+
+echo "== P2D-3 · límites: sin Snipe-IT / HTTP / activos / Infocom / companyqr / float en el código nuevo ==\n";
+$scan = [
+    dirname(__DIR__, 2) . '/src/Api/PurchasingIntegrationApi.php',
+    $svc . 'ReceivingService.php', $svc . 'ReceivingSync.php', $svc . 'CostAllocator.php', $svc . 'CostPolicy.php',
+    $svc . 'CostPolicyStore.php', $svc . 'HandoffPayload.php',
+];
+$forbidden = ['curl_', 'guzzle', 'fsockopen', 'stream_socket_client', 'http://', 'https://', 'snipe', 'infocom', 'computer', 'companyqr', 'companyintegrations', '(float)', 'floatval', 'round(', 'bcdiv', ' / '];
+$hits = [];
+foreach ($scan as $f) {
+    $code = '';
+    foreach (token_get_all((string) file_get_contents($f)) as $tok) {
+        if (is_array($tok) && in_array($tok[0], [T_COMMENT, T_DOC_COMMENT], true)) {
+            continue;
+        }
+        $code .= is_array($tok) ? $tok[1] : $tok;
+    }
+    foreach ($forbidden as $needle) {
+        if (str_contains(strtolower($code), $needle)) {
+            $hits[] = basename($f) . ':' . $needle;
+        }
+    }
+}
+ok('código (sin comentarios) libre de clientes HTTP/Snipe/activos/Infocom/companyqr/float/división' . ($hits !== [] ? ' — ' . implode(', ', $hits) : ''), $hits === []);
 
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"

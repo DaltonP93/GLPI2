@@ -21,6 +21,7 @@ namespace GlpiPlugin\Companypurchasing\Service;
 use GlpiPlugin\Companyworkflow\Api\WorkflowApi;
 use GlpiPlugin\Companyworkflow\Model\Instance;
 use GlpiPlugin\Companyworkflow\Model\StateDef;
+use GlpiPlugin\Companyworkflow\Model\Transition;
 use GlpiPlugin\Companyworkflow\Model\WorkflowDef;
 use GlpiPlugin\Companyworkflow\Service\TransitionResult;
 
@@ -111,6 +112,26 @@ class WorkflowGateway
     public function invalidate(int $instanceId, string $reason, array $context, ?int $expectedVersion): TransitionResult
     {
         return $this->api()->invalidateApprovals($instanceId, $reason, $context, $expectedVersion);
+    }
+
+    /** Acciones disponibles desde el estado ACTUAL de la instancia (definición de SU versión). @return array<int,string> */
+    public function availableActions(Instance $inst): array
+    {
+        return $this->api()->availableActions($inst);
+    }
+
+    /**
+     * ¿La VERSIÓN de definición de la instancia declara la acción `$action`? (P2D-3: detectar instancias
+     * iniciadas bajo una versión anterior, que conservan su versión y no conocen la fase de compra.) Lectura
+     * por la interfaz CommonDBTM del modelo del motor (sin SQL directo a sus tablas).
+     */
+    public function definitionHasAction(Instance $inst, string $action): bool
+    {
+        if (!$this->available() || !class_exists(Transition::class)) {
+            return false;
+        }
+        $defId = (int) ($inst->fields['workflowdefs_id'] ?? 0);
+        return $defId > 0 && (new Transition())->find(['workflowdefs_id' => $defId, 'action' => $action], [], 1) !== [];
     }
 
     /** Ledger append-only de la instancia (orden causal). @return array<int,array<string,mixed>> */

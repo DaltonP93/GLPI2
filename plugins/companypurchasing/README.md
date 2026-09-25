@@ -5,11 +5,15 @@ Plugin propio de la **Plataforma GLPI Modular**.
 - **Estrategia (matriz):** Build (apoyado en Forms/Assets nativos)
 - **Propósito:** Solicitudes de compra, cotizaciones versionadas, aprobaciones, recepcion y alta/vinculo de activos GLPI.
 - **GLPI soportado:** `>=11.0` y `<12.0` (el `max=12.0` es límite superior **excluyente**; probado en 11.0.8; GLPI 12 no soportado hasta suite de regresión — ver `../../docs/architecture/glpi-version-compatibility.md`)
-- **Estado:** Fase 2D — **P2D-1 (núcleo)** + **P2D-2 (circuito de aprobación)** implementados:
-  solicitud → jefe de área (`REQUEST_SCOPE`) → Compras/cotización → Gerencia financiera
-  (`COMMERCIAL_FINANCIAL_SCOPE`) → `APPROVED`/`REJECTED`/`RETURNED`, sobre `companyworkflow` (único motor) y
-  `companysignature` (evidencia/PDF). Sin recepción/outbox/Snipe-IT todavía (P2D-3…P2D-4).
-- **Decisión P2D-2:** `../../docs/adr/ADR-0018-companypurchasing-approvals.md`.
+- **Estado:** Fase 2D — **P2D-1 (núcleo)** + **P2D-2 (circuito de aprobación)** + **P2D-3 (recepción)**
+  implementados: solicitud → jefe de área (`REQUEST_SCOPE`) → Compras/cotización → Gerencia financiera
+  (`COMMERCIAL_FINANCIAL_SCOPE`) → `APPROVED` → `IN_PURCHASE` → `PARTIALLY_RECEIVED` → `RECEIVED`, sobre
+  `companyworkflow` (único motor) y `companysignature` (evidencia/PDF), con recepción física por unidad y
+  handoff (outbox) para SI-4. **Sin** escritura a Snipe-IT, alta de activos GLPI, Infocom ni companyqr (SI-4 /
+  P2D-4); sin entrega ni UI final (P2D-4).
+- **Versión:** `0.4.0` (P2D-3; esquema nuevo con upgrade idempotente desde 0.3.0).
+- **Decisiones:** P2D-2 `../../docs/adr/ADR-0018-companypurchasing-approvals.md` · P2D-3
+  `../../docs/adr/ADR-0019-companypurchasing-receiving.md`.
 - **Gate native-first (contrato de v1):**
   `../../docs/architecture/companypurchasing-native-first-gate.md` — reconciliado con el código real
   ya mergeado (`companyworkflow`, `companysignature`, `companyintegrations` SI-1).
@@ -51,13 +55,45 @@ por solicitud al enviarla.
 
 **Contrato de decisión:** `decide(requestId, action, expectedState, comment)` — `expectedState` es
 obligatoria; si la etapa ya cambió ⇒ `stage_changed` (sin nueva decisión). `integrityStatus()` /
-`isFullyApproved()` exigen APPROVED **y** ausencia de marcas/deriva (P2D-3 debe consultarlo antes de comprar).
+`isFullyApproved()` exigen APPROVED **y** ausencia de marcas/deriva (`startPurchase()` lo exige).
 
 **Perfiles (mínimo privilegio; la autorización de cada decisión la da el motor: grupo + quórum):**
 solicitante `plugin_companypurchasing` (crear/ver propias/editar borrador) + `plugin_companyworkflow:READ`;
 aprobadores `plugin_companyworkflow:RIGHT_ACT` + `plugin_companysignature:RIGHT_RECORD`; Compras además
 `plugin_companypurchasing:MANAGE_PURCHASING` (y `RIGHT_ACT` + `RIGHT_RECORD` para aceptar cambios que exijan
 reabrir una aprobación).
+
+## Qué agrega P2D-3 (recepción física + handoff a SI-4)
+| Pieza | Rol |
+|------|-----|
+| `Service/PurchasingWorkflow` (extendido) | Nueva **versión** de la misma definición: `start_purchase`, `receive_partial`, `receive_complete` con condiciones `purchase_bound`/`receipt_bound` (sólo las aporta Compras). `RECEIVED` es intermedio. Reglas puras `receivingTarget()` / `syncPath()`. |
+| `Service/ReceivingService` | `startPurchase()` (`MANAGE_PURCHASING`; exige integridad limpia + APPROVED): **congela** `ordered_qty`, precio final y costo de cada línea, proveedor/cotización y la política de costo. `receive()` (`RIGHT_RECEIVE` + entidad, `idempotency_key` obligatoria): UNA transacción con `FOR UPDATE` de las líneas → lote → unidades (UUID v4 CSPRNG, costo exacto) → outbox por unidad inventariable → contadores → marcador → auditoría. Cualquier fallo ⇒ rollback total. `units()` con ACL. |
+| `Service/ReceivingSync` | Saga post-COMMIT que lleva el motor a reflejar los contadores (0 ⇒ IN_PURCHASE; parcial ⇒ PARTIALLY_RECEIVED; completo ⇒ RECEIVED) con marcador durable `receiving_seq`/`receiving_synced_seq`; anomalías se reportan sin mutar. |
+| `Service/CostPolicy` + `CostPolicyStore` + `CostAllocator` + `Model/CostPolicyVersion` | Costo atribuible exacto (sin float): base `final_unit_price`; ajustes de cabecera sólo si la política pinneada los incluye (por defecto no); asignación `line_value_largest_remainder`; reparto por unidad `floor_remainder_to_first_units`. |
+| `Service/HandoffPayload` + `Model/OutboxEntry` | Payload v1 inmutable (canónico + sha256) con la unidad, solicitud/número, línea, entidad, serial, proveedor, moneda, `unit_cost` (string exacto), fecha y correlación. |
+| `Api/PurchasingIntegrationApi` | Contrato para SI-4 (sin SQL a tablas de Compras): `claimPending`, `getHandoff`, `acknowledgeProcessed`, `markRetry`, `markError`; lease con token (CSPRNG) y reloj de la BD; `RIGHT_INTEGRATION` (mínimo privilegio) + multi-entidad. |
+| `Model/ReceiptBatch` / `ReceiptUnit` | Lote (idempotencia de la operación) y unidad física (identidad `receipt_unit_uuid`; FK `items_id`; serial único por línea; `unit_cost` inmutable). |
+
+**Reglas:** `pending = ordered_qty − received_qty` (derivado). Tras `startPurchase` no se cotiza, selecciona,
+cambia precio ni enmienda cantidad (fail-closed); una deriva de integridad posterior **no reabre** el circuito
+(se reporta y la recepción queda bloqueada). La reconciliación (Acción automática `reconcileprojection` /
+comando) además converge la saga de recepción y **reporta** recepción pendiente, anomalías e instancias con una
+versión anterior de la definición (no se migran).
+
+**Configuración P2D-3:** `cost_include_{discounts,taxes,freight}` (se pinnea al iniciar la compra; `0` por
+defecto), `outbox_max_attempts`, `outbox_max_lease_seconds`, `receipt_max_units_per_batch`.
+
+**Perfiles P2D-3:** receptor `plugin_companypurchasing:RIGHT_RECEIVE` (+ `plugin_companyworkflow:READ` para que
+el motor refleje la recepción en vivo; sin él, la recepción se confirma igual y la Acción automática converge);
+Compras `MANAGE_PURCHASING` para iniciar la compra; worker de integración **sólo** `RIGHT_INTEGRATION`.
+
+## Tests
+- **Unit (puro):** `php plugins/companypurchasing/tests/unit/run.php` — dinero exacto, scopes, política,
+  costo por unidad (incl. propiedades aleatorias), transiciones/`syncPath`, payload/hash, UUID v4, saneamiento
+  de `last_error` y escaneo estático (sin HTTP/Snipe/activos/Infocom/companyqr/float en el código nuevo).
+- **Integración + E2E (en GLPI, obligatorio en CI):** `php bin/console plugins:companypurchasing:selftest` —
+  P2D-1, P2D-2 y P2D-3 (`[UPGRADE-P2D3]`, `[RECEIVE-*]`, `[OUTBOX]`, `[LEGACY-DEF]`…), con procesos paralelos
+  reales (`plugins:companypurchasing:concurrency-probe`, sólo con `COMPANYPURCHASING_ALLOW_PROBE=1`).
 
 ## Regla 0
 Este plugin **no modifica el core de GLPI**. Solo usa hooks/API oficiales.
