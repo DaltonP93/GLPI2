@@ -8,6 +8,11 @@
  *
  * Esquema SI-1 (ver docs/architecture/asset-bridge-model.md):
  *   asset_bridge · asset_tag_aliases · map_companies · map_users · recon
+ * Esquema SI4-1 (ADR-0020): si4_sagas · si4_saga_log · map_models
+ *
+ * install() es SEGURO EN UPGRADE (GLPI lo vuelve a llamar al actualizar 0.2.0 → 0.3.0): tablas con IF-not-exists,
+ * el derecho se agrega sólo si falta (re-agregarlo viola el UNIQUE de glpi_profilerights), los bits nuevos se SUMAN
+ * al Super-Admin sin quitar nada y la configuración sólo siembra claves AUSENTES (no pisa lo ajustado).
  *
  * @license GPL-3.0-or-later
  */
@@ -128,20 +133,101 @@ function plugin_companyintegrations_install() {
         ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
     }
 
-    // --- ACL ---
-    if (class_exists('ProfileRight')) {
+    // --- SI4-1: saga durable por unidad (una por receipt_unit_uuid; un activo remoto nunca en dos unidades) ---
+    if (!$DB->tableExists("{$p}si4_sagas")) {
+        $DB->doQuery("CREATE TABLE `{$p}si4_sagas` (
+            `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `receipt_unit_uuid` CHAR(36) NOT NULL,
+            `entities_id` INT UNSIGNED NOT NULL DEFAULT 0,
+            `requests_id` INT UNSIGNED NOT NULL DEFAULT 0,
+            `items_id` INT UNSIGNED NOT NULL DEFAULT 0,
+            `payload_sha256` CHAR(64) NOT NULL DEFAULT '',
+            `correlation_id` VARCHAR(64) DEFAULT NULL,
+            `state` VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+            `snipe_asset_id` INT UNSIGNED DEFAULT NULL,
+            `snipe_asset_tag` VARCHAR(255) DEFAULT NULL,
+            `snipe_outcome` VARCHAR(20) DEFAULT NULL,
+            `snipe_company_id` INT UNSIGNED DEFAULT NULL,
+            `snipe_model_id` INT UNSIGNED DEFAULT NULL,
+            `snipe_status_id` INT UNSIGNED DEFAULT NULL,
+            `lease_token_sha256` CHAR(64) DEFAULT NULL,
+            `lease_until` TIMESTAMP NULL DEFAULT NULL,
+            `lease_epoch` INT UNSIGNED NOT NULL DEFAULT 0,
+            `worker_id` VARCHAR(190) DEFAULT NULL,
+            `attempts` INT UNSIGNED NOT NULL DEFAULT 0,
+            `remote_create_calls` INT UNSIGNED NOT NULL DEFAULT 0,
+            `row_version` INT UNSIGNED NOT NULL DEFAULT 0,
+            `last_error` VARCHAR(255) DEFAULT NULL,
+            `last_error_class` VARCHAR(30) DEFAULT NULL,
+            `date_creation` TIMESTAMP NULL DEFAULT NULL,
+            `date_mod` TIMESTAMP NULL DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `receipt_unit_uuid` (`receipt_unit_uuid`),
+            UNIQUE KEY `snipe_asset_id` (`snipe_asset_id`),
+            KEY `state` (`state`),
+            KEY `entities_id` (`entities_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+    }
+
+    // --- SI4-1: bitácora append-only de la saga (auditoría de integración) ---
+    if (!$DB->tableExists("{$p}si4_saga_log")) {
+        $DB->doQuery("CREATE TABLE `{$p}si4_saga_log` (
+            `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `receipt_unit_uuid` CHAR(36) NOT NULL,
+            `event` VARCHAR(40) NOT NULL DEFAULT '',
+            `from_state` VARCHAR(30) DEFAULT NULL,
+            `to_state` VARCHAR(30) NOT NULL DEFAULT '',
+            `detail` VARCHAR(255) DEFAULT NULL,
+            `worker_id` VARCHAR(190) DEFAULT NULL,
+            `date_creation` TIMESTAMP NULL DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `receipt_unit_uuid` (`receipt_unit_uuid`),
+            KEY `event` (`event`)
+        ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+    }
+
+    // --- SI4-1: mapeo categoría de línea ↔ modelo Snipe (aprobado explícito; nunca por nombre) ---
+    if (!$DB->tableExists("{$p}map_models")) {
+        $DB->doQuery("CREATE TABLE `{$p}map_models` (
+            `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `category_key` VARCHAR(190) NOT NULL DEFAULT '',
+            `snipe_model_id` INT UNSIGNED NOT NULL DEFAULT 0,
+            `snipe_name` VARCHAR(255) NOT NULL DEFAULT '',
+            `is_approved` TINYINT NOT NULL DEFAULT 0,
+            `notes` VARCHAR(255) DEFAULT NULL,
+            `date_creation` TIMESTAMP NULL DEFAULT NULL,
+            `date_mod` TIMESTAMP NULL DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `category_key` (`category_key`),
+            KEY `is_approved` (`is_approved`)
+        ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+    }
+
+    // --- ACL (IDEMPOTENTE: re-agregar el derecho violaría el UNIQUE (profiles_id, name) y abortaría el upgrade) ---
+    if (class_exists('ProfileRight')
+        && countElementsInTable(ProfileRight::getTable(), ['name' => AssetBridge::$rightname]) === 0) {
         ProfileRight::addProfileRights([AssetBridge::$rightname]);
     }
-    $full = READ | AssetBridge::RIGHT_RECONCILE | AssetBridge::RIGHT_MAP | AssetBridge::RIGHT_CONFIG;
+    // Super-Admin (id 4): se SUMAN los bits del plugin sin quitar ninguno que un administrador haya dado.
+    $full = READ | AssetBridge::RIGHT_RECONCILE | AssetBridge::RIGHT_MAP | AssetBridge::RIGHT_CONFIG | AssetBridge::RIGHT_SI4;
+    $current = 0;
+    foreach ($DB->request(['SELECT' => ['rights'], 'FROM' => 'glpi_profilerights',
+        'WHERE' => ['profiles_id' => 4, 'name' => AssetBridge::$rightname]]) as $row) {
+        $current = (int) $row['rights'];
+    }
     $DB->update(
         'glpi_profilerights',
-        ['rights' => $full],
+        ['rights' => $current | $full],
         ['profiles_id' => 4, 'name' => AssetBridge::$rightname]
     );
 
-    // --- Config por defecto (SIN token; el token vive en secret/env, nunca en Git/BD) ---
+    // --- Config por defecto (SIN token; el token vive en secret/env, nunca en Git/BD). Sólo claves AUSENTES. ---
     if (class_exists('Config')) {
-        Config::setConfigurationValues(PluginConfig::CONTEXT, PluginConfig::DEFAULTS);
+        $existing = Config::getConfigurationValues(PluginConfig::CONTEXT);
+        $missing = array_diff_key(PluginConfig::DEFAULTS, is_array($existing) ? $existing : []);
+        if ($missing !== []) {
+            Config::setConfigurationValues(PluginConfig::CONTEXT, $missing);
+        }
     }
 
     return true;
@@ -159,6 +245,7 @@ function plugin_companyintegrations_uninstall() {
     foreach ([
         "{$p}recon", "{$p}asset_tag_aliases", "{$p}asset_bridge",
         "{$p}map_users", "{$p}map_companies",
+        "{$p}si4_saga_log", "{$p}si4_sagas", "{$p}map_models",
     ] as $table) {
         if ($DB->tableExists($table)) {
             $DB->doQuery("DROP TABLE `{$table}`");

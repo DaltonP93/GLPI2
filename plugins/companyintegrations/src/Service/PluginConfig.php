@@ -35,6 +35,20 @@ final class PluginConfig
         // Paginación de reconciliación.
         'reconcile_page_size'   => '50',
         'reconcile_max_assets'  => '10000',
+        // --- SI-4 (incremento SI4-1, ADR-0020). Deshabilitado por defecto: no programar en producción hasta completar SI-4. ---
+        'si4_enabled'                    => '0',
+        // Prefijo del asset_tag determinista (<prefijo><32 hex del receipt_unit_uuid>).
+        'si4_asset_tag_prefix'           => 'GP2-',
+        // Status label de Snipe para activos nuevos: SIN valor por defecto (se valida contra Snipe en el preflight).
+        'si4_snipe_status_id'            => '0',
+        'si4_lease_seconds'              => '900',
+        'si4_max_units_per_run'          => '50',
+        'si4_retry_base_seconds'         => '60',
+        'si4_retry_max_seconds'          => '3600',
+        'si4_config_retry_seconds'       => '3600',
+        'si4_auth_retry_seconds'         => '900',
+        'si4_uncertain_cooldown_seconds' => '300',
+        'si4_worker_id'                  => '',
     ];
 
     /** @return array<string,mixed> */

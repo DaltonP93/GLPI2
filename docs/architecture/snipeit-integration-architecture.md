@@ -83,8 +83,9 @@ companypurchasing: purchase.received  (ítem is_inventoriable = 1) — llega rec
        └─ PENDING → avanzar:
             0) resolver **entidad** por company/entity mapping (si no mapeada → CONFLICT, NO inferir)
             1) SNIPE_CREATED: crear activo en Snipe-IT — **idempotencia saliente** (su API no tiene
-               idempotency key): **buscar-primero** (por snipe_asset_id ya persistido / serial único)
-               antes de POST /api/v1/hardware; **persistir snipe_asset_id inmediatamente** tras crear
+               idempotency key): **buscar-primero** por el asset_tag DETERMINISTA derivado de
+               receipt_unit_uuid (ADR-0020) antes de POST /api/v1/hardware; POST de un solo disparo;
+               **persistir snipe_asset_id inmediatamente** tras crear [implementado en SI4-1]
             2) obtener/asignar asset_tag (Snipe) + serial de la unidad (política de serial)
             3) GLPI_RESOLVED_OR_CREATED: **RESOLVER-o-crear** el activo GLPI por serial/UUID/
                identificador soportado → match único, VINCULAR; **ambiguo** → CONFLICT (sin

@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: companyintegrations 0.2.0\n"
+"Project-Id-Version: companyintegrations 0.3.0\n"
 "Report-Msgid-Bugs-To: \n"
 "Language: en_GB\n"
 "MIME-Version: 1.0\n"
@@ -41,3 +41,24 @@ msgstr "Approve mappings"
 
 msgid "Configure plugin"
 msgstr "Configure plugin"
+
+msgid "Run inventory saga (SI-4)"
+msgstr "Run inventory saga (SI-4)"
+
+msgid "Inventory saga (SI-4)"
+msgid_plural "Inventory sagas (SI-4)"
+msgstr[0] "Inventory saga (SI-4)"
+msgstr[1] "Inventory sagas (SI-4)"
+
+msgid "Inventory saga event"
+msgid_plural "Inventory saga events"
+msgstr[0] "Inventory saga event"
+msgstr[1] "Inventory saga events"
+
+msgid "Model mapping"
+msgid_plural "Model mappings"
+msgstr[0] "Model mapping"
+msgstr[1] "Model mappings"
+
+msgid "SI-4 worker is disabled (si4_enabled = 0): nothing to do."
+msgstr "SI-4 worker is disabled (si4_enabled = 0): nothing to do."

@@ -2,6 +2,7 @@
 
 /**
  * Tests UNITARIOS + de CONTRATO de companyintegrations (sin bootstrap de GLPI).
+ * SI4-1: contrato WRITE, saga, crash/retry y consumo por lease en `si4.php` (incluido al final).
  *
  * Cubren la lógica pura (clasificador de errores, backoff, circuit breaker, saneado de logs,
  * clasificación de reconciliación, chequeo de etiquetas) y el CONTRATO del SnipeItClient contra
@@ -28,7 +29,18 @@ require $cli . 'HttpTransport.php';
 require $cli . 'ArrayTransport.php';
 require $cli . 'SnipeClientConfig.php';
 require $cli . 'SnipeException.php';
+require $cli . 'SnipeEnvelope.php';
 require $cli . 'SnipeItClient.php';
+// SI4-1 (ADR-0020)
+require $cli . 'CreateResult.php';
+require $cli . 'SnipeAssetWriter.php';
+require $cli . 'FakeSnipeServer.php';
+$si4 = dirname(__DIR__, 2) . '/src/Si4/';
+foreach (['SagaState', 'AssetTagDeriver', 'Si4Errors', 'SimulatedCrash', 'Si4Config', 'RemoteAssetMatcher', 'HandoffSource',
+          'InMemoryHandoffSource', 'SagaStore', 'InMemorySagaStore', 'MappingResolver', 'MappingRules', 'ArrayMappingResolver',
+          'Si4Worker'] as $f) {
+    require $si4 . $f . '.php';
+}
 
 use GlpiPlugin\Companyintegrations\Client\ArrayTransport;
 use GlpiPlugin\Companyintegrations\Client\HttpResponse;
@@ -295,6 +307,9 @@ ok('sólo se hicieron GET (read-only)', (function () {
     $c->listHardware();
     return $t->allReadOnly();
 })());
+
+// ---- SI4-1: contrato WRITE + saga + crash/retry (ADR-0020) ----
+require __DIR__ . '/si4.php';
 
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"

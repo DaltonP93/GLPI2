@@ -23,6 +23,7 @@ class AssetBridge extends CommonDBTM
     public const RIGHT_RECONCILE = 2;  // ejecutar reconciliación (read-only)
     public const RIGHT_MAP       = 4;  // aprobar mapeos (companies/users)
     public const RIGHT_CONFIG    = 8;  // configurar el plugin
+    public const RIGHT_SI4       = 16; // ejecutar la saga SI-4 (consumir el handoff de Compras y escribir en Snipe)
 
     // Estados de sincronización (alineados con las clasificaciones de reconciliación).
     public const STATUS_PENDING         = 'pending';
@@ -54,6 +55,7 @@ class AssetBridge extends CommonDBTM
             self::RIGHT_RECONCILE => __('Run reconciliation (read-only)', 'companyintegrations'),
             self::RIGHT_MAP       => __('Approve mappings', 'companyintegrations'),
             self::RIGHT_CONFIG    => __('Configure plugin', 'companyintegrations'),
+            self::RIGHT_SI4       => __('Run inventory saga (SI-4)', 'companyintegrations'),
         ];
     }
 }
