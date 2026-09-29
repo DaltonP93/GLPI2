@@ -452,6 +452,11 @@ class ApprovalOrchestrator
                 continue;
             }
 
+            // P2D-3: iniciada la compra NO se reabre el circuito (hay una orden en curso y, quizá, unidades físicas
+            // recibidas): la deriva se REPORTA y todo sigue fail-closed (recibir exige integridad limpia).
+            if (!empty($req->fields['purchase_started_at'])) {
+                throw new \RuntimeException("deriva de integridad en {$scope} tras iniciar la compra ({$a['reason']}): requiere intervención, no se reabre (fail-closed)");
+            }
             // Deriva ⇒ nueva versión del scope (si es producible) + invalidación idempotente.
             $checkpoint = $a['checkpoint'];
             $version = 0;
@@ -650,9 +655,14 @@ class ApprovalOrchestrator
     /**
      * Converge la proyección con el motor (el motor gana) y REPORTA anomalías que no puede reparar sin una
      * sesión con RIGHT_ACT: solicitud ENVIADA sin instancia (`orphan`) e integridad pendiente (`dirty`).
-     * Idempotente.
+     * P2D-3: además converge la saga de RECEPCIÓN (`ReceivingSync`: el motor refleja los contadores físicos; en
+     * la Acción automática nativa corre con el contexto de sistema de la CronTask) y REPORTA sin mutar:
+     * sincronización aún pendiente (`receiving_pending`, p. ej. CLI sin sesión), anomalías no convergibles
+     * (`receiving_anomaly`) e instancias iniciadas bajo una versión ANTERIOR de la definición, sin fase de compra
+     * (`legacy`; `legacy_blocked` si ya están en APPROVED y no pueden avanzar). Idempotente.
      *
-     * @return array{state:string, corrected:bool, linked:bool, orphan:bool, dirty:bool}
+     * @return array{state:string, corrected:bool, linked:bool, orphan:bool, dirty:bool, receiving_pending:bool,
+     *               receiving_anomaly:?string, legacy:bool, legacy_blocked:bool}
      */
     public function reconcile(int $requestId): array
     {
@@ -660,12 +670,32 @@ class ApprovalOrchestrator
         $r = $this->projection->sync($req, 'reconcile');
         $req->getFromDB($requestId);
         $submitted = (int) ($req->fields['number_seq'] ?? 0) > 0;
+        $pending = false;
+        $anomaly = null;
+        $legacy = false;
+        $blocked = false;
+        if (!empty($req->fields['purchase_started_at'])) {
+            $sync = (new ReceivingSync($this->wf, $this->audit, $this->lock))->sync($requestId, 'reconcile');
+            $pending = $sync['status'] === ReceivingSync::ST_PENDING;
+            $anomaly = $sync['anomaly'];
+            $r['to'] = $sync['state'] !== '' ? $sync['state'] : $r['to'];
+        } else {
+            $inst = $this->instanceFor($req, false);
+            if ($inst !== null && $this->wf->isOpen($inst) && !$this->wf->definitionHasAction($inst, PurchasingWorkflow::A_START_PURCHASE)) {
+                $legacy = true;
+                $blocked = $this->wf->stateCode($inst) === PurchasingWorkflow::S_APPROVED;
+            }
+        }
         return [
-            'state'     => $r['to'],
-            'corrected' => $r['changed'] && $r['from'] !== $r['to'],
-            'linked'    => $r['linked'],
-            'orphan'    => $submitted && !$r['instance'],
-            'dirty'     => $this->integrity->pending($requestId) !== [],
+            'state'             => $r['to'],
+            'corrected'         => $r['changed'] && $r['from'] !== $r['to'],
+            'linked'            => $r['linked'],
+            'orphan'            => $submitted && !$r['instance'],
+            'dirty'             => $this->integrity->pending($requestId) !== [],
+            'receiving_pending' => $pending,
+            'receiving_anomaly' => $anomaly,
+            'legacy'            => $legacy,
+            'legacy_blocked'    => $blocked,
         ];
     }
 
@@ -674,7 +704,8 @@ class ApprovalOrchestrator
      * CURSOR persistido, con wrap-around al llegar al final (cada ejecución avanza; ninguna solicitud queda
      * eternamente sin revisar aunque haya más que `$limit`).
      *
-     * @return array{checked:int, corrected:int, errors:int, orphans:array<int,int>, dirty:array<int,int>, cursor:int, wrapped:bool}
+     * @return array{checked:int, corrected:int, errors:int, orphans:array<int,int>, dirty:array<int,int>, cursor:int, wrapped:bool,
+     *               receiving_pending:array<int,int>, receiving_anomalies:array<int,string>, legacy:array<int,int>, legacy_blocked:array<int,int>}
      */
     public function reconcileAll(int $limit = 500): array
     {
@@ -684,7 +715,8 @@ class ApprovalOrchestrator
         $fromStart = count($after) < $limit ? $this->candidateIds(0, $cursor, $limit - count($after)) : [];
         $plan = self::planBatch($after, $fromStart, $cursor);
 
-        $stats = ['checked' => 0, 'corrected' => 0, 'errors' => 0, 'orphans' => [], 'dirty' => [], 'cursor' => $plan['cursor'], 'wrapped' => $plan['wrapped']];
+        $stats = ['checked' => 0, 'corrected' => 0, 'errors' => 0, 'orphans' => [], 'dirty' => [], 'cursor' => $plan['cursor'], 'wrapped' => $plan['wrapped'],
+                  'receiving_pending' => [], 'receiving_anomalies' => [], 'legacy' => [], 'legacy_blocked' => []];
         foreach ($plan['ids'] as $id) {
             $stats['checked']++;
             try {
@@ -697,6 +729,18 @@ class ApprovalOrchestrator
                 }
                 if ($r['dirty']) {
                     $stats['dirty'][] = $id;
+                }
+                if ($r['receiving_pending']) {
+                    $stats['receiving_pending'][] = $id;
+                }
+                if ($r['receiving_anomaly'] !== null) {
+                    $stats['receiving_anomalies'][$id] = $r['receiving_anomaly'];
+                }
+                if ($r['legacy']) {
+                    $stats['legacy'][] = $id;
+                }
+                if ($r['legacy_blocked']) {
+                    $stats['legacy_blocked'][] = $id;
                 }
             } catch (\Throwable) {
                 $stats['errors']++;

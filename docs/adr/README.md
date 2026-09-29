@@ -37,5 +37,6 @@ las cosas son como son.
 | [0016](ADR-0016-timezone-init-verification.md) | Inicialización y verificación de timezones (separar configuración de verificación) | Aceptado |
 | [0017](ADR-0017-glpi-security-key-hardening.md) | Pre-provisión de `glpicrypt.key` (workaround del bug `kernel.secret` de GLPI 11) | Aceptado |
 | [0018](ADR-0018-companypurchasing-approvals.md) | `companypurchasing` P2D-2 — circuito de aprobación sobre workflow + firma | Propuesto |
+| [0019](ADR-0019-companypurchasing-receiving.md) | `companypurchasing` P2D-3 — recepción física, costo por unidad y handoff a SI-4 | Propuesto |
 
 > Plantilla para nuevos ADR: [`adr-template.md`](adr-template.md).

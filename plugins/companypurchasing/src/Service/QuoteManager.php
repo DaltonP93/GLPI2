@@ -330,7 +330,7 @@ class QuoteManager
         if ((string) $quote->fields['currency_code'] !== $currency) {
             throw new \RuntimeException('la moneda de la cotización no coincide con la de la solicitud (fail-closed)');
         }
-        $overrides = PluginConfig::currencyScaleOverrides();
+        $overrides = CostPolicyStore::scaleOverridesFor($req); // iniciada la compra: la escala PINNEADA
         $prices = $this->quotePrices((int) $quote->getID());
         $requestLines = $this->requestLines((int) $req->getID());
         QuoteMath::assertCoverage(array_keys($requestLines), array_keys($prices));
@@ -464,6 +464,10 @@ class QuoteManager
         }
         if (!Session::haveAccessToEntity((int) $req->fields['entities_id'])) {
             throw new \RuntimeException('sin acceso a la entidad');
+        }
+        // P2D-3: iniciada la compra, cotizaciones/precios quedan CONGELADOS (el costo por unidad ya se fijó).
+        if (!empty($req->fields['purchase_started_at'])) {
+            throw new \RuntimeException('compra iniciada: cotizaciones y precios congelados (fail-closed)');
         }
         $inst = $this->wf->loadInstance((int) $req->fields['workflow_instances_id']);
         $state = $inst !== null ? $this->wf->stateCode($inst) : '';

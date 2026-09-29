@@ -120,7 +120,8 @@ final class ScopeSnapshotBuilder
     private function fullRecord(Request $request, array $items, ?array $commercial = null): array
     {
         $currency = (string) ($request->fields['currency_code'] ?? 'PYG');
-        $overrides = PluginConfig::currencyScaleOverrides();
+        // Iniciada la compra, la escala PINNEADA (un cambio posterior de la configuración no es "deriva").
+        $overrides = CostPolicyStore::scaleOverridesFor($request);
         // FAIL-CLOSED: un importe almacenado inconsistente con la moneda LANZA (nunca entra crudo a un
         // snapshot que luego se firmará). Sin fallback silencioso.
         $total = Money::ofStored((string) ($request->fields['amount_estimated'] ?? '0'), $currency, $overrides)->amount();

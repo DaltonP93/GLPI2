@@ -159,6 +159,71 @@ final class Decimal
     }
 
     /**
+     * Producto de dos strings de enteros no negativos (schoolbook), sin overflow (P2D-3: prorrateo de costos,
+     * donde `ajuste × peso` puede superar 64 bits).
+     */
+    public static function mulStr(string $a, string $b): string
+    {
+        self::assertDigits($a);
+        self::assertDigits($b);
+        $a = ltrim($a, '0');
+        $b = ltrim($b, '0');
+        if ($a === '' || $b === '') {
+            return '0';
+        }
+        $res = '0';
+        $shift = '';
+        for ($j = strlen($b) - 1; $j >= 0; $j--) {
+            $d = (int) $b[$j];
+            if ($d !== 0) {
+                $res = self::addStr($res, self::mulStrByInt($a, $d) . $shift);
+            }
+            $shift .= '0';
+        }
+        return $res;
+    }
+
+    /**
+     * División entera de strings de enteros no negativos: `[cociente, resto]` con `a = q·b + r`, `0 ≤ r < b`
+     * (división larga; cada dígito del cociente se obtiene por restas sucesivas, ≤ 9). FAIL-CLOSED si `b = 0`.
+     *
+     * @return array{0:string, 1:string}
+     */
+    public static function divModStr(string $a, string $b): array
+    {
+        self::assertDigits($a);
+        self::assertDigits($b);
+        if (ltrim($b, '0') === '') {
+            throw new \InvalidArgumentException('división por cero (fail-closed)');
+        }
+        $q = '';
+        $r = '0';
+        $len = strlen($a);
+        for ($i = 0; $i < $len; $i++) {
+            $r = ltrim($r . $a[$i], '0');
+            if ($r === '') {
+                $r = '0';
+            }
+            $digit = 0;
+            while (self::cmpStr($r, $b) >= 0) {
+                $r = self::subStr($r, $b);
+                $digit++;
+            }
+            $q .= (string) $digit;
+        }
+        $q = ltrim($q, '0');
+        return [$q === '' ? '0' : $q, $r];
+    }
+
+    /** @throws \InvalidArgumentException si el string no es un entero no negativo (sólo dígitos). */
+    private static function assertDigits(string $v): void
+    {
+        if (preg_match('/^\d+$/', $v) !== 1) {
+            throw new \InvalidArgumentException('entero no negativo inválido (fail-closed)');
+        }
+    }
+
+    /**
      * Resta `a - b` de strings de enteros no negativos (schoolbook). FAIL-CLOSED: si `b > a` lanza
      * (un importe monetario del dominio nunca queda negativo en silencio).
      */

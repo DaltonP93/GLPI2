@@ -58,6 +58,20 @@ final class PluginConfig
         'sync_on_workflow_events'    => '1',
         // Estado operacional de la reconciliación por lotes: último id revisado (cursor con wrap-around).
         'reconcile_cursor'           => '0',
+
+        // --- P2D-3: costo atribuible por unidad (se PINNEA por solicitud al iniciar la compra, ver
+        //     CostPolicyStore). `final_unit_price` se incluye SIEMPRE; los ajustes de cabecera de la cotización
+        //     sólo si se habilitan aquí (prorrateo nunca por defecto, gate §6). ---
+        'cost_include_discounts'     => '0',
+        'cost_include_taxes'         => '0',
+        'cost_include_freight'       => '0',
+        // --- P2D-3: entrega del handoff de inventario (outbox) a SI-4 (operacional, NO pinneado). ---
+        // Intentos máximos antes de pasar a ERROR (final) al pedir un reintento.
+        'outbox_max_attempts'        => '10',
+        // Duración máxima de un lease que un worker puede pedir (segundos).
+        'outbox_max_lease_seconds'   => '3600',
+        // Tope de unidades por lote de recepción (defensa ante entradas desmesuradas; fail-closed).
+        'receipt_max_units_per_batch' => '1000',
     ];
 
     /** Sufijo de configuración por etapa de aprobación (clave estable, no dato de negocio). */
@@ -139,6 +153,26 @@ final class PluginConfig
     public static function amendStates(): array
     {
         return self::jsonList('amend_states');
+    }
+
+    /** Reglas de costo vigentes en configuración (sin pinnear; `CostPolicy::fromArray` las valida). @return array<string,string> */
+    public static function costPolicyRaw(): array
+    {
+        return [
+            'include_discounts' => (string) self::get('cost_include_discounts', '0'),
+            'include_taxes'     => (string) self::get('cost_include_taxes', '0'),
+            'include_freight'   => (string) self::get('cost_include_freight', '0'),
+        ];
+    }
+
+    public static function outboxMaxAttempts(): int
+    {
+        return max(1, (int) self::get('outbox_max_attempts', '10'));
+    }
+
+    public static function outboxMaxLeaseSeconds(): int
+    {
+        return max(1, (int) self::get('outbox_max_lease_seconds', '3600'));
     }
 
     public static function syncOnWorkflowEvents(): bool

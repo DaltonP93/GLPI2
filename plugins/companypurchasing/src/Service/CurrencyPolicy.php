@@ -34,6 +34,19 @@ final class CurrencyPolicy
     }
 
     /**
+     * ¿`$scale` es una escala admisible para `$currency`? 0..`Decimal::SCALE`; una moneda FIJA sólo admite la
+     * suya (PYG ⇒ 0). PURO y ESTRICTO (código ISO ya canónico, sin normalizar): sirve para validar una escala
+     * PINNEADA o declarada sin consultar configuración.
+     */
+    public static function allows(string $currency, int $scale): bool
+    {
+        if (!self::isWellFormed($currency) || $scale < 0 || $scale > Decimal::SCALE) {
+            return false;
+        }
+        return !isset(self::FIXED[$currency]) || self::FIXED[$currency] === $scale;
+    }
+
+    /**
      * Escala permitida para una moneda. `$overrides` (p. ej. desde config) puede ajustar monedas
      * NO fijas; PYG siempre es 0.
      *

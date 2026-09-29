@@ -14,7 +14,7 @@
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYPURCHASING_VERSION', '0.3.0');
+define('PLUGIN_COMPANYPURCHASING_VERSION', '0.4.0');
 
 // Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
 // max='12.0' => GLPI 11.x soportado; 12.x NO hasta pasar la suite de regresion.
@@ -50,7 +50,8 @@ function plugin_init_companypurchasing() {
     $PLUGIN_HOOKS['companyworkflow:transitioned']['companypurchasing']         = 'plugin_companypurchasing_on_workflow_event';
     $PLUGIN_HOOKS['companyworkflow:approval_invalidated']['companypurchasing'] = 'plugin_companypurchasing_on_workflow_event';
 
-    // P2D-3…P2D-4 (no implementado): recepción/outbox y UI (portal/formularios/bandejas/métricas).
+    // P2D-3: recepción física + outbox (sin hooks nuevos: la saga del motor corre tras el COMMIT de la recepción
+    // y converge por la misma Acción automática `reconcileprojection`). P2D-4 (no implementado): entrega y UI.
 }
 
 /**

@@ -46,6 +46,15 @@ class PurchasingEvent extends CommonDBTM
     public const EV_PDF_FAILED           = 'pdf.failed';            // el fallo NO revierte workflow/evidencia
     public const EV_STATE_RECONCILED     = 'state.reconciled';      // proyección corregida desde el motor
 
+    // Eventos de negocio de P2D-3 (recepción física + handoff a SI-4).
+    public const EV_PURCHASE_STARTED  = 'purchase.started';   // cantidades/costos CONGELADOS + política de costo pinneada
+    public const EV_RECEIPT_RECORDED  = 'receipt.recorded';   // lote + unidades + outbox confirmados (misma transacción)
+    public const EV_RECEIVING_SYNCED  = 'receiving.synced';   // el motor reflejó los contadores físicos (saga)
+    public const EV_RECEIVING_ANOMALY = 'receiving.anomaly';  // motor y contadores no convergibles: se reporta, no se muta
+    public const EV_HANDOFF_DONE      = 'handoff.done';       // SI-4 confirmó el procesamiento (lease válido)
+    public const EV_HANDOFF_RETRY     = 'handoff.retry';
+    public const EV_HANDOFF_ERROR     = 'handoff.error';      // final (requiere intervención)
+
     public static function getTable($classname = null)
     {
         return 'glpi_plugin_companypurchasing_events';
