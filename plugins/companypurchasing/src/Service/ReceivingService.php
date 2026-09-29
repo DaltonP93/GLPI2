@@ -111,12 +111,15 @@ class ReceivingService
             if ($terms === null) {
                 throw new \RuntimeException('sin cotización seleccionada (fail-closed)');
             }
-            $policyId = $this->costPolicies->pinCurrent();
-            $policy = $this->costPolicies->load($policyId);
             $currency = (string) $req->fields['currency_code'];
-            $overrides = PluginConfig::currencyScaleOverrides();
+            // Política + moneda + escala EFECTIVA en este instante (PYG ⇒ 0): desde aquí, inmutables para la compra.
+            $policyId = $this->costPolicies->pinCurrent($currency);
+            $policy = $this->costPolicies->load($policyId);
             $math = $terms['math'];
-            $alloc = CostAllocator::allocate($math['lines'], (string) $math['discounts'], (string) $math['taxes'], (string) $math['freight'], $currency, $policy, $overrides);
+            if ($policy->currency() !== strtoupper($currency) || (string) ($math['currency'] ?? '') !== $currency) {
+                throw new \RuntimeException('moneda de la cotización/política distinta a la de la solicitud (fail-closed)');
+            }
+            $alloc = CostAllocator::allocate($math['lines'], (string) $math['discounts'], (string) $math['taxes'], (string) $math['freight'], $policy);
             foreach ($alloc as $a) {
                 if ($a['quantity'] > self::MAX_ORDERED_QTY) {
                     throw new \RuntimeException('cantidad de línea fuera de rango para la recepción (fail-closed)');
@@ -210,12 +213,14 @@ class ReceivingService
         if (!in_array($state, PurchasingWorkflow::RECEIVING_STATES, true)) {
             throw new \RuntimeException("el estado del workflow ({$state}) no admite recepción (fail-closed)");
         }
-        $policy = $this->costPolicies->forRequest($req); // pinneada + hash verificado (fail-closed)
+        // Pinneada + hash verificado + misma moneda que la solicitud (fail-closed). Su escala es la ÚNICA que usa
+        // esta compra: un cambio posterior de `currency_scale_overrides` no altera costos ni handoffs.
+        $policy = $this->costPolicies->forRequest($req);
 
         /** @var \DBmysql $DB */
         global $DB;
-        $currency  = (string) $req->fields['currency_code'];
-        $overrides = PluginConfig::currencyScaleOverrides();
+        $currency  = $policy->currency();
+        $overrides = $policy->scaleOverrides();
         $now       = $this->now();
         $receivedAtIso = date('c', (int) strtotime($now));
         $actor     = (int) (Session::getLoginUserID() ?: 0);
@@ -293,7 +298,7 @@ class ReceivingService
                     $ordinal = $received + $i;
                     $uuid = self::uuidV4();
                     $serial = $serials[$i - 1] ?? null;
-                    $unitCost = CostAllocator::unitCost($lineCost, $ordered, $ordinal, $currency, $overrides);
+                    $unitCost = CostAllocator::unitCost($lineCost, $ordered, $ordinal, $policy);
                     $DB->insert(ReceiptUnit::getTable(), [
                         'receipt_batches_id' => $batchId,
                         'requests_id'        => $requestId,
@@ -327,6 +332,7 @@ class ReceivingService
                             'category'          => (string) $row['category'],
                             'supplier_id'       => (int) ($req->fields['purchase_suppliers_id'] ?? 0),
                             'currency'          => $currency,
+                            'currency_scale'    => $policy->currencyScale(),
                             'unit_cost'         => $unitCost,
                             'received_at'       => $receivedAtIso,
                             'correlation_id'    => $corr,

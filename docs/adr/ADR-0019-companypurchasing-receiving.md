@@ -37,8 +37,14 @@ decisiones nuevas** que la implementación tuvo que tomar.
    compra** (p. ej. el Supplier cambia de rama) **no reabre el circuito** (hay una orden en curso y quizá
    unidades recibidas): `enforceIntegrity()` la reporta y `receive()` falla cerrado hasta que se resuelva.
 4. **Costo atribuible** (`CostPolicy` pinneada por solicitud en `..._cost_policies`, JSON canónico + hash):
-   `final_unit_price` siempre; `discounts`/`taxes`/`freight` de cabecera sólo si la configuración los incluye
-   (por defecto **ninguno**: el prorrateo nunca es el método por defecto). Método de asignación
+   la política pinnea `currency_code`, `currency_scale` (escala EFECTIVA de esa moneda al iniciar la compra;
+   **PYG ⇒ 0 siempre**, aunque se intente un override), `include_discounts/taxes/freight`, `allocation` y
+   `unit_split`. Iniciada la compra, `receive()`, `CostAllocator::allocate()/unitCost()` y el handoff usan
+   **sólo** la escala pinneada; también la integridad de la aprobación formatea los importes de esa solicitud con
+   ella (`CostPolicyStore::scaleOverridesFor()`), así que un cambio posterior de `currency_scale_overrides` no es
+   "deriva" y **sólo afecta compras nuevas**. `final_unit_price` siempre; `discounts`/`taxes`/`freight` de
+   cabecera sólo si la configuración los incluye (por defecto **ninguno**: el prorrateo nunca es el método por
+   defecto). Método de asignación
    `line_value_largest_remainder`: cada ajuste se reparte por valor de línea en unidades menores; el sobrante
    (< nº de líneas) va a los mayores restos, empate por orden de línea; si todas las líneas valen 0, el peso es
    la cantidad. Reparto por unidad `floor_remainder_to_first_units`: `base = ⌊C/Q⌋`; las primeras `C mod Q`
@@ -50,10 +56,20 @@ decisiones nuevas** que la implementación tuvo que tomar.
 6. **Protocolo de lease del outbox:** `claimPending()` toma elegibles (PENDING; RETRY con `next_retry_at`
    vencido; LEASED con `leased_until` vencido) con `FOR UPDATE SKIP LOCKED` y el **reloj único de la BD**;
    cada toma genera un `lease_token` nuevo (CSPRNG) e incrementa `attempts`. `acknowledgeProcessed` /
-   `markRetry` / `markError` son UPDATE condicionados a `status = LEASED` **y** al token vigente: un worker
-   re-tomado pierde el derecho a confirmar; repetir la misma confirmación con el mismo token es idempotente.
-   Agotar `outbox_max_attempts` en un `markRetry` ⇒ ERROR (final). Un payload cuyo JSON no reproduce su hash o
-   no es canónico ⇒ ERROR visible, nunca se entrega. `last_error` se sanea (sin credenciales) y se acota.
+   `markRetry` / `markError` son UPDATE condicionados a `status = LEASED`, al token vigente **y** a
+   `leased_until IS NOT NULL AND leased_until >= NOW()` (mismo reloj): un lease **vencido** no confirma aunque
+   nadie lo haya re-tomado todavía (la fila sigue reclamable) y un worker re-tomado pierde el derecho a confirmar;
+   tras una confirmación exitosa, repetirla con el mismo token es idempotente. Agotar `outbox_max_attempts` en un
+   `markRetry` ⇒ ERROR (final). `last_error` se sanea (sin credenciales) y se acota.
+   **Validación única del handoff** (`HandoffPayload::validatedPayload()`), idéntica en `claimPending()` y
+   `getHandoff()`: `payload_version` de la fila = `SCHEMA_VERSION`, JSON canónico, hash correcto, y la identidad
+   redundante coincide con la fila (`receipt_unit_uuid`, `request_id`, `entity_id`) y con la unidad que referencia
+   (línea, moneda, costo exacto, serial). Recalcular el hash tras editar el JSON no alcanza. Inconsistente ⇒
+   ERROR visible en el claim y excepción en `getHandoff()`: nunca se entrega.
+   **Payload v1 autosuficiente respecto del dinero:** `currency` + `currency_scale` (la pinneada) + `unit_cost`
+   como string con exactamente esa escala; se valida contra la escala declarada (regla dura PYG ⇒ 0), sin
+   consultar la configuración vigente de Compras. v1 se fijó así antes del primer merge/despliegue (sin payloads
+   productivos que migrar).
 7. **Instancias iniciadas bajo una versión anterior** (sin fase de compra) conservan su versión (regla del
    motor): `startPurchase()` falla cerrado y la reconciliación las **reporta** (`legacy`; `legacy_blocked`
    si ya están en APPROVED, que hace fallar el comando/Acción automática para que no pase inadvertido). No se
@@ -72,6 +88,9 @@ decisiones nuevas** que la implementación tuvo que tomar.
 | COMMIT → caída antes del motor ⇒ pendiente reportado; la CronTask nativa converge | `[RECEIVE-CRASH-SYNC]` |
 | 6 + 6 sobre 10 (procesos reales) ⇒ nunca 12 | `[RECEIVE-CONC]` |
 | Claim concurrente disjunto; lease vencido; token viejo rechazado; RETRY/ERROR | `[OUTBOX]` |
+| Lease vencido sin re-toma no confirma (determinista); la fila sigue reclamable | `[OUTBOX-LEASE]` |
+| `getHandoff`/claim con la misma validación: versión de fila, uuid/solicitud/entidad editados + hash recalculado ⇒ rechazo | `[OUTBOX-IDENTITY]`, unit `validatedPayload` |
+| Escala pinneada: USD 3 → cambio global a 2 entre lotes ⇒ ambos lotes a escala 3, Σ exacta, misma política; PYG ⇒ 0 | `[COST-SCALE-PIN]`, unit `CostPolicy`/`HandoffPayload` |
 | Congelamiento; deriva post-compra no reabre | `[FREEZE]`, `[POST-PURCHASE-INTEGRITY]` |
 | Versión anterior detectada y no mutada | `[LEGACY-DEF]` |
 | Sin clientes HTTP/Snipe/activos/Infocom/companyqr/float en el código nuevo; ningún Computer/Infocom creado | unit (escaneo), `[NO-SIDE-EFFECTS]` |

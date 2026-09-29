@@ -5,8 +5,9 @@
  *
  * Nunca `total ÷ cantidad de activos`. La base es el `final_unit_price` de la línea de la cotización
  * seleccionada; los ajustes de CABECERA (`discounts`, `taxes`, `freight`) sólo entran si la `CostPolicy`
- * pinneada lo dice. Todo se calcula en UNIDADES MENORES de la moneda (PYG: guaraníes, escala 0; USD:
- * centavos, escala 2), con aritmética de strings (`Decimal`), por lo que no hay redondeo binario.
+ * pinneada lo dice. Todo se calcula en UNIDADES MENORES de la moneda con la escala PINNEADA en la política
+ * (PYG: guaraníes, escala 0; USD: p. ej. centavos, escala 2) — nunca con la configuración vigente —, con
+ * aritmética de strings (`Decimal`), por lo que no hay redondeo binario.
  *
  * Método `line_value_largest_remainder` (asignación de un ajuste A entre líneas):
  *   1. peso de la línea i = `line_value_i` = precio final × cantidad (en unidades menores). Si todas las
@@ -31,8 +32,7 @@ final class CostAllocator
 {
     /**
      * @param array<int,array{line_id:int, quantity:int|string, final_unit_price:string}> $lines  ORDENADAS
-     *        (line_no, id): el orden desempata la asignación.
-     * @param array<string,int> $overrides escalas por moneda
+     *        (line_no, id): el orden desempata la asignación. Importes en la moneda de `$policy`.
      * @return array<int,array{line_id:int, quantity:int, final_unit_price:string, line_value:string,
      *               discounts:string, taxes:string, freight:string, line_cost:string}>  por posición
      * @throws \InvalidArgumentException|\RuntimeException
@@ -42,14 +42,12 @@ final class CostAllocator
         string $discounts,
         string $taxes,
         string $freight,
-        string $currency,
-        CostPolicy $policy,
-        array $overrides = []
+        CostPolicy $policy
     ): array {
         if ($lines === []) {
             throw new \InvalidArgumentException('sin líneas para costear (fail-closed)');
         }
-        $scale = CurrencyPolicy::scale(strtoupper($currency), $overrides);
+        [$currency, $scale, $overrides] = self::pinned($policy);
         $values = [];
         $qtys = [];
         $prices = [];
@@ -94,17 +92,17 @@ final class CostAllocator
     }
 
     /**
-     * Costo de la unidad ordinal `$ordinal` (1..`$quantity`) de una línea cuyo costo total es `$lineCost`.
+     * Costo de la unidad ordinal `$ordinal` (1..`$quantity`) de una línea cuyo costo total es `$lineCost`, a la
+     * escala PINNEADA en `$policy`.
      *
-     * @param array<string,int> $overrides
      * @throws \InvalidArgumentException
      */
-    public static function unitCost(string $lineCost, int $quantity, int $ordinal, string $currency, array $overrides = []): string
+    public static function unitCost(string $lineCost, int $quantity, int $ordinal, CostPolicy $policy): string
     {
         if ($quantity < 1 || $ordinal < 1 || $ordinal > $quantity) {
             throw new \InvalidArgumentException('ordinal de unidad fuera de rango (fail-closed)');
         }
-        $scale = CurrencyPolicy::scale(strtoupper($currency), $overrides);
+        [$currency, $scale, $overrides] = self::pinned($policy);
         $minor = self::toMinor(Money::of($lineCost, $currency, $overrides), $scale);
         [$base, $rem] = Decimal::divModStr($minor, (string) $quantity);
         $unit = Decimal::cmpStr((string) $ordinal, $rem) <= 0 ? Decimal::addStr($base, '1') : $base;
@@ -148,6 +146,22 @@ final class CostAllocator
             }
         }
         return $shares;
+    }
+
+    /**
+     * Moneda + escala PINNEADAS de la política (y el mapa para `Money` con sólo esa escala).
+     *
+     * @return array{0:string, 1:int, 2:array<string,int>}
+     */
+    private static function pinned(CostPolicy $policy): array
+    {
+        $currency = $policy->currency();
+        $scale = $policy->currencyScale();
+        $overrides = $policy->scaleOverrides();
+        if (CurrencyPolicy::scale($currency, $overrides) !== $scale) {
+            throw new \RuntimeException('escala pinneada no admisible para la moneda (fail-closed)'); // p. ej. PYG ≠ 0
+        }
+        return [$currency, $scale, $overrides];
     }
 
     /** Importe (validado a la escala de su moneda) → unidades menores (string entero). */

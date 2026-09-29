@@ -8,6 +8,9 @@
  *   dice (`include_*`). Por defecto NINGUNO: el prorrateo nunca es el método por defecto (gate §6).
  * - Un ajuste incluido se asigna a las líneas por `line_value` (precio final × cantidad) con el método
  *   determinista `line_value_largest_remainder` (ver `CostAllocator`).
+ * - `currency` + `currency_scale`: la moneda de la compra y la escala EFECTIVA en el instante del pinneo
+ *   (PYG ⇒ 0 siempre). Todo costo de esa compra (asignación, reparto por unidad, payload del handoff) usa esta
+ *   escala; un cambio posterior de `currency_scale_overrides` sólo afecta compras NUEVAS.
  *
  * Se PINNEA por solicitud al iniciar la compra (`requests.cost_policies_id`), ANTES de la primera unidad:
  * una edición posterior de la configuración no altera costos de compras ya iniciadas. `canonical()` + `hash()`
@@ -44,7 +47,7 @@ final class CostPolicy
     }
 
     /**
-     * Construye y VALIDA (fail-closed). Acepta flags como bool/0/1/'0'/'1'.
+     * Construye y VALIDA (fail-closed). Acepta flags como bool/0/1/'0'/'1' y la escala como int o dígitos.
      *
      * @param array<string,mixed> $raw
      * @throws \RuntimeException
@@ -55,6 +58,19 @@ final class CostPolicy
         if ($data['schema'] !== self::SCHEMA) {
             throw new \RuntimeException('política de costo: schema desconocido (fail-closed)');
         }
+        $currency = $raw['currency'] ?? null;
+        if (!is_string($currency) || !CurrencyPolicy::isWellFormed($currency)) {
+            throw new \RuntimeException("política de costo: falta 'currency' o no es ISO-4217 en mayúsculas (fail-closed)");
+        }
+        $scale = $raw['currency_scale'] ?? null;
+        if (is_string($scale) && preg_match('/^\d$/', $scale) === 1) {
+            $scale = (int) $scale;
+        }
+        if (!is_int($scale) || !CurrencyPolicy::allows($currency, $scale)) {
+            throw new \RuntimeException("política de costo: 'currency_scale' ausente o no admisible para {$currency} (PYG ⇒ 0) (fail-closed)");
+        }
+        $data['currency'] = $currency;
+        $data['currency_scale'] = $scale;
         foreach (self::FLAGS as $flag) {
             if (!array_key_exists($flag, $raw)) {
                 throw new \RuntimeException("política de costo: falta '{$flag}' (fail-closed)");
@@ -90,6 +106,28 @@ final class CostPolicy
     public function id(): int
     {
         return $this->id;
+    }
+
+    public function currency(): string
+    {
+        return $this->data['currency'];
+    }
+
+    /** Escala monetaria PINNEADA de la compra (PYG ⇒ 0). */
+    public function currencyScale(): int
+    {
+        return $this->data['currency_scale'];
+    }
+
+    /**
+     * Mapa de escalas para `Money` con SÓLO la escala pinneada: los importes de esta compra nunca vuelven a
+     * depender de `PluginConfig::currencyScaleOverrides()`.
+     *
+     * @return array<string,int>
+     */
+    public function scaleOverrides(): array
+    {
+        return [$this->data['currency'] => $this->data['currency_scale']];
     }
 
     public function includeDiscounts(): bool

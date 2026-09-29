@@ -22,10 +22,16 @@ Ver `../../docs/adr/ADR-0019-companypurchasing-receiving.md` (sólo decisiones n
 - **Costo atribuible exacto** (`CostPolicy`/`CostPolicyStore`/`CostAllocator`): base `final_unit_price`;
   descuentos/impuestos/flete de cabecera sólo si se incluyen (por defecto no); asignación por valor de línea con
   mayor resto; reparto por unidad sin pérdida (Σ unidades = costo de línea). `Decimal::mulStr/divModStr`.
+  La política pinnea también `currency_code` + `currency_scale` (escala efectiva al iniciar; PYG ⇒ 0 siempre):
+  costo, handoff e integridad de esa compra usan sólo la escala pinneada; un cambio posterior de
+  `currency_scale_overrides` sólo afecta compras nuevas.
 - **Outbox + `Api\PurchasingIntegrationApi`** (`claimPending`, `getHandoff`, `acknowledgeProcessed`,
-  `markRetry`, `markError`): payload v1 inmutable (canónico + sha256), lease con token y reloj de la BD
-  (`FOR UPDATE SKIP LOCKED`), token viejo rechazado, RETRY con `next_retry_at`, ERROR final, intentos máximos,
-  `last_error` saneado. Nuevo derecho de mínimo privilegio `RIGHT_INTEGRATION` (1024).
+  `markRetry`, `markError`): payload v1 inmutable (canónico + sha256) y autosuficiente (`currency`,
+  `currency_scale`, `unit_cost` exacto a esa escala), validación única `HandoffPayload::validatedPayload()` en
+  claim y lectura (versión de fila, hash, identidad redundante con la fila y la unidad), lease con token y reloj
+  de la BD (`FOR UPDATE SKIP LOCKED`; confirmar exige el lease VIGENTE), token viejo rechazado, RETRY con
+  `next_retry_at`, ERROR final, intentos máximos, `last_error` saneado. Nuevo derecho de mínimo privilegio
+  `RIGHT_INTEGRATION` (1024).
 - Esquema (upgrade idempotente desde 0.3.0): tablas `receipt_batches`, `receipt_units`, `inventory_outbox`,
   `cost_policies`; columnas `items.ordered_qty/received_qty/purchase_unit_price/line_cost_total` y
   `requests.purchase_started_at/purchase_quotes_id/purchase_suppliers_id/cost_policies_id/receiving_seq/
@@ -49,12 +55,14 @@ Ver `../../docs/adr/ADR-0019-companypurchasing-receiving.md` (sólo decisiones n
   modo cron en cada cambio de sesión (las comprobaciones de ACL posteriores vuelven a ser reales).
 
 ### Tests
-- Unit: +46 (definición/`syncPath`/`receivingTarget`, política, Decimal, CostPolicy, CostAllocator con
-  propiedades aleatorias, HandoffPayload, UUID v4, saneamiento, escaneo estático de límites).
+- Unit: +60 (definición/`syncPath`/`receivingTarget`, política, Decimal, CostPolicy con moneda + escala
+  pinneadas, CostAllocator con propiedades aleatorias, HandoffPayload autosuficiente, `validatedPayload`, UUID v4,
+  saneamiento, escaneo estático de límites).
 - Selftest: `[UPGRADE-P2D3]`, `[P2D3-PERSIST]`, `[PURCHASE-START]`, `[FREEZE]`, `[RECEIVE-PARTIAL]`,
   `[RECEIVE-IDEMPOTENT]`, `[RECEIVE-VALIDATION]`, `[RECEIVE-ATOMIC]`, `[RECEIVE-CRASH-SYNC]`, `[RECEIVE-CONC]`
   (procesos reales), `[POST-PURCHASE-INTEGRITY]`, `[RECEIVE-ACL]`, `[OUTBOX]` (claim concurrente real, lease,
-  token), `[LEGACY-DEF]`, `[NO-SIDE-EFFECTS]`; `[MIGRATE]` cubre las tablas nuevas.
+  token), `[OUTBOX-IDENTITY]`, `[OUTBOX-LEASE]` (lease vencido, determinista), `[COST-SCALE-PIN]`,
+  `[LEGACY-DEF]`, `[NO-SIDE-EFFECTS]`; `[MIGRATE]` cubre las tablas nuevas.
 
 ## [0.3.0] — Fase 2D · P2D-2 (circuito de aprobación)
 Ver `../../docs/adr/ADR-0018-companypurchasing-approvals.md`.

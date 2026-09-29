@@ -27,6 +27,11 @@
  *                       4 + 6 concurrentes ⇒ 10 unidades.
  *   [POST-PURCHASE-INTEGRITY] deriva tras iniciar la compra ⇒ no se recibe, NO se reabre el circuito.
  *   [RECEIVE-ACL]       RIGHT_RECEIVE, multi-entidad, lectura de unidades.
+ *   [OUTBOX-IDENTITY]   validación ÚNICA (claim + getHandoff): versión de la fila, uuid/solicitud/entidad
+ *                       cambiados DENTRO del JSON con hash recalculado ⇒ getHandoff fail-closed, claim ⇒ ERROR.
+ *   [OUTBOX-LEASE]      lease VENCIDO sin re-toma ⇒ ACK/retry/error rechazados; la fila sigue reclamable (determinista).
+ *   [COST-SCALE-PIN]    moneda + escala pinneadas con la política: USD 3 → cambio global a 2 entre lotes ⇒ ambos
+ *                       lotes a escala 3, Σ exacta, misma política; handoff autosuficiente; PYG ⇒ 0 siempre.
  *   [OUTBOX]            payload inmutable + hash; ACL INTEGRATION (mínimo privilegio) + multi-entidad; claim
  *                       concurrente (procesos reales) disjunto; lease vencido ⇒ re-toma; token viejo rechazado;
  *                       ACK ⇒ DONE (idempotente); RETRY respeta next_retry_at; ERROR final; intentos agotados;
@@ -50,6 +55,9 @@ use GlpiPlugin\Companypurchasing\Model\ReceiptBatch;
 use GlpiPlugin\Companypurchasing\Model\ReceiptUnit;
 use GlpiPlugin\Companypurchasing\Model\Request;
 use GlpiPlugin\Companypurchasing\Model\RequestItem;
+use GlpiPlugin\Companypurchasing\Service\CostPolicyStore;
+use GlpiPlugin\Companypurchasing\Service\CurrencyPolicy;
+use GlpiPlugin\Companypurchasing\Service\Decimal;
 use GlpiPlugin\Companypurchasing\Service\HandoffPayload;
 use GlpiPlugin\Companypurchasing\Service\Money;
 use GlpiPlugin\Companypurchasing\Service\PluginConfig;
@@ -94,6 +102,7 @@ trait ReceivingSelftestScenarios
         $this->scenarioPostPurchaseIntegrity();
         $this->scenarioReceiveAcl();
         $this->scenarioOutbox();
+        $this->scenarioCostScalePin();
         $this->scenarioLegacyDefinition();
         $this->check('[NO-SIDE-EFFECTS] ningún Computer/Infocom/companyqr/companyintegrations creado (no SI-4, no Snipe-IT)', $this->sideEffectCounts() === $before);
     }
@@ -150,11 +159,11 @@ trait ReceivingSelftestScenarios
      * @param array<int,array{0:string,1:int,2:int}> $lines  [descripción, cantidad, inventariable]
      * @param array<int,string> $prices  precio final por posición de línea
      */
-    private function approvedRequest(string $tag, array $lines, array $prices, string $disc = '0', string $tax = '0', string $freight = '0', ?int $supplier = null): int
+    private function approvedRequest(string $tag, array $lines, array $prices, string $disc = '0', string $tax = '0', string $freight = '0', ?int $supplier = null, string $currency = 'PYG'): int
     {
         $this->asRequester();
         $rm = new RequestManager();
-        $id = $rm->createDraft(['entities_id' => $this->entityA, 'reason' => 'p2d3-' . $tag . '-' . $this->suffix, 'category' => 'IT']);
+        $id = $rm->createDraft(['entities_id' => $this->entityA, 'reason' => 'p2d3-' . $tag . '-' . $this->suffix, 'category' => 'IT', 'currency_code' => $currency]);
         foreach ($lines as [$desc, $qty, $inv]) {
             $rm->addLine($id, ['description' => $desc, 'quantity' => (string) $qty, 'estimated_unit_price' => '1000', 'is_inventoriable' => $inv, 'category' => 'HW']);
         }
@@ -510,6 +519,9 @@ trait ReceivingSelftestScenarios
             && $this->pyg((string) $i1['purchase_unit_price']) === '1400');
         $this->check('[PURCHASE-START] proveedor/cotización de la compra y política de costo pinneados', (int) $r['purchase_suppliers_id'] === $this->supA
             && (int) $r['purchase_quotes_id'] > 0 && (int) $r['cost_policies_id'] > 0 && !empty($r['purchase_started_at']));
+        $pinned = (new CostPolicyStore())->load((int) $r['cost_policies_id']);
+        $this->check('[PURCHASE-START] la política pinnea moneda + escala EFECTIVA (PYG ⇒ 0) junto con los flags',
+            $pinned->currency() === 'PYG' && $pinned->currencyScale() === 0 && $pinned->includeTaxes() && $pinned->includeFreight() && $pinned->includeDiscounts());
         $again = $this->recv()->startPurchase($req);
         $this->check('[PURCHASE-START] reintento idempotente (sin segundo inicio ni segundo evento)', !$again['started_now']
             && $this->countEvents($req, PurchasingEvent::EV_PURCHASE_STARTED) === 1 && $this->countTransitionsTo($req, PurchasingWorkflow::S_IN_PURCHASE) === 1);
@@ -931,10 +943,10 @@ trait ReceivingSelftestScenarios
         $this->check('[OUTBOX] getHandoff por identidad canónica: PENDING, payload v1 con las claves EXACTAS',
             $h !== null && $h['status'] === OutboxEntry::STATUS_PENDING && $h['payload_version'] === HandoffPayload::SCHEMA_VERSION && $keys === $expected);
         $p = $h['payload'] ?? [];
-        $this->check('[OUTBOX] payload: unidad, solicitud/número, línea, entidad, serial, proveedor, moneda, costo EXACTO (string), correlación',
+        $this->check('[OUTBOX] payload: unidad, solicitud/número, línea, entidad, serial, proveedor, moneda + escala pinneada, costo EXACTO (string), correlación',
             ($p['receipt_unit_uuid'] ?? '') === $uuid && ($p['request_id'] ?? 0) === $req && ($p['request_number'] ?? '') === (string) $rr['number']
             && ($p['item_id'] ?? 0) === $l1 && ($p['entity_id'] ?? -1) === $this->entityA && ($p['serial'] ?? '') === $this->mainSerials()[0]
-            && ($p['supplier_id'] ?? 0) === $this->supA && ($p['currency'] ?? '') === 'PYG' && ($p['unit_cost'] ?? null) === '1424'
+            && ($p['supplier_id'] ?? 0) === $this->supA && ($p['currency'] ?? '') === 'PYG' && ($p['currency_scale'] ?? null) === 0 && ($p['unit_cost'] ?? null) === '1424'
             && ($p['correlation_id'] ?? '') === (string) $rr['correlation_id'] && ($p['description'] ?? '') === 'Notebook');
         $this->check('[OUTBOX] payload INMUTABLE + hash: sha256(payload_json) = payload_sha256 y forma canónica verificable',
             $o !== [] && hash('sha256', (string) $o['payload_json']) === (string) $o['payload_sha256']
@@ -984,7 +996,7 @@ trait ReceivingSelftestScenarios
         $this->check('[OUTBOX] sin elegibles tras tomar todo', $this->api()->claimPending('w-empty-' . $this->suffix, 100, 60) === []);
 
         // Unidades NUEVAS de una a la vez para las pruebas de lease.
-        $rq = $this->startedRequest('lease', [['Camera', 6, 1]], ['250']);
+        $rq = $this->startedRequest('lease', [['Camera', 12, 1]], ['250']);
         $lq = $this->lineIds($rq)[0];
         $one = function (string $tag) use ($rq, $lq): string {
             $this->asReceiver($this->uReceiver);
@@ -1060,6 +1072,135 @@ trait ReceivingSelftestScenarios
         $this->check('[OUTBOX] payload ALTERADO ⇒ no se entrega: el claim lo deja en ERROR visible',
             $ct === [] && ($row['status'] ?? '') === OutboxEntry::STATUS_ERROR && (string) $row['last_error'] === 'payload integrity check failed');
         $this->check('[OUTBOX] getHandoff de un payload alterado ⇒ fail-closed', $this->throws(fn () => $this->api()->getHandoff($ut)));
+
+        // (f) Validación ÚNICA (claim + getHandoff): versión de la fila e identidad redundante con fila/unidad. Los
+        //     cambios DENTRO del JSON recalculan JSON + sha256 (el hash solo no alcanza para detectarlos).
+        $rehash = function (string $uuid, array $change) use ($DB): void {
+            $p = json_decode((string) ($this->outboxRow($uuid)['payload_json'] ?? ''), true);
+            $p = HandoffPayload::build($change + (is_array($p) ? $p : []));
+            $DB->update(OutboxEntry::getTable(), ['payload_json' => HandoffPayload::canonical($p), 'payload_sha256' => HandoffPayload::hash($p)], ['receipt_unit_uuid' => $uuid]);
+        };
+        $rejected = function (string $uuid, string $worker): bool {
+            $this->asIntegration($this->uIntegr);
+            $get = $this->throws(fn () => $this->api()->getHandoff($uuid));
+            $claim = $this->api()->claimPending($worker, 10, 60);
+            $row = $this->outboxRow($uuid);
+            return $get && $claim === [] && ($row['status'] ?? '') === OutboxEntry::STATUS_ERROR
+                && (string) $row['last_error'] === 'payload integrity check failed' && $this->throws(fn () => $this->api()->getHandoff($uuid));
+        };
+        $uv = $one('v');
+        $this->check('[OUTBOX-IDENTITY] handoff coherente ⇒ getHandoff lo devuelve (misma validación que el claim)', ($this->api()->getHandoff($uv)['payload']['receipt_unit_uuid'] ?? '') === $uv);
+        $DB->update(OutboxEntry::getTable(), ['payload_version' => HandoffPayload::SCHEMA_VERSION + 1], ['receipt_unit_uuid' => $uv]);
+        $this->check('[OUTBOX-IDENTITY] payload_version de la FILA alterada ⇒ getHandoff fail-closed; el claim no la entrega y la deja en ERROR', $rejected($uv, 'worker-V'));
+        $uu = $one('u');
+        $rehash($uu, ['receipt_unit_uuid' => ReceivingService::uuidV4()]);
+        $this->check('[OUTBOX-IDENTITY] receipt_unit_uuid cambiado DENTRO del JSON (JSON + sha256 recalculados) ⇒ rechazado: no coincide con la fila',
+            HandoffPayload::verify((string) $this->outboxRow($uu)['payload_json'], (string) $this->outboxRow($uu)['payload_sha256']) !== null && $rejected($uu, 'worker-U'));
+        $uq = $one('q');
+        $rehash($uq, ['request_id' => $this->p2d3Main]);
+        $this->check('[OUTBOX-IDENTITY] request_id cambiado dentro del payload + hash recalculado ⇒ rechazado', $rejected($uq, 'worker-Q'));
+        $un = $one('n');
+        $rehash($un, ['entity_id' => $this->entityB]);
+        $this->check('[OUTBOX-IDENTITY] entity_id cambiado dentro del payload + hash recalculado ⇒ rechazado', $rejected($un, 'worker-N'));
+
+        // (g) Lease VENCIDO sin re-toma ⇒ no confirma. Determinista: `leased_until` al pasado con el reloj de la BD.
+        $ul = $one('l');
+        $la = $this->api()->claimPending('worker-LA', 10, 600);
+        $tokA = (string) ($la[0]['lease_token'] ?? '');
+        $DB->update(OutboxEntry::getTable(), ['leased_until' => new \Glpi\DBAL\QueryExpression('DATE_SUB(NOW(), INTERVAL 5 SECOND)')], ['receipt_unit_uuid' => $ul]);
+        $rejA = $this->throws(fn () => $this->api()->acknowledgeProcessed($ul, $tokA))
+            && $this->throws(fn () => $this->api()->markRetry($ul, $tokA, 'late', '+1 hour'))
+            && $this->throws(fn () => $this->api()->markError($ul, $tokA, 'late'));
+        $rowA = $this->outboxRow($ul);
+        $this->check('[OUTBOX-LEASE] lease VENCIDO (aún sin re-toma) ⇒ ACK / markRetry / markError con token-A RECHAZADOS; la fila no cambia',
+            count($la) === 1 && ($la[0]['receipt_unit_uuid'] ?? '') === $ul && $rejA && ($rowA['status'] ?? '') === OutboxEntry::STATUS_LEASED
+            && (string) $rowA['lease_token'] === $tokA && empty($rowA['processed_at']) && $this->countEvents($rq, PurchasingEvent::EV_HANDOFF_DONE) === 2);
+        $lb = $this->api()->claimPending('worker-LB', 10, 600);
+        $tokB = (string) ($lb[0]['lease_token'] ?? '');
+        $this->check('[OUTBOX-LEASE] la fila sigue RECLAMABLE: worker B la toma con token-B (attempts 2)',
+            count($lb) === 1 && ($lb[0]['receipt_unit_uuid'] ?? '') === $ul && $tokB !== $tokA && ($lb[0]['attempts'] ?? 0) === 2);
+        $this->check('[OUTBOX-LEASE] worker A vuelve a confirmar con token-A ⇒ RECHAZADO', $this->throws(fn () => $this->api()->acknowledgeProcessed($ul, $tokA)));
+        $ackB = $this->api()->acknowledgeProcessed($ul, $tokB);
+        $ackB2 = $this->api()->acknowledgeProcessed($ul, $tokB);
+        $this->check('[OUTBOX-LEASE] worker B confirma con token-B VIGENTE ⇒ DONE; repetir el mismo ACK ⇒ idempotente',
+            $ackB['status'] === OutboxEntry::STATUS_DONE && !$ackB['idempotent'] && $ackB2['status'] === OutboxEntry::STATUS_DONE && $ackB2['idempotent']
+            && ($this->outboxRow($ul)['status'] ?? '') === OutboxEntry::STATUS_DONE);
+    }
+
+    // ================================================================ [COST-SCALE-PIN]
+
+    /**
+     * La escala monetaria se PINNEA con la política de costo al iniciar la compra: un cambio administrativo
+     * posterior de `currency_scale_overrides` no altera los costos de lotes posteriores ni el handoff; sólo afecta
+     * compras NUEVAS. PYG ⇒ 0 siempre.
+     */
+    private function scenarioCostScalePin(): void
+    {
+        $this->out->writeln('== [COST-SCALE-PIN] moneda + escala pinneadas con la política de costo ==');
+        $this->asAdmin();
+        if (!array_key_exists('currency_scale_overrides', $this->savedConfig)) {
+            $this->savedConfig['currency_scale_overrides'] = PluginConfig::get('currency_scale_overrides');
+        }
+        \Config::setConfigurationValues(PluginConfig::CONTEXT, ['currency_scale_overrides' => '{"USD":3}',
+            'cost_include_discounts' => '0', 'cost_include_taxes' => '0', 'cost_include_freight' => '1']);
+        $req = $this->approvedRequest('usd3', [['Sensor', 3, 1]], ['3.66'], '0', '0', '0.02', null, 'USD');
+        $l = $this->lineIds($req)[0];
+        $this->asBuyer($this->uBuyer);
+        $this->recv()->startPurchase($req, 'orden USD');
+        $r0 = $this->reqRow($req);
+        $store = new CostPolicyStore();
+        $pol0 = $store->load((int) $r0['cost_policies_id']);
+        $this->check('[COST-SCALE-PIN] USD override = 3 al iniciar ⇒ la política pinnea USD / escala 3 (en su JSON canónico y hash)',
+            $pol0->currency() === 'USD' && $pol0->currencyScale() === 3 && str_contains($pol0->canonical(), '"currency":"USD","currency_scale":3'));
+        $this->check('[COST-SCALE-PIN] costo de línea exacto a la escala pinneada: 3 × 3.66 + flete 0.02 = 11.000',
+            Money::ofStored((string) $this->itemRow($l)['line_cost_total'], 'USD', ['USD' => 3])->amount() === '11.000');
+
+        $this->asReceiver($this->uReceiver);
+        $p1 = $this->recv()->receive($req, 'usd3-1-' . $this->suffix, [['items_id' => $l, 'quantity' => '2']]);
+        // Cambio ADMINISTRATIVO entre dos lotes: USD pasa a escala 2.
+        $this->asAdmin();
+        \Config::setConfigurationValues(PluginConfig::CONTEXT, ['currency_scale_overrides' => '{"USD":2}']);
+        $this->check('[COST-SCALE-PIN] el cambio de la escala global NO es deriva de integridad de la compra en curso', $this->orch()->integrityStatus($req)['clean']);
+        $this->asReceiver($this->uReceiver);
+        $p2 = $this->recv()->receive($req, 'usd3-2-' . $this->suffix, [['items_id' => $l, 'quantity' => '1']]);
+        $units = $this->unitsOf($l);
+        $costs = array_map(static fn (array $u): string => Money::ofStored((string) $u['unit_cost'], 'USD', ['USD' => 3])->amount(), $units);
+        $sum = '0';
+        foreach ($units as $u) {
+            $sum = Decimal::addStr($sum, Decimal::toMicro((string) $u['unit_cost']));
+        }
+        $this->check('[COST-SCALE-PIN] lote 1 (escala 3) y lote 2 TRAS el cambio global a 2 siguen a escala 3: 3.667, 3.667, 3.666',
+            count($p1['units']) === 2 && count($p2['units']) === 1 && $costs === ['3.667', '3.667', '3.666']);
+        $this->check('[COST-SCALE-PIN] Σ unit_cost == line_cost_total EXACTAMENTE (11.000)', $sum === Decimal::toMicro((string) $this->itemRow($l)['line_cost_total']));
+        $r1 = $this->reqRow($req);
+        $pol1 = $store->load((int) $r1['cost_policies_id']);
+        $this->check('[COST-SCALE-PIN] política pinneada intacta: mismo id y mismo hash', (int) $r1['cost_policies_id'] === (int) $r0['cost_policies_id'] && $pol1->hash() === $pol0->hash());
+        $this->asIntegration($this->uIntegr);
+        $h = $this->api()->getHandoff((string) ($p2['units'][0] ?? ''));
+        $all3 = true;
+        foreach (array_merge($p1['units'], $p2['units']) as $u) {
+            $hp = $this->api()->getHandoff($u)['payload'] ?? [];
+            $all3 = $all3 && ($hp['currency'] ?? '') === 'USD' && ($hp['currency_scale'] ?? null) === 3;
+        }
+        $this->check('[COST-SCALE-PIN] handoff autosuficiente: USD / currency_scale 3 / unit_cost "3.666", válido con la configuración global ya en escala 2',
+            ($h['payload']['unit_cost'] ?? '') === '3.666' && $all3 && CurrencyPolicy::scale('USD', PluginConfig::currencyScaleOverrides()) === 2);
+
+        // Sólo las compras NUEVAS toman la escala nueva.
+        $req2 = $this->approvedRequest('usd2', [['Sensor', 3, 1]], ['3.66'], '0', '0', '0.02', null, 'USD');
+        $this->asBuyer($this->uBuyer);
+        $this->recv()->startPurchase($req2, 'orden USD nueva');
+        $pol2 = $store->load((int) $this->reqRow($req2)['cost_policies_id']);
+        $this->check('[COST-SCALE-PIN] una compra NUEVA iniciada después del cambio pinnea USD / escala 2 (otra versión de política)',
+            $pol2->currency() === 'USD' && $pol2->currencyScale() === 2 && $pol2->id() !== $pol0->id());
+
+        // PYG ⇒ 0 siempre, aunque se intente un override.
+        $this->asAdmin();
+        \Config::setConfigurationValues(PluginConfig::CONTEXT, ['currency_scale_overrides' => '{"PYG":2,"USD":2}']);
+        $pPyg = $store->load($store->pinCurrent('PYG'));
+        $this->check('[COST-SCALE-PIN] override PYG = 2 intentado ⇒ la política pinnea PYG / escala 0', $pPyg->currency() === 'PYG' && $pPyg->currencyScale() === 0);
+        \Config::setConfigurationValues(PluginConfig::CONTEXT, [
+            'currency_scale_overrides' => (string) ($this->savedConfig['currency_scale_overrides'] ?? '{}'), 'cost_include_freight' => '0',
+        ]);
     }
 
     // ================================================================ [LEGACY-DEF]

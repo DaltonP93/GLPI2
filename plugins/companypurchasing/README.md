@@ -69,9 +69,9 @@ reabrir una aprobación).
 | `Service/PurchasingWorkflow` (extendido) | Nueva **versión** de la misma definición: `start_purchase`, `receive_partial`, `receive_complete` con condiciones `purchase_bound`/`receipt_bound` (sólo las aporta Compras). `RECEIVED` es intermedio. Reglas puras `receivingTarget()` / `syncPath()`. |
 | `Service/ReceivingService` | `startPurchase()` (`MANAGE_PURCHASING`; exige integridad limpia + APPROVED): **congela** `ordered_qty`, precio final y costo de cada línea, proveedor/cotización y la política de costo. `receive()` (`RIGHT_RECEIVE` + entidad, `idempotency_key` obligatoria): UNA transacción con `FOR UPDATE` de las líneas → lote → unidades (UUID v4 CSPRNG, costo exacto) → outbox por unidad inventariable → contadores → marcador → auditoría. Cualquier fallo ⇒ rollback total. `units()` con ACL. |
 | `Service/ReceivingSync` | Saga post-COMMIT que lleva el motor a reflejar los contadores (0 ⇒ IN_PURCHASE; parcial ⇒ PARTIALLY_RECEIVED; completo ⇒ RECEIVED) con marcador durable `receiving_seq`/`receiving_synced_seq`; anomalías se reportan sin mutar. |
-| `Service/CostPolicy` + `CostPolicyStore` + `CostAllocator` + `Model/CostPolicyVersion` | Costo atribuible exacto (sin float): base `final_unit_price`; ajustes de cabecera sólo si la política pinneada los incluye (por defecto no); asignación `line_value_largest_remainder`; reparto por unidad `floor_remainder_to_first_units`. |
-| `Service/HandoffPayload` + `Model/OutboxEntry` | Payload v1 inmutable (canónico + sha256) con la unidad, solicitud/número, línea, entidad, serial, proveedor, moneda, `unit_cost` (string exacto), fecha y correlación. |
-| `Api/PurchasingIntegrationApi` | Contrato para SI-4 (sin SQL a tablas de Compras): `claimPending`, `getHandoff`, `acknowledgeProcessed`, `markRetry`, `markError`; lease con token (CSPRNG) y reloj de la BD; `RIGHT_INTEGRATION` (mínimo privilegio) + multi-entidad. |
+| `Service/CostPolicy` + `CostPolicyStore` + `CostAllocator` + `Model/CostPolicyVersion` | Costo atribuible exacto (sin float): base `final_unit_price`; ajustes de cabecera sólo si la política pinneada los incluye (por defecto no); asignación `line_value_largest_remainder`; reparto por unidad `floor_remainder_to_first_units`. La política pinnea también `currency_code` + `currency_scale` (PYG ⇒ 0): la compra usa **sólo** esa escala. |
+| `Service/HandoffPayload` + `Model/OutboxEntry` | Payload v1 inmutable (canónico + sha256) con la unidad, solicitud/número, línea, entidad, serial, proveedor, moneda, `currency_scale` (la pinneada), `unit_cost` (string exacto a esa escala), fecha y correlación; autosuficiente (no consulta la configuración vigente). `validatedPayload()`: validación única de claim y lectura. |
+| `Api/PurchasingIntegrationApi` | Contrato para SI-4 (sin SQL a tablas de Compras): `claimPending`, `getHandoff`, `acknowledgeProcessed`, `markRetry`, `markError`; lease con token (CSPRNG) y reloj de la BD (confirmar exige el lease VIGENTE); `RIGHT_INTEGRATION` (mínimo privilegio) + multi-entidad. |
 | `Model/ReceiptBatch` / `ReceiptUnit` | Lote (idempotencia de la operación) y unidad física (identidad `receipt_unit_uuid`; FK `items_id`; serial único por línea; `unit_cost` inmutable). |
 
 **Reglas:** `pending = ordered_qty − received_qty` (derivado). Tras `startPurchase` no se cotiza, selecciona,
@@ -81,7 +81,8 @@ comando) además converge la saga de recepción y **reporta** recepción pendien
 versión anterior de la definición (no se migran).
 
 **Configuración P2D-3:** `cost_include_{discounts,taxes,freight}` (se pinnea al iniciar la compra; `0` por
-defecto), `outbox_max_attempts`, `outbox_max_lease_seconds`, `receipt_max_units_per_batch`.
+defecto), `outbox_max_attempts`, `outbox_max_lease_seconds`, `receipt_max_units_per_batch`. La escala de la moneda
+(`currency_scale_overrides`) también se pinnea al iniciar la compra: cambiarla después sólo afecta compras nuevas.
 
 **Perfiles P2D-3:** receptor `plugin_companypurchasing:RIGHT_RECEIVE` (+ `plugin_companyworkflow:READ` para que
 el motor refleje la recepción en vivo; sin él, la recepción se confirma igual y la Acción automática converge);

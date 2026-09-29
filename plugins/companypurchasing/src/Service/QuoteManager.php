@@ -330,7 +330,7 @@ class QuoteManager
         if ((string) $quote->fields['currency_code'] !== $currency) {
             throw new \RuntimeException('la moneda de la cotización no coincide con la de la solicitud (fail-closed)');
         }
-        $overrides = PluginConfig::currencyScaleOverrides();
+        $overrides = CostPolicyStore::scaleOverridesFor($req); // iniciada la compra: la escala PINNEADA
         $prices = $this->quotePrices((int) $quote->getID());
         $requestLines = $this->requestLines((int) $req->getID());
         QuoteMath::assertCoverage(array_keys($requestLines), array_keys($prices));

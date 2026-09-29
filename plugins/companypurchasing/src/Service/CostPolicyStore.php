@@ -3,10 +3,14 @@
 /**
  * Persistencia de las versiones INMUTABLES de la política de costo y su pinneo por solicitud (P2D-3).
  *
- * - `pinCurrent()`: toma la política vigente en configuración, la valida (fail-closed) y devuelve el id de su
+ * - `pinCurrent($currency)`: toma la política vigente en configuración + la moneda de la compra y la escala
+ *   EFECTIVA de esa moneda EN ESE INSTANTE (PYG ⇒ 0 siempre), la valida (fail-closed) y devuelve el id de su
  *   versión (`UNIQUE(policy_hash)`: idempotente y concurrency-safe; una carrera se resuelve releyendo).
  * - `load()`/`forRequest()`: la política PINNEADA; FAIL-CLOSED si falta o si el JSON almacenado no reproduce su
  *   hash (manipulación).
+ * - `scaleOverridesFor()`: escalas con las que se formatean los importes de UNA solicitud: iniciada la compra,
+ *   SÓLO la pinneada (el costo, el handoff y la integridad de la aprobación no dependen de un cambio posterior de
+ *   `currency_scale_overrides`); antes, la configuración vigente.
  *
  * Mismo patrón que `PolicyStore` (política de aprobación).
  *
@@ -22,9 +26,13 @@ use GlpiPlugin\Companypurchasing\Model\Request;
 
 class CostPolicyStore
 {
-    public function pinCurrent(): int
+    public function pinCurrent(string $currency): int
     {
-        $policy = CostPolicy::fromArray(PluginConfig::costPolicyRaw()); // valida ANTES de escribir
+        $cur = strtoupper(trim($currency));
+        $policy = CostPolicy::fromArray(PluginConfig::costPolicyRaw() + [ // valida ANTES de escribir
+            'currency'       => $cur,
+            'currency_scale' => CurrencyPolicy::scale($cur, PluginConfig::currencyScaleOverrides()), // PYG ⇒ 0
+        ]);
         $hash = $policy->hash();
         $existing = $this->idByHash($hash);
         if ($existing > 0) {
@@ -66,9 +74,28 @@ class CostPolicyStore
         return $policy;
     }
 
+    /** Política pinneada de la solicitud; su moneda DEBE ser la de la solicitud (fail-closed). */
     public function forRequest(Request $req): CostPolicy
     {
-        return $this->load((int) ($req->fields['cost_policies_id'] ?? 0));
+        $policy = $this->load((int) ($req->fields['cost_policies_id'] ?? 0));
+        if ($policy->currency() !== strtoupper(trim((string) ($req->fields['currency_code'] ?? '')))) {
+            throw new \RuntimeException('la moneda de la solicitud no coincide con la de su política de costo pinneada (fail-closed)');
+        }
+        return $policy;
+    }
+
+    /**
+     * Escalas monetarias para los importes de ESTA solicitud: con la compra iniciada (política pinneada), SÓLO la
+     * escala pinneada; antes, la configuración vigente.
+     *
+     * @return array<string,int>
+     */
+    public static function scaleOverridesFor(Request $req): array
+    {
+        if ((int) ($req->fields['cost_policies_id'] ?? 0) <= 0) {
+            return PluginConfig::currencyScaleOverrides();
+        }
+        return (new self())->forRequest($req)->scaleOverrides();
     }
 
     private function idByHash(string $hash): int

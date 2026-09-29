@@ -436,34 +436,52 @@ for ($i = 0; $i < 400; $i++) {
 }
 ok('400 casos aleatorios: mulStr/divModStr == aritmética entera nativa', $okRand);
 
-echo "== P2D-3 · CostPolicy (pinneable, hash determinista) ==\n";
-$cpAll = CostPolicy::fromArray(['include_discounts' => 1, 'include_taxes' => '1', 'include_freight' => true]);
-$cpNone = CostPolicy::fromArray(['include_discounts' => '0', 'include_taxes' => '0', 'include_freight' => '0']);
-ok('canónica (claves ordenadas) + hash estable', $cpAll->canonical() === '{"allocation":"line_value_largest_remainder","include_discounts":1,"include_freight":1,"include_taxes":1,"schema":1,"unit_split":"floor_remainder_to_first_units"}'
+echo "== P2D-3 · CostPolicy (pinneable, hash determinista, moneda + escala pinneadas) ==\n";
+$pyg0 = ['currency' => 'PYG', 'currency_scale' => 0];
+$cpAll = CostPolicy::fromArray(['include_discounts' => 1, 'include_taxes' => '1', 'include_freight' => true] + $pyg0);
+$cpNone = CostPolicy::fromArray(['include_discounts' => '0', 'include_taxes' => '0', 'include_freight' => '0'] + $pyg0);
+ok('canónica (claves ordenadas, incluye currency + currency_scale) + hash estable', $cpAll->canonical() === '{"allocation":"line_value_largest_remainder","currency":"PYG","currency_scale":0,"include_discounts":1,"include_freight":1,"include_taxes":1,"schema":1,"unit_split":"floor_remainder_to_first_units"}'
     && $cpAll->hash() === hash('sha256', $cpAll->canonical()) && $cpAll->hash() !== $cpNone->hash());
-ok('mismo contenido ⇒ mismo hash (orden de entrada irrelevante)', CostPolicy::fromArray(['include_freight' => 1, 'include_taxes' => 1, 'include_discounts' => 1])->hash() === $cpAll->hash());
-ok('flag inválido / faltante / método no soportado ⇒ fail-closed', throws(fn () => CostPolicy::fromArray(['include_discounts' => 'yes', 'include_taxes' => 0, 'include_freight' => 0]))
-    && throws(fn () => CostPolicy::fromArray(['include_taxes' => 0, 'include_freight' => 0]))
-    && throws(fn () => CostPolicy::fromArray(['include_discounts' => 0, 'include_taxes' => 0, 'include_freight' => 0, 'allocation' => 'total_div_qty'])));
+ok('mismo contenido ⇒ mismo hash (orden de entrada irrelevante)', CostPolicy::fromArray(['include_freight' => 1, 'currency_scale' => '0', 'include_taxes' => 1, 'currency' => 'PYG', 'include_discounts' => 1])->hash() === $cpAll->hash());
+ok('flag inválido / faltante / método no soportado ⇒ fail-closed', throws(fn () => CostPolicy::fromArray(['include_discounts' => 'yes', 'include_taxes' => 0, 'include_freight' => 0] + $pyg0))
+    && throws(fn () => CostPolicy::fromArray(['include_taxes' => 0, 'include_freight' => 0] + $pyg0))
+    && throws(fn () => CostPolicy::fromArray(['include_discounts' => 0, 'include_taxes' => 0, 'include_freight' => 0, 'allocation' => 'total_div_qty'] + $pyg0)));
+$flags0 = ['include_discounts' => 0, 'include_taxes' => 0, 'include_freight' => 0];
+$cpUsd2 = CostPolicy::fromArray($flags0 + ['currency' => 'USD', 'currency_scale' => 2]);
+$cpUsd3 = CostPolicy::fromArray($flags0 + ['currency' => 'USD', 'currency_scale' => 3]);
+ok('escala pinneada: USD/3 ≠ USD/2 (hash distinto); accesores y mapa de escala SÓLO con la pinneada',
+    $cpUsd3->hash() !== $cpUsd2->hash() && $cpUsd3->currency() === 'USD' && $cpUsd3->currencyScale() === 3 && $cpUsd3->scaleOverrides() === ['USD' => 3]);
+ok('sin moneda / sin escala / moneda no ISO / escala fuera de rango o no entera ⇒ fail-closed',
+    throws(fn () => CostPolicy::fromArray($flags0 + ['currency_scale' => 2])) && throws(fn () => CostPolicy::fromArray($flags0 + ['currency' => 'USD']))
+    && throws(fn () => CostPolicy::fromArray($flags0 + ['currency' => 'usd', 'currency_scale' => 2])) && throws(fn () => CostPolicy::fromArray($flags0 + ['currency' => 'USD', 'currency_scale' => 7]))
+    && throws(fn () => CostPolicy::fromArray($flags0 + ['currency' => 'USD', 'currency_scale' => '2.0'])) && throws(fn () => CostPolicy::fromArray($flags0 + ['currency' => 'USD', 'currency_scale' => -1])));
+ok('PYG ⇒ escala 0 SIEMPRE: una política PYG con escala 2 no se construye (fail-closed); override PYG=2 resuelve 0',
+    throws(fn () => CostPolicy::fromArray($flags0 + ['currency' => 'PYG', 'currency_scale' => 2])) && CurrencyPolicy::scale('PYG', ['PYG' => 2]) === 0
+    && CurrencyPolicy::allows('PYG', 0) && !CurrencyPolicy::allows('PYG', 2) && CurrencyPolicy::allows('USD', 3) && !CurrencyPolicy::allows('USD', 7) && !CurrencyPolicy::allows('usd', 2));
 
 echo "== P2D-3 · CostAllocator: costo atribuible EXACTO por línea y por unidad ==\n";
 $lines3 = [['line_id' => 1, 'quantity' => '10', 'final_unit_price' => '1400'], ['line_id' => 2, 'quantity' => '3', 'final_unit_price' => '2300']];
-$al = CostAllocator::allocate($lines3, '300', '550', '100', 'PYG', $cpAll);
+$al = CostAllocator::allocate($lines3, '300', '550', '100', $cpAll);
 ok('prorrateo por valor de línea (mayor resto): impuestos 368/182, flete 67/33, descuentos 201/99',
     [$al[0]['taxes'], $al[1]['taxes'], $al[0]['freight'], $al[1]['freight'], $al[0]['discounts'], $al[1]['discounts']] === ['368', '182', '67', '33', '201', '99']);
 ok('costo de línea 14234 / 7016 y Σ = total de la cotización (21250)', $al[0]['line_cost'] === '14234' && $al[1]['line_cost'] === '7016' && (int) $al[0]['line_cost'] + (int) $al[1]['line_cost'] === 20900 + 550 + 100 - 300);
-$u1 = array_map(static fn ($k) => CostAllocator::unitCost('14234', 10, $k, 'PYG'), range(1, 10));
+$u1 = array_map(static fn ($k) => CostAllocator::unitCost('14234', 10, $k, $cpAll), range(1, 10));
 ok('unidades: 1424 ×4 + 1423 ×6 (resto a las primeras; nunca total ÷ cantidad)', $u1 === array_merge(array_fill(0, 4, '1424'), array_fill(0, 6, '1423')));
-ok('unidades línea 2: 2339, 2339, 2338', array_map(static fn ($k) => CostAllocator::unitCost('7016', 3, $k, 'PYG'), [1, 2, 3]) === ['2339', '2339', '2338']);
-$none = CostAllocator::allocate($lines3, '300', '550', '100', 'PYG', $cpNone);
+ok('unidades línea 2: 2339, 2339, 2338', array_map(static fn ($k) => CostAllocator::unitCost('7016', 3, $k, $cpAll), [1, 2, 3]) === ['2339', '2339', '2338']);
+$none = CostAllocator::allocate($lines3, '300', '550', '100', $cpNone);
 ok('política por DEFECTO (sin ajustes): costo = final_unit_price × cantidad (sin prorrateo)', $none[0]['line_cost'] === '14000' && $none[1]['line_cost'] === '6900' && $none[0]['taxes'] === '0');
-ok('USD escala 2: 11.00 entre 3 ⇒ 3.67, 3.67, 3.66', array_map(static fn ($k) => CostAllocator::unitCost('11.00', 3, $k, 'USD'), [1, 2, 3]) === ['3.67', '3.67', '3.66']);
-ok('descuento mayor que el valor de la línea ⇒ fail-closed', throws(fn () => CostAllocator::allocate([['line_id' => 1, 'quantity' => '1', 'final_unit_price' => '10']], '50', '0', '0', 'PYG', $cpAll)));
-ok('líneas de valor 0 ⇒ pesos = cantidad (sin división por cero)', CostAllocator::allocate([['line_id' => 1, 'quantity' => '1', 'final_unit_price' => '0'], ['line_id' => 2, 'quantity' => '3', 'final_unit_price' => '0']], '0', '0', '4', 'PYG', $cpAll)[1]['freight'] === '3');
+ok('USD escala 2 pinneada: 11.00 entre 3 ⇒ 3.67, 3.67, 3.66', array_map(static fn ($k) => CostAllocator::unitCost('11.00', 3, $k, $cpUsd2), [1, 2, 3]) === ['3.67', '3.67', '3.66']);
+$u3 = array_map(static fn ($k) => CostAllocator::unitCost('11.000', 3, $k, $cpUsd3), [1, 2, 3]);
+ok('USD escala 3 pinneada: 11.000 entre 3 ⇒ 3.667, 3.667, 3.666 y Σ = 11.000 EXACTO (la escala sale de la política, no de la configuración)',
+    $u3 === ['3.667', '3.667', '3.666'] && Decimal::addStr(Decimal::addStr(Decimal::toMicro($u3[0]), Decimal::toMicro($u3[1])), Decimal::toMicro($u3[2])) === Decimal::toMicro('11.000'));
+ok('importe con más decimales que la escala PINNEADA ⇒ fail-closed (USD/2 con 11.001)', throws(fn () => CostAllocator::unitCost('11.001', 3, 1, $cpUsd2))
+    && throws(fn () => CostAllocator::allocate([['line_id' => 1, 'quantity' => '1', 'final_unit_price' => '3.667']], '0', '0', '0', $cpUsd2)));
+ok('descuento mayor que el valor de la línea ⇒ fail-closed', throws(fn () => CostAllocator::allocate([['line_id' => 1, 'quantity' => '1', 'final_unit_price' => '10']], '50', '0', '0', $cpAll)));
+ok('líneas de valor 0 ⇒ pesos = cantidad (sin división por cero)', CostAllocator::allocate([['line_id' => 1, 'quantity' => '1', 'final_unit_price' => '0'], ['line_id' => 2, 'quantity' => '3', 'final_unit_price' => '0']], '0', '0', '4', $cpAll)[1]['freight'] === '3');
 ok('empate de restos ⇒ gana la línea que aparece antes (determinista)', CostAllocator::largestRemainder('1', [5 => '7', 9 => '7']) === [5 => '1', 9 => '0']);
-ok('ordinal fuera de rango / cantidad inválida / PYG con decimales ⇒ fail-closed', throws(fn () => CostAllocator::unitCost('100', 3, 4, 'PYG'))
-    && throws(fn () => CostAllocator::unitCost('100', 0, 1, 'PYG')) && throws(fn () => CostAllocator::allocate([['line_id' => 1, 'quantity' => '2.5', 'final_unit_price' => '1']], '0', '0', '0', 'PYG', $cpAll))
-    && throws(fn () => CostAllocator::allocate([['line_id' => 1, 'quantity' => '1', 'final_unit_price' => '1.5']], '0', '0', '0', 'PYG', $cpAll)));
+ok('ordinal fuera de rango / cantidad inválida / PYG con decimales ⇒ fail-closed', throws(fn () => CostAllocator::unitCost('100', 3, 4, $cpAll))
+    && throws(fn () => CostAllocator::unitCost('100', 0, 1, $cpAll)) && throws(fn () => CostAllocator::allocate([['line_id' => 1, 'quantity' => '2.5', 'final_unit_price' => '1']], '0', '0', '0', $cpAll))
+    && throws(fn () => CostAllocator::allocate([['line_id' => 1, 'quantity' => '1', 'final_unit_price' => '1.5']], '0', '0', '0', $cpAll)));
 $propOk = true;
 mt_srand(3);
 for ($i = 0; $i < 150; $i++) {
@@ -479,12 +497,12 @@ for ($i = 0; $i < 150; $i++) {
     $tx = mt_rand(0, 99999);
     $fr = mt_rand(0, 9999);
     $ds = mt_rand(0, min($sum, 99999));
-    $res = CostAllocator::allocate($ls, (string) $ds, (string) $tx, (string) $fr, 'PYG', $cpAll);
+    $res = CostAllocator::allocate($ls, (string) $ds, (string) $tx, (string) $fr, $cpAll);
     $tot = 0;
     foreach ($res as $k => $r) {
         $units = 0;
         for ($o = 1; $o <= (int) $ls[$k]['quantity']; $o++) {
-            $units += (int) CostAllocator::unitCost($r['line_cost'], (int) $ls[$k]['quantity'], $o, 'PYG');
+            $units += (int) CostAllocator::unitCost($r['line_cost'], (int) $ls[$k]['quantity'], $o, $cpAll);
         }
         $propOk = $propOk && $units === (int) $r['line_cost'];
         $tot += (int) $r['line_cost'];
@@ -497,7 +515,7 @@ echo "== P2D-3 · HandoffPayload (versionado, inmutable, hash) ==\n";
 $hp = [
     'receipt_unit_uuid' => '3f2b8c1e-9a4d-4e6f-8b2a-1c3d5e7f9a0b', 'request_id' => 12, 'request_number' => 'REQUEST-2026-0007',
     'item_id' => 55, 'entity_id' => 0, 'serial' => 'SN-1', 'description' => 'Notebook', 'category' => 'HW', 'supplier_id' => 9,
-    'currency' => 'PYG', 'unit_cost' => '1424', 'received_at' => '2026-09-25T10:00:00-03:00', 'correlation_id' => 'corr-1',
+    'currency' => 'PYG', 'currency_scale' => 0, 'unit_cost' => '1424', 'received_at' => '2026-09-25T10:00:00-03:00', 'correlation_id' => 'corr-1',
 ];
 $pl = HandoffPayload::build($hp);
 $keysPl = array_keys($pl);
@@ -515,6 +533,46 @@ ok('float / clave extra / UUID inválido / serial vacío / PYG con decimales ⇒
     && throws(fn () => HandoffPayload::build(['receipt_unit_uuid' => 'not-a-uuid'] + $hp)) && throws(fn () => HandoffPayload::build(['serial' => ''] + $hp))
     && throws(fn () => HandoffPayload::build(['unit_cost' => '1.5'] + $hp)));
 ok('serial ausente permitido (null)', HandoffPayload::build(['serial' => null] + $hp)['serial'] === null);
+$usd3 = HandoffPayload::build(['currency' => 'USD', 'currency_scale' => 3, 'unit_cost' => '3.667'] + $hp);
+$usd3Json = HandoffPayload::canonical($usd3);
+ok('autosuficiente: USD escala 3 con unit_cost "3.667" válido y verificable SIN configuración (aunque la global de USD pase a 2)',
+    $usd3['currency_scale'] === 3 && HandoffPayload::verify($usd3Json, hash('sha256', $usd3Json)) === $usd3);
+ok('unit_cost no canónico para la escala DECLARADA ("3.66" / "3.6670" / "03.667" con escala 3) ⇒ fail-closed',
+    throws(fn () => HandoffPayload::build(['currency' => 'USD', 'currency_scale' => 3, 'unit_cost' => '3.66'] + $hp))
+    && throws(fn () => HandoffPayload::build(['currency' => 'USD', 'currency_scale' => 3, 'unit_cost' => '3.6670'] + $hp))
+    && throws(fn () => HandoffPayload::build(['currency' => 'USD', 'currency_scale' => 3, 'unit_cost' => '03.667'] + $hp)));
+ok('currency_scale ausente / no entera / PYG con escala 2 / fuera de rango ⇒ fail-closed',
+    throws(fn () => HandoffPayload::validate(array_diff_key($pl, ['currency_scale' => 1])))
+    && throws(fn () => HandoffPayload::build(['currency_scale' => '0'] + $hp))
+    && throws(fn () => HandoffPayload::build(['currency_scale' => 2, 'unit_cost' => '1424.00'] + $hp))
+    && throws(fn () => HandoffPayload::build(['currency' => 'USD', 'currency_scale' => 7, 'unit_cost' => '1.0000000'] + $hp)));
+
+echo "== P2D-3 · validación ÚNICA del handoff almacenado (validatedPayload: claim + getHandoff) ==\n";
+$mkRow = static function (array $payload, array $over = []): array {
+    return $over + [
+        'id' => 7, 'receipt_unit_uuid' => '3f2b8c1e-9a4d-4e6f-8b2a-1c3d5e7f9a0b', 'receipt_units_id' => 70, 'requests_id' => 12, 'entities_id' => 0,
+        'payload_version' => HandoffPayload::SCHEMA_VERSION, 'payload_json' => HandoffPayload::canonical($payload), 'payload_sha256' => HandoffPayload::hash($payload),
+    ];
+};
+$unit = ['id' => 70, 'receipt_unit_uuid' => '3f2b8c1e-9a4d-4e6f-8b2a-1c3d5e7f9a0b', 'requests_id' => 12, 'items_id' => 55, 'entities_id' => 0,
+    'serial' => 'SN-1', 'currency_code' => 'PYG', 'unit_cost' => '1424.000000'];
+ok('fila + unidad coherentes ⇒ payload', HandoffPayload::validatedPayload($mkRow($pl), $unit) === $pl);
+ok('payload_version de la fila ≠ SCHEMA_VERSION ⇒ rechazado', throws(fn () => HandoffPayload::validatedPayload($mkRow($pl, ['payload_version' => 2]), $unit)));
+$otherUuid = HandoffPayload::build(['receipt_unit_uuid' => '9a8b7c6d-5e4f-4a3b-9c2d-1e0f2a3b4c5d'] + $hp);
+ok('receipt_unit_uuid cambiado DENTRO del JSON (JSON + sha256 recalculados) ⇒ rechazado (no coincide con la fila)',
+    HandoffPayload::verify(HandoffPayload::canonical($otherUuid), HandoffPayload::hash($otherUuid)) !== null
+    && throws(fn () => HandoffPayload::validatedPayload($mkRow($otherUuid), $unit)));
+ok('request_id / entity_id cambiados dentro del payload (hash recalculado) ⇒ rechazado',
+    throws(fn () => HandoffPayload::validatedPayload($mkRow(HandoffPayload::build(['request_id' => 13] + $hp)), $unit))
+    && throws(fn () => HandoffPayload::validatedPayload($mkRow(HandoffPayload::build(['entity_id' => 5] + $hp)), $unit)));
+ok('incoherente con la UNIDAD (línea / costo / serial / moneda / unidad ausente o ajena) ⇒ rechazado',
+    throws(fn () => HandoffPayload::validatedPayload($mkRow(HandoffPayload::build(['item_id' => 56] + $hp)), $unit))
+    && throws(fn () => HandoffPayload::validatedPayload($mkRow(HandoffPayload::build(['unit_cost' => '1423'] + $hp)), $unit))
+    && throws(fn () => HandoffPayload::validatedPayload($mkRow(HandoffPayload::build(['serial' => 'SN-2'] + $hp)), $unit))
+    && throws(fn () => HandoffPayload::validatedPayload($mkRow($pl), ['currency_code' => 'USD'] + $unit))
+    && throws(fn () => HandoffPayload::validatedPayload($mkRow($pl), null))
+    && throws(fn () => HandoffPayload::validatedPayload($mkRow($pl, ['receipt_units_id' => 71]), $unit)));
+ok('payload alterado sin recalcular el hash ⇒ rechazado', throws(fn () => HandoffPayload::validatedPayload(['payload_json' => $tampered] + $mkRow($pl), $unit)));
 
 echo "== P2D-3 · identidad canónica: UUID v4 (CSPRNG) ==\n";
 $uu = [];

@@ -15,10 +15,13 @@
  *     concurrentes nunca toman la misma fila. Elegibles: PENDING; RETRY con `next_retry_at` vencido; LEASED con
  *     `leased_until` vencido (lease abandonado). Cada toma genera un `lease_token` NUEVO (CSPRNG) y
  *     `leased_until = NOW() + leaseSeconds` (reloj ÚNICO de la BD) e incrementa `attempts`.
- *   - ack/retry/error exigen el MISMO `lease_token` (UPDATE condicionado): un worker cuyo lease venció y fue
- *     re-tomado por otro ya no puede confirmar (su token dejó de ser el vigente). Repetir la misma confirmación
- *     con el mismo token es idempotente.
- *   - El payload es INMUTABLE: se verifica su hash en cada toma/lectura (alterado ⇒ ERROR / fail-closed).
+ *   - ack/retry/error exigen, en un UPDATE condicionado con el reloj de la BD: `status = LEASED`, el MISMO
+ *     `lease_token` y `leased_until >= NOW()`. Un lease VENCIDO no confirma, aunque nadie lo haya re-tomado aún
+ *     (la fila sigue reclamable); un worker re-tomado por otro tampoco (su token dejó de ser el vigente). Tras una
+ *     confirmación exitosa, repetirla con el mismo token es idempotente.
+ *   - El payload es INMUTABLE: `HandoffPayload::validatedPayload()` (versión, JSON canónico, hash, identidad
+ *     redundante con la fila y con la unidad) se aplica IGUAL en cada toma y lectura (inconsistente ⇒ ERROR en
+ *     `claimPending()` / excepción en `getHandoff()`; nunca se entrega).
  *
  * ACL: derecho dedicado de mínimo privilegio `plugin_companypurchasing` bit `RIGHT_INTEGRATION` (no Super-Admin)
  * + multi-entidad estricta (sólo filas de entidades activas de la sesión). `last_error` se sanea (sin secretos).
@@ -36,6 +39,7 @@ namespace GlpiPlugin\Companypurchasing\Api;
 use Session;
 use GlpiPlugin\Companypurchasing\Model\OutboxEntry;
 use GlpiPlugin\Companypurchasing\Model\PurchasingEvent;
+use GlpiPlugin\Companypurchasing\Model\ReceiptUnit;
 use GlpiPlugin\Companypurchasing\Model\Request;
 use GlpiPlugin\Companypurchasing\Service\Audit;
 use GlpiPlugin\Companypurchasing\Service\HandoffPayload;
@@ -81,7 +85,7 @@ final class PurchasingIntegrationApi
         $DB->beginTransaction();
         try {
             $res = $DB->doQuery(
-                "SELECT `id`, `receipt_unit_uuid`, `requests_id`, `entities_id`, `payload_version`, `payload_json`, `payload_sha256`, `attempts`"
+                "SELECT `id`, `receipt_unit_uuid`, `receipt_units_id`, `requests_id`, `entities_id`, `payload_version`, `payload_json`, `payload_sha256`, `attempts`"
                 . " FROM `{$t}` WHERE `entities_id` IN (" . implode(',', $entities) . ")"
                 . " AND (`status` = '" . OutboxEntry::STATUS_PENDING . "'"
                 . " OR (`status` = '" . OutboxEntry::STATUS_RETRY . "' AND (`next_retry_at` IS NULL OR `next_retry_at` <= NOW()))"
@@ -92,15 +96,17 @@ final class PurchasingIntegrationApi
             while ($res !== false && ($row = $DB->fetchAssoc($res))) {
                 $rows[] = $row;
             }
+            $units = $this->unitsById(array_map(static fn (array $r): int => (int) $r['receipt_units_id'], $rows));
             foreach ($rows as $row) {
-                $payload = HandoffPayload::verify((string) $row['payload_json'], (string) $row['payload_sha256']);
-                if ($payload === null || (int) $row['payload_version'] !== HandoffPayload::SCHEMA_VERSION
-                    || (string) $payload['receipt_unit_uuid'] !== (string) $row['receipt_unit_uuid']) {
-                    // Payload alterado/ilegible: NUNCA se entrega; queda en ERROR visible.
+                try {
+                    $payload = HandoffPayload::validatedPayload($row, $units[(int) $row['receipt_units_id']] ?? null);
+                } catch (\RuntimeException $bad) {
+                    // Handoff inconsistente (versión/JSON/hash/identidad): NUNCA se entrega; queda en ERROR visible.
                     $DB->doQuery("UPDATE `{$t}` SET `status` = '" . OutboxEntry::STATUS_ERROR . "', `lease_token` = NULL, `leased_by` = NULL,"
                         . " `leased_until` = NULL, `last_error` = 'payload integrity check failed', `date_mod` = NOW() WHERE `id` = " . (int) $row['id']);
                     $this->audit->recordOnce((int) $row['requests_id'], PurchasingEvent::EV_HANDOFF_ERROR, (int) $row['entities_id'], [
                         'receipt_unit_uuid' => (string) $row['receipt_unit_uuid'], 'reason' => 'payload_integrity',
+                        'detail' => self::sanitizeError($bad->getMessage()),
                     ], '', 'handoff-error:' . $row['receipt_unit_uuid']);
                     continue;
                 }
@@ -142,10 +148,8 @@ final class PurchasingIntegrationApi
         if ($row === null) {
             return null;
         }
-        $payload = HandoffPayload::verify((string) $row['payload_json'], (string) $row['payload_sha256']);
-        if ($payload === null) {
-            throw new \RuntimeException('payload de handoff alterado (fail-closed)');
-        }
+        // MISMA validación que `claimPending()`: un handoff inconsistente nunca se devuelve (fail-closed).
+        $payload = HandoffPayload::validatedPayload($row, $this->unitsById([(int) $row['receipt_units_id']])[(int) $row['receipt_units_id']] ?? null);
         return [
             'receipt_unit_uuid' => (string) $row['receipt_unit_uuid'],
             'status'            => (string) $row['status'],
@@ -194,7 +198,9 @@ final class PurchasingIntegrationApi
     // ---------------------------------------------------------------- internals
 
     /**
-     * Transición de ENTREGA con el lease vigente (UPDATE condicionado por `lease_token` y estado LEASED).
+     * Transición de ENTREGA con el lease VIGENTE: UPDATE condicionado por `status = LEASED`, el `lease_token` y
+     * `leased_until >= NOW()` (reloj ÚNICO de la BD, igual que `claimPending()`). Vencido ⇒ no confirma (la fila
+     * sigue reclamable). Tras el éxito, la misma confirmación con el mismo token es idempotente.
      *
      * @return array{status:string, idempotent:bool}
      */
@@ -227,7 +233,8 @@ final class PurchasingIntegrationApi
         $DB->beginTransaction();
         try {
             $DB->doQuery("UPDATE `{$t}` SET {$set} WHERE `id` = " . (int) $row['id']
-                . " AND `status` = '" . OutboxEntry::STATUS_LEASED . "' AND `lease_token` = '" . $token . "'");
+                . " AND `status` = '" . OutboxEntry::STATUS_LEASED . "' AND `lease_token` = '" . $token . "'"
+                . ' AND `leased_until` IS NOT NULL AND `leased_until` >= NOW()');
             $applied = $DB->affectedRows() === 1;
             if ($applied) {
                 $event = match ($final) {
@@ -253,7 +260,7 @@ final class PurchasingIntegrationApi
         if ($now !== null && hash_equals((string) ($now['lease_token'] ?? ''), $token) && (string) $now['status'] === $final) {
             return ['status' => $final, 'idempotent' => true];
         }
-        throw new \RuntimeException('lease inválido: token no vigente (vencido y re-tomado por otro worker) o handoff ya cerrado (fail-closed)');
+        throw new \RuntimeException('lease inválido: vencido, token no vigente (re-tomado por otro worker) o handoff ya cerrado (fail-closed)');
     }
 
     /** Fila del outbox por UUID, sólo si pertenece a una entidad activa de la sesión. @return array<string,mixed>|null */
@@ -268,6 +275,31 @@ final class PurchasingIntegrationApi
             return Session::haveAccessToEntity((int) $row['entities_id']) ? $row : null;
         }
         return null;
+    }
+
+    /**
+     * Unidades recibidas referenciadas por filas del outbox (lectura consistente; para la validación cruzada).
+     *
+     * @param array<int,int> $ids
+     * @return array<int,array<string,mixed>> id → fila
+     */
+    private function unitsById(array $ids): array
+    {
+        $ids = array_values(array_unique(array_filter($ids, static fn (int $i): bool => $i > 0)));
+        if ($ids === []) {
+            return [];
+        }
+        /** @var \DBmysql $DB */
+        global $DB;
+        $out = [];
+        foreach ($DB->request([
+            'SELECT' => ['id', 'receipt_unit_uuid', 'requests_id', 'items_id', 'entities_id', 'serial', 'currency_code', 'unit_cost'],
+            'FROM'   => ReceiptUnit::getTable(),
+            'WHERE'  => ['id' => $ids],
+        ]) as $u) {
+            $out[(int) $u['id']] = $u;
+        }
+        return $out;
     }
 
     /** @return array<int,int> */
