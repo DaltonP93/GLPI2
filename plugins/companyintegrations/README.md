@@ -52,6 +52,10 @@ SI-4 es dueño de la saga de integración, de la escritura por API en Snipe y de
   - El POST es de un solo disparo y nunca se reintenta a ciegas.
   - Un resultado incierto (timeout/5xx) pasa a `RETRY` con enfriamiento y el próximo intento vuelve a buscar primero.
   - Resultado: *crash después del POST y antes de persistir* ⇒ el retry **vincula**, no duplica.
+  - Sólo se adopta un activo si coinciden tag, compañía, **modelo**, serial (si lo hay) y la **marca de procedencia**
+    `receipt_unit_uuid=<uuid>` (al final de notes), y sólo como recuperación de un POST propio. Un tag preexistente o
+    cualquier diferencia ⇒ `MANUAL_REVIEW`.
+  - Tras el POST, el `snipe_asset_id` queda **no verificado** hasta que un GET cumple exactamente lo mismo.
 - **Saga durable** (`si4_sagas`, bitácora `si4_saga_log`), una por `receipt_unit_uuid`:
   `PENDING → SNIPE_CREATING → SNIPE_CREATED`, más `BLOCKED_CONFIG` y `MANUAL_REVIEW`.
   - Fencing: época monótona del lease (`attempts` del claim) + `sha256(token)` + `lease_until >= NOW()` (reloj de la BD).

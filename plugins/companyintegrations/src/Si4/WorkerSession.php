@@ -14,13 +14,11 @@ declare(strict_types=1);
 namespace GlpiPlugin\Companyintegrations\Si4;
 
 use GlpiPlugin\Companyintegrations\Model\AssetBridge;
+use GlpiPlugin\Companypurchasing\Model\Request as PurchaseRequest;
 use Session;
 
 final class WorkerSession
 {
-    /** Bit `RIGHT_INTEGRATION` de `plugin_companypurchasing` (ADR-0019 §5). */
-    public const PURCHASING_RIGHT_INTEGRATION = 1024;
-
     /** @throws \RuntimeException usuario inexistente/inactivo, perfil no asignado o derechos insuficientes */
     public static function open(int $userId, int $profileId = 0): void
     {
@@ -46,7 +44,12 @@ final class WorkerSession
         self::assertRights();
     }
 
-    /** @throws \RuntimeException sin alguno de los dos bits de mínimo privilegio */
+    /**
+     * El bit de Compras se toma de su contrato PÚBLICO (`Request::$rightname` / `Request::RIGHT_INTEGRATION`), sin
+     * copiar el número: si companypurchasing no está disponible ⇒ fail-closed.
+     *
+     * @throws \RuntimeException sin alguno de los dos bits de mínimo privilegio o sin companypurchasing
+     */
     public static function assertRights(): void
     {
         if (!empty($_SESSION['glpicronuserrunning'])) {
@@ -55,7 +58,10 @@ final class WorkerSession
         if (!Session::haveRight(AssetBridge::$rightname, AssetBridge::RIGHT_SI4)) {
             throw new \RuntimeException('permiso denegado (companyintegrations RIGHT_SI4)');
         }
-        if (!Session::haveRight('plugin_companypurchasing', self::PURCHASING_RIGHT_INTEGRATION)) {
+        if (!class_exists(PurchaseRequest::class)) {
+            throw new \RuntimeException('companypurchasing no está disponible (fail-closed)');
+        }
+        if (!Session::haveRight(PurchaseRequest::$rightname, PurchaseRequest::RIGHT_INTEGRATION)) {
             throw new \RuntimeException('permiso denegado (companypurchasing RIGHT_INTEGRATION)');
         }
     }

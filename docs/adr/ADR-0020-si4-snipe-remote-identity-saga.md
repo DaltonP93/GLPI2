@@ -24,23 +24,43 @@ verificó el **contrato real de Snipe-IT v8.7.2** (tag `v8.7.2`, commit `f3f1dd7
 | 7 | 401 (sin autenticar), 403 (policy), 429 del middleware `api-throttle` con `Retry-After` (rechaza **antes** del controlador: sin efecto) | `Handler::unauthenticated`; `RouteServiceProvider::configureRateLimiting` |
 | 8 | `purchase_cost` es `decimal(20,2)` y Snipe maneja **una** moneda global | migración `increase_purchase_cost_size` |
 | 9 | Snipe puede bloquear User-Agent vacío o por patrón (`block_api_user_agents`) | `Middleware/EnforceApiUserAgent` |
+| 10 | El transformer devuelve `model.id`, `company.id` y `notes`; `notes` pasa por `Helper::parseEscapedMarkedownInline()` = `Parsedown::line(strip_tags(…))` en safe mode (markdown inline + escape HTML) | `AssetsTransformer::transformAsset`; `Helpers/Helper.php` |
 
 ## Decisión
 1. **Identidad remota determinista = `asset_tag`.** Para cada unidad: `asset_tag = <prefijo><UUIDHEX>`, donde
    `UUIDHEX` son los 32 hex (mayúsculas, sin guiones) de `receipt_unit_uuid` y `<prefijo>` sale de la
    configuración (`si4_asset_tag_prefix`, validado `^[A-Z0-9][A-Z0-9-]{0,15}$`). Es **biyectiva**: el tag
    identifica la unidad y viceversa, y se busca con un endpoint **exacto** (hechos 3 y 6).
-2. **Buscar primero, siempre.** Cada intento empieza con `GET bytag/{tag}?deleted=true`, también cuando la saga
-   ya tiene una intención de creación.
-   - Exactamente un activo vivo, con compañía y serial coherentes ⇒ se **vincula** (`reconciled`).
-   - Soft-deleted, duplicado o compañía/serial divergentes ⇒ `MANUAL_REVIEW`. Nunca se recrea ni se borra.
+2. **Buscar primero, siempre, y adoptar sólo lo que es DE ESTA unidad** (`RemoteAssetMatcher`). Cada intento empieza
+   con `GET bytag/{tag}?deleted=true`, también cuando la saga ya tiene una intención de creación. Un activo encontrado
+   se **vincula** sólo si se cumple **todo** lo siguiente, sin corregir diferencias:
+   - exactamente un activo vivo y ninguno soft-deleted con ese tag exacto;
+   - `company.id` = compañía mapeada y `model.id` = modelo mapeado;
+   - si la unidad trae serial, el remoto es exactamente ese;
+   - **marca de procedencia**: `notes` contiene exactamente una marca `receipt_unit_uuid=<uuid>` y es la de esta unidad;
+   - y es la **recuperación de un POST propio** (caso B: la saga ya registró una intención de creación).
+
+   Un tag determinista que ya existía **antes** de cualquier POST de esta saga (caso A) no se adopta nunca, aunque
+   coincida todo. Cualquier otra combinación ⇒ `MANUAL_REVIEW`: `PREEXISTING`, `DELETED`, `DUPLICATE`,
+   `COMPANY_MISMATCH`, `MODEL_MISMATCH`, `SERIAL_MISMATCH` u `OWNERSHIP_MISMATCH`. Nunca se sobrescribe, se recrea ni
+   se borra.
+   - La marca va **al final** de `notes` (hecho 10). Así ningún `_…_` posterior puede formar un énfasis que la
+     atraviese. El resto de los valores de `notes` se reduce a `[A-Za-z0-9.:-]`, y se compara tras
+     `strip_tags` + decode de entidades.
+   - Si la saga ya registró un `snipe_asset_id` propio y el tag devuelve otro id, o ninguno ⇒ `MANUAL_REVIEW`
+     (`id_mismatch` / `created_asset_missing`). Jamás un segundo POST.
 3. **El POST es de un solo disparo** (nunca se reintenta a ciegas).
    - `429` ⇒ se puede reintentar (hecho 7).
    - Timeout, error de transporte o `5xx` ⇒ **resultado incierto**: la saga queda en `SNIPE_CREATING` y el outbox
      pasa a `RETRY` con enfriamiento ≥ `si4_uncertain_cooldown_seconds`. El siguiente intento busca primero.
    - Validación sobre `asset_tag`, o un `409` ⇒ "ya existe": buscar y vincular (o `MANUAL_REVIEW`).
-4. **Verificación posterior a la creación:** `bytag?deleted=true` debe devolver exactamente **un** activo vivo con
-   ese tag. Si hay duplicado ⇒ `MANUAL_REVIEW`. No se borra nada.
+4. **Verificación posterior a la creación con las MISMAS exigencias.** Un POST `success` registra el `snipe_asset_id`
+   como **no verificado**: la saga sigue en `SNIPE_CREATING`.
+   - Sólo pasa a `SNIPE_CREATED` si el GET posterior devuelve ese mismo id cumpliendo todo lo del punto 2 (tag,
+     compañía, modelo, serial si lo hay y marca).
+   - Cualquier diferencia ⇒ `MANUAL_REVIEW`.
+   - GET no disponible ⇒ `RETRY`; el próximo intento verifica igual.
+   - Nunca se da por limpio un activo porque sólo coincidan el id o el tag.
 5. **Saga durable propia** (`glpi_plugin_companyintegrations_si4_sagas`) y bitácora append-only (`si4_saga_log`).
    - Restricciones: `UNIQUE(receipt_unit_uuid)` (una saga por unidad) y `UNIQUE(snipe_asset_id)` (un activo remoto
      nunca queda ligado a dos unidades).
@@ -80,14 +100,16 @@ verificó el **contrato real de Snipe-IT v8.7.2** (tag `v8.7.2`, commit `f3f1dd7
    | 401/403 (también en el preflight, que corre **antes** de reclamar) | sin cambio | `markRetry` y se aborta la corrida |
    | 429, 5xx/timeout en lecturas | sin cambio | `markRetry` con backoff (`Retry-After` si viene) |
    | POST incierto (timeout/transporte/5xx) | `SNIPE_CREATING` | `markRetry` (enfriamiento) |
-   | Duplicado, borrado, compañía/serial divergente, validación desconocida | `MANUAL_REVIEW` | `markError` |
+   | Tag preexistente, duplicado, borrado, compañía/modelo/serial divergente, marca ausente o ajena, verificación posterior fallida, validación desconocida | `MANUAL_REVIEW` | `markError` |
    | Lease perdido (escritura de saga o settle rechazados) | sin cambio | nada (el nuevo dueño continúa) |
 
    `last_error` se sanea igual que en SI-1 (sin tokens ni credenciales en URL) y el token nunca se registra.
 10. **Sin costo en Snipe en SI4-1:** la matriz de ownership lo marca como reflejo opcional y el hecho 8 impide
     representar PYG o escalas > 2 con exactitud. El costo atribuible irá a `Infocom` en un incremento posterior.
 11. El cliente de escritura envía un `User-Agent` propio y estable (hecho 9) y exige TLS (`https://`, verificación
-    del certificado) igual que SI-1. Rol mínimo de la cuenta de servicio en Snipe (RBAC por usuario,
+    del certificado) igual que SI-1. El bit de Compras que exige el worker se toma de su contrato público
+    (`Request::$rightname`, `Request::RIGHT_INTEGRATION`), sin copiar el número. Si companypurchasing no está
+    disponible ⇒ fail-closed. Rol mínimo de la cuenta de servicio en Snipe (RBAC por usuario,
     `config/permissions.php` + `Policies/*`): `assets.view`, `assets.create` y `statuslabels.view` (preflight).
     Sin `superuser`.
 

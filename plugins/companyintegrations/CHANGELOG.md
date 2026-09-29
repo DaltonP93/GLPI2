@@ -16,8 +16,15 @@ y versionado [SemVer](https://semver.org/lang/es/).
   - busca primero en cada intento;
   - enfría tras un POST incierto;
   - vincula tras un 409 o una validación de tag;
-  - verifica después de crear (duplicado ⇒ `MANUAL_REVIEW`);
   - nunca borra ni recrea.
+- **Identidad remota estricta** (`RemoteAssetMatcher`):
+  - un activo se adopta sólo si coinciden tag, compañía, **modelo**, serial (si la unidad lo trae) y la **marca de
+    procedencia** `receipt_unit_uuid=<uuid>` en notes;
+  - y sólo como recuperación de un POST propio: un tag preexistente nunca se adopta;
+  - si no ⇒ `MANUAL_REVIEW` (`MODEL_MISMATCH`, `OWNERSHIP_MISMATCH`, `PREEXISTING`…).
+- **Verificación posterior al POST con las mismas exigencias:** el `snipe_asset_id` queda no verificado
+  (`SNIPE_CREATING`) hasta que el GET cumple todo; diferencia ⇒ `MANUAL_REVIEW`.
+- `WorkerSession` usa `Request::RIGHT_INTEGRATION` de Compras (contrato público; sin copiar el número).
 - **Saga durable** `si4_sagas` + bitácora append-only `si4_saga_log`:
   - `UNIQUE(receipt_unit_uuid)` y `UNIQUE(snipe_asset_id)`;
   - fencing por época monótona del lease + token + reloj de la BD (`DbSagaStore`);
@@ -33,7 +40,7 @@ y versionado [SemVer](https://semver.org/lang/es/).
   - sesión GLPI real del usuario técnico;
   - exige `RIGHT_SI4` (nuevo bit 16) + `RIGHT_INTEGRATION` de Compras.
 - **Tests:**
-  - Unit/contract: +120 (`tests/unit/si4.php`; total 178): contrato WRITE (401/403/409/429/5xx/timeout), TLS, token nunca en
+  - Unit/contract: +140 (`tests/unit/si4.php`; total 198): contrato WRITE (401/403/409/429/5xx/timeout), TLS, token nunca en
     logs, crash en 3 puntos, POST incierto, N procesamientos ⇒ 1 activo, dos workers ⇒ 1 saga, lease vencido,
     multi-entidad, mapeos, conflictos y nunca ack.
   - Selftest: `[SI4-*]` con Compras REAL.

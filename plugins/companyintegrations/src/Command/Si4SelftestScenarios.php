@@ -13,6 +13,7 @@
  *   [SI4-CRASH]    worker A crea en Snipe y muere antes de persistir; su lease (2 s) vence ⇒ A no puede escribir la
  *                  saga ni finalizar el outbox; worker B toma la saga (época 2) y RECONCILIA sin un segundo POST.
  *   [SI4-MAPPING]  mapeo de modelo no aprobado ⇒ BLOCKED_CONFIG + outbox RETRY (sin POST).
+ *   [SI4-IDENTITY] tag determinista preexistente (misma compañía, otro modelo, sin marca) ⇒ MANUAL_REVIEW sin POST.
  *   [SI4-SECRETS]  error de transporte con el header Authorization ⇒ token ausente de saga, bitácora y outbox.
  *   [SI4-MULTI-ENT] / [SI4-ACL]  el worker de otra entidad no toma nada; sin RIGHT_SI4 / RIGHT_INTEGRATION ⇒ fail-closed.
  *   [SI4-CMD]      comando real `si4-run` con usuario técnico REAL (Session::init): deshabilitado ⇒ nada; Snipe
@@ -110,6 +111,7 @@ trait Si4SelftestScenarios
             $this->si4E2e();
             $this->si4Crash();
             $this->si4Mapping();
+            $this->si4Identity();
             $this->si4Secrets();
             $this->si4Acl();
             $this->si4Command();
@@ -279,12 +281,12 @@ trait Si4SelftestScenarios
         ]);
         (new ApprovalOrchestrator())->publishDefinition();
 
-        // Solicitud: 1 línea inventariable de 7 unidades (se recibirá en lotes: 3 + 1 + 1 + 1 + 1).
+        // Solicitud: 1 línea inventariable de 8 unidades (se recibirá en lotes: 3 + 1 + 1 + 1 + 1 + 1).
         $this->si4Category = 'SI4-NB-' . $this->suffix;
         $this->si4AsPurchasing($this->si4Owner, READ | PurchaseRequest::RIGHT_CREATE_REQUEST | PurchaseRequest::RIGHT_VIEW_OWN | PurchaseRequest::RIGHT_EDIT_DRAFT, READ);
         $rm = new RequestManager();
         $this->si4Req = $rm->createDraft(['entities_id' => $this->si4E, 'reason' => 'si4-' . $this->suffix, 'category' => 'IT', 'currency_code' => 'PYG']);
-        $this->si4Line = (int) $rm->addLine($this->si4Req, ['description' => 'Notebook SI4', 'quantity' => '7', 'estimated_unit_price' => '1000',
+        $this->si4Line = (int) $rm->addLine($this->si4Req, ['description' => 'Notebook SI4', 'quantity' => '8', 'estimated_unit_price' => '1000',
             'is_inventoriable' => 1, 'category' => $this->si4Category]);
         $orch = new ApprovalOrchestrator();
         $orch->submit($this->si4Req, 'envío si4');
@@ -341,6 +343,12 @@ trait Si4SelftestScenarios
             $leased = $leased && ($api->getHandoff($u)['status'] ?? '') === 'LEASED';
         }
         $this->check('[SI4-E2E] sagas SNIPE_CREATED con snipe_asset_id = activo remoto (compañía/modelo/estado mapeados, serial)', $allOk);
+        $markers = true;
+        foreach ($uuids as $u) {
+            $live = $this->si4Snipe->liveByTag(AssetTagDeriver::tagFor('ST4-', $u));
+            $markers = $markers && str_ends_with((string) ($live[0]['notes'] ?? ''), 'receipt_unit_uuid=' . $u);
+        }
+        $this->check('[SI4-E2E] cada activo creado lleva su marca de procedencia receipt_unit_uuid=<uuid> (verificada tras el POST)', $markers);
         $this->check('[SI4-E2E] 🔒 NO acknowledgeProcessed: el outbox sigue LEASED (SI-4 incompleto)', $leased);
         $posts = $this->si4Posts();
         $m = $this->si4Worker('st-A')->run();
@@ -365,8 +373,9 @@ trait Si4SelftestScenarios
         $store->acquire($u, ['entities_id' => $this->si4E, 'requests_id' => $this->si4Req, 'items_id' => $this->si4Line,
             'payload_sha256' => (string) $claim[0]['payload_sha256'], 'correlation_id' => 'st'], $hA, (string) $claim[0]['leased_until'], (int) $claim[0]['attempts'], 'st-A-crash');
         $store->transition($u, $hA, SagaState::PENDING, ['state' => SagaState::SNIPE_CREATING, 'snipe_asset_tag' => $tag, 'remote_create_calls' => 1], 'create_intent');
-        $res = $this->si4Writer()->createAsset(['asset_tag' => $tag, 'model_id' => 31, 'status_id' => 5, 'company_id' => self::SI4_CO1,
-            'serial' => (string) ($claim[0]['payload']['serial'] ?? ''), 'name' => 'Notebook SI4'], 'st-crash');
+        // Mismos campos (incluida la marca de procedencia en notes) que enviaría el worker real.
+        $res = $this->si4Writer()->createAsset(Si4Worker::assetFields($tag, ['ok' => true, 'company_id' => self::SI4_CO1, 'model_id' => 31, 'status_id' => 5, 'reason' => ''],
+            (array) $claim[0]['payload'], $u, 'st-crash'), 'st-crash');
         $this->check('[SI4-CRASH] el POST de A creó el activo (y A muere sin persistirlo)', $res->kind === 'created' && $store->get($u)['snipe_asset_id'] === null);
         sleep(3);
         $this->check('[SI4-CRASH] 🔒 lease vencido ⇒ A no puede escribir la saga', !$store->transition($u, $hA, SagaState::SNIPE_CREATING, ['last_error' => 'A tarde'], 'st'));
@@ -404,6 +413,25 @@ trait Si4SelftestScenarios
         $this->check('[SI4-MAPPING] sin POST a Snipe', $this->si4Posts() === $posts);
         $this->si4AsAdmin([0, $this->si4E, $this->si4E2]);
         $mm->update(['id' => $mm->getID(), 'is_approved' => 1]);
+    }
+
+    // ------------------------------------------------------------------ [SI4-IDENTITY]
+
+    /** Un tag determinista que YA existe en Snipe (misma compañía, otro modelo, sin marca) nunca se adopta. */
+    private function si4Identity(): void
+    {
+        $this->out->writeln('== [SI4-IDENTITY] tag preexistente con otro modelo / sin marca ⇒ MANUAL_REVIEW ==');
+        [$u] = $this->si4Receive(1);
+        $tag = AssetTagDeriver::tagFor('ST4-', $u);
+        $this->si4Snipe->seed(['asset_tag' => $tag, 'company_id' => self::SI4_CO1, 'model_id' => 32, 'status_id' => 5, 'notes' => 'alta manual']);
+        $this->si4AsWorker([$this->si4E]);
+        $posts = $this->si4Posts();
+        $m = $this->si4Worker('st-A')->run();
+        $s = (new DbSagaStore())->get($u);
+        $this->check('[SI4-IDENTITY] 🔒 no se adopta: MANUAL_REVIEW sin snipe_asset_id', $m['manual_review'] === 1 && ($s['state'] ?? '') === SagaState::MANUAL_REVIEW
+            && ($s['snipe_asset_id'] ?? null) === null && ($s['last_error_class'] ?? '') === 'preexisting');
+        $this->check('[SI4-IDENTITY] 🔒 sin POST y outbox en ERROR (revisión humana)', $this->si4Posts() === $posts
+            && ((new PurchasingIntegrationApi())->getHandoff($u)['status'] ?? '') === 'ERROR');
     }
 
     // ------------------------------------------------------------------ [SI4-SECRETS]
@@ -455,7 +483,7 @@ trait Si4SelftestScenarios
         $profile = (int) (new \Profile())->add(['name' => 'SI4-worker-' . $this->suffix, 'interface' => 'central']);
         \ProfileRight::updateProfileRights($profile, [
             AssetBridge::$rightname => AssetBridge::RIGHT_SI4,
-            'plugin_companypurchasing' => WorkerSession::PURCHASING_RIGHT_INTEGRATION,
+            'plugin_companypurchasing' => PurchaseRequest::RIGHT_INTEGRATION,
         ]);
         (new \Profile_User())->add(['users_id' => $user, 'profiles_id' => $profile, 'entities_id' => $this->si4E, 'is_recursive' => 0]);
         [$u] = $this->si4Receive(1);
@@ -597,7 +625,7 @@ trait Si4SelftestScenarios
     {
         $this->applySession(2, $entities, [
             'plugin_companyintegrations' => $integrationsBits ?? AssetBridge::RIGHT_SI4,
-            'plugin_companypurchasing'   => $purchasingBits ?? WorkerSession::PURCHASING_RIGHT_INTEGRATION,
+            'plugin_companypurchasing'   => $purchasingBits ?? PurchaseRequest::RIGHT_INTEGRATION,
         ]);
         unset($_SESSION['glpicronuserrunning']);
     }

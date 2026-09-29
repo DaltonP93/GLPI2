@@ -10,10 +10,13 @@
  *      lease_until con el reloj de la BD para cada escritura).
  *   3. Saga ya en `SNIPE_CREATED` ⇒ ESTACIONADA: ninguna llamada remota, ningún settle (SI4-1 no termina SI-4).
  *   4. Mapeos validados (compañía/modelo/estado) — ausentes ⇒ BLOCKED_CONFIG + `markRetry` tardío.
- *   5. Tag determinista (el ya registrado en la saga, si existe) y BUSCAR PRIMERO (`bytag?deleted=true`):
- *      uno vivo coherente ⇒ vincular (`reconciled`); anomalía ⇒ MANUAL_REVIEW + `markError`.
+ *   5. Tag determinista (el ya registrado en la saga, si existe) y BUSCAR PRIMERO (`bytag?deleted=true`). Sólo se
+ *      adopta un activo si TODO coincide (tag, compañía, modelo, serial si lo hay y la marca de procedencia
+ *      `receipt_unit_uuid=<uuid>` en notes) Y la saga ya había intentado crear (recuperación de su propio POST); un tag
+ *      preexistente o cualquier diferencia ⇒ MANUAL_REVIEW + `markError` (`RemoteAssetMatcher`).
  *   6. Intención de creación persistida exigiendo lease restante ≥ presupuesto de escritura, y UN POST.
- *   7. Resultado del POST clasificado (ver `CreateResult`); creado ⇒ persistir `snipe_asset_id` + verificación posterior.
+ *   7. Resultado del POST clasificado (ver `CreateResult`). Creado ⇒ `snipe_asset_id` se registra NO verificado
+ *      (SNIPE_CREATING) y sólo pasa a SNIPE_CREATED si el GET posterior cumple exactamente las mismas propiedades.
  *
  * NUNCA llama `acknowledgeProcessed()` en SI4-1: la fila del outbox sólo llega a DONE cuando SI-4 COMPLETO termine.
  *
@@ -238,17 +241,27 @@ final class Si4Worker
                 $tag = AssetTagDeriver::tagFor($this->cfg->prefix, $uuid);
             }
             $ctx['asset_tag'] = $tag;
+            $ownCreate  = (int) ($saga['remote_create_calls'] ?? 0) > 0; // caso B: esta saga ya intentó crear
+            $recordedId = (int) ($saga['snipe_asset_id'] ?? 0);         // creado por esta saga, aún sin verificar
             try {
                 $rows = $this->writer->lookupByTag($tag, $corr);
             } catch (SnipeException $e) {
                 return $this->onReadFailure($e, $uuid, $token, $tokenSha, $state, $attempts, $ctx);
             }
-            $match = RemoteAssetMatcher::classify($rows, $tag, $map['company_id'], $this->serialOf($payload));
+            $match = RemoteAssetMatcher::classify($rows, $tag, $map['company_id'], $map['model_id'], $this->serialOf($payload), $uuid, $ownCreate);
             if ($match['kind'] === RemoteAssetMatcher::ONE) {
-                return $this->link($uuid, $token, $tokenSha, $state, $match['asset_id'], $tag, $map, SagaState::OUTCOME_RECONCILED, (int) ($saga['remote_create_calls'] ?? 0), $ctx);
+                if ($recordedId > 0 && $recordedId !== $match['asset_id']) {
+                    return $this->manualReview($uuid, $token, $tokenSha, $state, 'el activo del tag no es el que creó esta saga (#' . $recordedId . ')', 'id_mismatch', $ctx);
+                }
+                $outcome = $recordedId === $match['asset_id'] ? SagaState::OUTCOME_CREATED : SagaState::OUTCOME_RECONCILED;
+                return $this->link($uuid, $token, $tokenSha, $state, $match['asset_id'], $tag, $map, $outcome, (int) ($saga['remote_create_calls'] ?? 0), $ctx);
             }
             if ($match['kind'] !== RemoteAssetMatcher::NONE) {
                 return $this->manualReview($uuid, $token, $tokenSha, $state, 'remoto ' . $match['kind'] . ': ' . $match['detail'], $match['kind'], $ctx);
+            }
+            if ($recordedId > 0) {
+                // Esta saga YA creó un activo y su tag no lo encuentra: nunca se crea un segundo.
+                return $this->manualReview($uuid, $token, $tokenSha, $state, 'el activo creado por esta saga (#' . $recordedId . ') ya no aparece por su tag', 'created_asset_missing', $ctx);
             }
 
             // 6) Intención persistida con presupuesto de lease, luego UN POST.
@@ -263,7 +276,7 @@ final class Si4Worker
             }
             $state = SagaState::SNIPE_CREATING;
             $this->probe('before_remote_create', $uuid);
-            $res = $this->writer->createAsset($this->assetFields($tag, $map, $payload, $uuid, $corr), $corr);
+            $res = $this->writer->createAsset(self::assetFields($tag, $map, $payload, $uuid, $corr), $corr);
             $this->probe('after_remote_create', $uuid);
 
             // 7) Clasificación del POST.
@@ -284,7 +297,7 @@ final class Si4Worker
     {
         switch ($res->kind) {
             case CreateResult::CREATED:
-                return $this->link($uuid, $token, $tokenSha, $state, $res->assetId, $tag, $map, SagaState::OUTCOME_CREATED, $calls, $ctx, true, $corr);
+                return $this->recordAndVerifyCreated($res->assetId, $uuid, $token, $tokenSha, $state, $tag, $map, $payload, $attempts, $calls, $corr, $ctx);
 
             case CreateResult::VALIDATION:
                 if ($res->hasField('asset_tag')) {
@@ -348,7 +361,7 @@ final class Si4Worker
         } catch (SnipeException $e) {
             return $this->onReadFailure($e, $uuid, $token, $tokenSha, $state, $attempts, $ctx);
         }
-        $match = RemoteAssetMatcher::classify($rows, $tag, $map['company_id'], $this->serialOf($payload));
+        $match = RemoteAssetMatcher::classify($rows, $tag, $map['company_id'], $map['model_id'], $this->serialOf($payload), $uuid, true);
         if ($match['kind'] === RemoteAssetMatcher::ONE) {
             return $this->link($uuid, $token, $tokenSha, $state, $match['asset_id'], $tag, $map, SagaState::OUTCOME_RECONCILED, $calls, $ctx);
         }
@@ -356,12 +369,49 @@ final class Si4Worker
     }
 
     /**
-     * Persiste el vínculo (`snipe_asset_id`) con fencing. Para una creación nueva, verifica después que el tag tenga
-     * exactamente UN activo vivo (duplicado por carrera ⇒ MANUAL_REVIEW, nunca se borra nada).
+     * POST exitoso: registra `snipe_asset_id` NO verificado (SNIPE_CREATING, con fencing) y verifica con un GET que el
+     * activo cumpla EXACTAMENTE las mismas propiedades que exige la recuperación (tag, compañía, modelo, serial si lo
+     * hay, marca de procedencia) y que sea el mismo id. Sólo entonces SNIPE_CREATED; cualquier diferencia ⇒
+     * MANUAL_REVIEW; GET no disponible ⇒ RETRY (el próximo intento busca primero y verifica igual).
+     *
+     * @param array{ok:bool, company_id:int, model_id:int, status_id:int, reason:string} $map
+     * @param array<string,mixed> $payload @param array<string,mixed> $ctx
+     */
+    private function recordAndVerifyCreated(int $assetId, string $uuid, string $token, string $tokenSha, string $state, string $tag, array $map, array $payload, int $attempts, int $calls, string $corr, array $ctx): string
+    {
+        try {
+            $ok = $this->sagas->transition($uuid, $tokenSha, $state, [
+                'state' => SagaState::SNIPE_CREATING, 'snipe_asset_id' => $assetId, 'snipe_asset_tag' => $tag,
+                'snipe_outcome' => SagaState::OUTCOME_CREATED, 'last_error' => null, 'last_error_class' => null,
+            ], 'snipe_created_unverified', 'POST #' . $calls . ' ⇒ #' . $assetId);
+        } catch (\RuntimeException $e) {
+            return $this->manualReview($uuid, $token, $tokenSha, $state, 'no se pudo registrar el activo remoto: ' . $e->getMessage(), 'link_unique', $ctx);
+        }
+        if (!$ok) {
+            // Lease perdido tras el POST: el nuevo dueño lo encontrará por tag + marca (buscar primero) y lo vinculará.
+            $this->log('warning', 'lease perdido al registrar el activo creado', $ctx + ['snipe_asset_id' => $assetId]);
+            return self::R_LEASE_LOST;
+        }
+        $this->probe('after_record_created', $uuid);
+        try {
+            $rows = $this->writer->lookupByTag($tag, $corr);
+        } catch (SnipeException $e) {
+            return $this->onReadFailure($e, $uuid, $token, $tokenSha, $state, $attempts, $ctx);
+        }
+        $check = RemoteAssetMatcher::classify($rows, $tag, $map['company_id'], $map['model_id'], $this->serialOf($payload), $uuid, true);
+        if ($check['kind'] !== RemoteAssetMatcher::ONE || $check['asset_id'] !== $assetId) {
+            return $this->manualReview($uuid, $token, $tokenSha, $state, 'verificación posterior: ' . $check['kind'] . ' ' . $check['detail'], 'post_verify', $ctx);
+        }
+        return $this->link($uuid, $token, $tokenSha, $state, $assetId, $tag, $map, SagaState::OUTCOME_CREATED, $calls, $ctx);
+    }
+
+    /**
+     * Persiste el vínculo VERIFICADO (`SNIPE_CREATED` + `snipe_asset_id`) con fencing. Sólo se llama con un activo que
+     * `RemoteAssetMatcher` aceptó con todas sus comprobaciones (recuperación o verificación posterior al POST).
      *
      * @param array{ok:bool, company_id:int, model_id:int, status_id:int, reason:string} $map @param array<string,mixed> $ctx
      */
-    private function link(string $uuid, string $token, string $tokenSha, string $state, int $assetId, string $tag, array $map, string $outcome, int $calls, array $ctx, bool $verify = false, string $corr = ''): string
+    private function link(string $uuid, string $token, string $tokenSha, string $state, int $assetId, string $tag, array $map, string $outcome, int $calls, array $ctx): string
     {
         try {
             $ok = $this->sagas->transition($uuid, $tokenSha, $state, [
@@ -378,19 +428,7 @@ final class Si4Worker
             return self::R_LEASE_LOST;
         }
         $this->probe('after_link', $uuid);
-        $this->log('info', 'activo remoto vinculado; unidad estacionada en SNIPE_CREATED (sin ack: SI-4 incompleto)', $ctx + ['snipe_asset_id' => $assetId, 'outcome' => $outcome]);
-        if ($verify) {
-            try {
-                $rows = $this->writer->lookupByTag($tag, $corr);
-                $check = RemoteAssetMatcher::classify($rows, $tag, $map['company_id'], null);
-                if ($check['kind'] !== RemoteAssetMatcher::ONE || $check['asset_id'] !== $assetId) {
-                    return $this->manualReview($uuid, $token, $tokenSha, SagaState::SNIPE_CREATED, 'verificación posterior: ' . $check['kind'] . ' ' . $check['detail'], 'post_verify', $ctx);
-                }
-            } catch (SnipeException $e) {
-                // El vínculo ya es durable; la verificación es best-effort (SI-1 reconcilia duplicados).
-                $this->log('warning', 'verificación posterior no disponible', $ctx + ['kind' => $e->kind]);
-            }
-        }
+        $this->log('info', 'activo remoto vinculado y verificado; unidad estacionada en SNIPE_CREATED (sin ack: SI-4 incompleto)', $ctx + ['snipe_asset_id' => $assetId, 'outcome' => $outcome]);
         return $outcome === SagaState::OUTCOME_CREATED ? self::R_CREATED : self::R_RECONCILED;
     }
 
@@ -456,12 +494,14 @@ final class Si4Worker
     }
 
     /**
-     * Campos del POST: sólo lo necesario y verificado (ADR-0020 §10: sin costo).
+     * Campos del POST: sólo lo necesario y verificado (ADR-0020 §10: sin costo). `notes` lleva la MARCA DE PROCEDENCIA
+     * `receipt_unit_uuid=<uuid>` AL FINAL: Snipe devuelve notes con Parsedown::line (safe mode), y al final ningún `_…_`
+     * posterior puede formar un énfasis que la atraviese; los demás valores se reducen a `[A-Za-z0-9.:-]`.
      *
      * @param array{ok:bool, company_id:int, model_id:int, status_id:int, reason:string} $map @param array<string,mixed> $payload
      * @return array<string,scalar|null>
      */
-    private function assetFields(string $tag, array $map, array $payload, string $uuid, string $corr): array
+    public static function assetFields(string $tag, array $map, array $payload, string $uuid, string $corr): array
     {
         $f = [
             'asset_tag'    => $tag,
@@ -470,13 +510,20 @@ final class Si4Worker
             'company_id'   => $map['company_id'],
             'name'         => mb_substr((string) ($payload['description'] ?? ''), 0, 255),
             'order_number' => mb_substr((string) ($payload['request_number'] ?? ''), 0, 191),
-            'notes'        => 'GLPI2 SI-4 · receipt_unit_uuid=' . $uuid . ' · request=' . (string) ($payload['request_number'] ?? '') . ' · correlation=' . $corr,
+            'notes'        => 'GLPI2 SI-4 · request=' . self::plain((string) ($payload['request_number'] ?? '')) . ' · correlation='
+                . self::plain($corr) . ' · ' . RemoteAssetMatcher::marker($uuid),
         ];
-        $serial = $this->serialOf($payload);
+        $serial = is_string($payload['serial'] ?? null) && $payload['serial'] !== '' ? $payload['serial'] : null;
         if ($serial !== null) {
             $f['serial'] = $serial;
         }
         return $f;
+    }
+
+    /** Texto seguro para notes (sin caracteres de markdown). */
+    private static function plain(string $v): string
+    {
+        return (string) preg_replace('/[^A-Za-z0-9.:-]/', '-', mb_substr($v, 0, 64));
     }
 
     private function probe(string $point, string $uuid): void

@@ -143,17 +143,31 @@ ok('unidades distintas ⇒ tags distintos', AssetTagDeriver::tagFor('GP2-', $u) 
 ok('prefijo inválido ⇒ fail-closed', si4Throws(fn () => AssetTagDeriver::tagFor('gp2 ', $u)));
 ok('uuid inválido ⇒ fail-closed', si4Throws(fn () => AssetTagDeriver::tagFor('GP2-', 'no-uuid')));
 
-echo "== SI4 · RemoteAssetMatcher ==\n";
+echo "== SI4 · RemoteAssetMatcher (tag + compañía + modelo + serial + marca de procedencia; caso A/B) ==\n";
 $t = 'GP2-ABC';
-$live = fn (int $id, int $co = 7, string $ser = '', ?array $del = null): array => ['id' => $id, 'asset_tag' => $t, 'serial' => $ser, 'company' => ['id' => $co], 'deleted_at' => $del];
-ok('sin filas ⇒ NONE', RemoteAssetMatcher::classify([], $t, 7, null)['kind'] === RemoteAssetMatcher::NONE);
-ok('uno vivo coherente ⇒ ONE', RemoteAssetMatcher::classify([$live(5)], $t, 7, null) === ['kind' => RemoteAssetMatcher::ONE, 'asset_id' => 5, 'detail' => '']);
-ok('sólo borrado ⇒ DELETED (no recrear)', RemoteAssetMatcher::classify([$live(5, 7, '', ['datetime' => 'x'])], $t, 7, null)['kind'] === RemoteAssetMatcher::DELETED);
-ok('dos vivos ⇒ DUPLICATE', RemoteAssetMatcher::classify([$live(5), $live(6)], $t, 7, null)['kind'] === RemoteAssetMatcher::DUPLICATE);
-ok('vivo + borrado ⇒ DUPLICATE', RemoteAssetMatcher::classify([$live(5), $live(6, 7, '', ['datetime' => 'x'])], $t, 7, null)['kind'] === RemoteAssetMatcher::DUPLICATE);
-ok('otra compañía ⇒ COMPANY_MISMATCH (multi-entidad)', RemoteAssetMatcher::classify([$live(5, 8)], $t, 7, null)['kind'] === RemoteAssetMatcher::COMPANY_MISMATCH);
-ok('serial distinto ⇒ SERIAL_MISMATCH', RemoteAssetMatcher::classify([$live(5, 7, 'SN-X')], $t, 7, 'SN-Y')['kind'] === RemoteAssetMatcher::SERIAL_MISMATCH);
-ok('serial escapado por el transformer coincide', RemoteAssetMatcher::classify([$live(5, 7, 'SN&amp;1')], $t, 7, 'SN&1')['kind'] === RemoteAssetMatcher::ONE);
+$mu = '3f9a1c2b-7d4e-4f60-8a1b-0c2d3e4f5a6b';
+$otherU = '3f9a1c2b-7d4e-4f60-8a1b-0c2d3e4f5a6c';
+$ownNotes = FakeSnipeServer::markdownInline('GLPI2 SI-4 · request=SC-1 · correlation=c · ' . RemoteAssetMatcher::marker($mu));
+$live = fn (int $id, int $co = 7, string $ser = '', ?array $del = null, int $model = 31, ?string $notes = null): array => ['id' => $id, 'asset_tag' => $t, 'serial' => $ser,
+    'company' => ['id' => $co], 'model' => ['id' => $model], 'notes' => $notes ?? $ownNotes, 'deleted_at' => $del];
+$cls = fn (array $rows, ?string $serial = null, bool $own = true): string => RemoteAssetMatcher::classify($rows, $t, 7, 31, $serial, $mu, $own)['kind'];
+ok('sin filas ⇒ NONE', $cls([]) === RemoteAssetMatcher::NONE);
+ok('todo coincide + marca propia + POST propio ⇒ ONE', RemoteAssetMatcher::classify([$live(5)], $t, 7, 31, null, $mu, true) === ['kind' => RemoteAssetMatcher::ONE, 'asset_id' => 5, 'detail' => '']);
+ok('sólo borrado ⇒ DELETED (no recrear)', $cls([$live(5, 7, '', ['datetime' => 'x'])]) === RemoteAssetMatcher::DELETED);
+ok('dos vivos ⇒ DUPLICATE', $cls([$live(5), $live(6)]) === RemoteAssetMatcher::DUPLICATE);
+ok('vivo + borrado ⇒ DUPLICATE', $cls([$live(5), $live(6, 7, '', ['datetime' => 'x'])]) === RemoteAssetMatcher::DUPLICATE);
+ok('otra compañía ⇒ COMPANY_MISMATCH (multi-entidad)', $cls([$live(5, 8)]) === RemoteAssetMatcher::COMPANY_MISMATCH);
+ok('🔒 mismo tag + misma compañía + sin serial + OTRO modelo ⇒ MODEL_MISMATCH', $cls([$live(5, 7, '', null, 99)]) === RemoteAssetMatcher::MODEL_MISMATCH);
+ok('serial distinto ⇒ SERIAL_MISMATCH', $cls([$live(5, 7, 'SN-X')], 'SN-Y') === RemoteAssetMatcher::SERIAL_MISMATCH);
+ok('serial escapado por el transformer coincide', $cls([$live(5, 7, 'SN&amp;1')], 'SN&1') === RemoteAssetMatcher::ONE);
+ok('🔒 tag/compañía/modelo correctos pero SIN marca ⇒ OWNERSHIP_MISMATCH', $cls([$live(5, 7, '', null, 31, 'alta manual')]) === RemoteAssetMatcher::OWNERSHIP_MISMATCH
+    && $cls([['id' => 5, 'asset_tag' => $t, 'serial' => '', 'company' => ['id' => 7], 'model' => ['id' => 31], 'notes' => null, 'deleted_at' => null]]) === RemoteAssetMatcher::OWNERSHIP_MISMATCH);
+ok('🔒 marca de OTRO receipt_unit_uuid ⇒ OWNERSHIP_MISMATCH', $cls([$live(5, 7, '', null, 31, 'x · ' . RemoteAssetMatcher::marker($otherU))]) === RemoteAssetMatcher::OWNERSHIP_MISMATCH);
+ok('🔒 dos marcas (propia + otra) ⇒ OWNERSHIP_MISMATCH', $cls([$live(5, 7, '', null, 31, RemoteAssetMatcher::marker($mu) . ' ' . RemoteAssetMatcher::marker($otherU))]) === RemoteAssetMatcher::OWNERSHIP_MISMATCH);
+ok('🔒 marca con sufijo (uuid más largo) no cuenta', $cls([$live(5, 7, '', null, 31, RemoteAssetMatcher::marker($mu) . 'ff')]) === RemoteAssetMatcher::OWNERSHIP_MISMATCH);
+ok('🔒 caso A: tag preexistente (sin POST de esta saga) NUNCA se adopta, aunque coincida todo', $cls([$live(5)], null, false) === RemoteAssetMatcher::PREEXISTING);
+ok('marca propia sobrevive al markdown de Snipe (énfasis antes de la marca)', RemoteAssetMatcher::hasOwnMarker(
+    FakeSnipeServer::markdownInline('nota _importante_ del admin · a_b_ c · ' . RemoteAssetMatcher::marker($mu)), $mu));
 
 echo "== SI4 · MappingRules (mapeos validados, fail-closed) ==\n";
 ok('sin compañía ⇒ bloqueado', !MappingRules::decide([], 31, 5)['ok']);
@@ -414,7 +428,111 @@ $W = new Si4World();
 $u = $W->unit();
 $W->snipe->seed(['asset_tag' => $W->tag($u), 'company_id' => 8, 'model_id' => 31, 'status_id' => 5]);
 $m = $W->worker()->run();
-ok('activo con nuestro tag en OTRA compañía ⇒ MANUAL_REVIEW (multi-entidad)', $m['manual_review'] === 1 && $W->sagas->get($u)['last_error_class'] === 'company_mismatch');
+ok('activo preexistente con nuestro tag en OTRA compañía ⇒ MANUAL_REVIEW (no se adopta)', $m['manual_review'] === 1
+    && $W->sagas->get($u)['last_error_class'] === 'preexisting' && $W->sagas->get($u)['snipe_asset_id'] === null && $W->posts() === 0);
+
+echo "== SI4 · Identidad remota: modelo + marca de procedencia (caso A preexistente / caso B recuperación) ==\n";
+// Caso A — el escenario exacto del blocker: mismo tag, misma compañía, sin serial, OTRO modelo.
+$W = new Si4World();
+$u = $W->unit();
+$W->snipe->seed(['asset_tag' => $W->tag($u), 'company_id' => 7, 'model_id' => 32, 'status_id' => 5]);
+$m = $W->worker()->run();
+ok('🔒 A: tag + compañía correctos, sin serial, OTRO modelo ⇒ MANUAL_REVIEW sin vincular ni crear', $m['manual_review'] === 1
+    && $W->sagas->get($u)['snipe_asset_id'] === null && $W->source->row($u)['status'] === 'ERROR' && $W->posts() === 0);
+$W = new Si4World();
+$u = $W->unit();
+$W->snipe->seed(['asset_tag' => $W->tag($u), 'company_id' => 7, 'model_id' => 31, 'status_id' => 5, 'notes' => RemoteAssetMatcher::marker($u)]);
+$m = $W->worker()->run();
+ok('🔒 A: tag preexistente aunque traiga todo (incluso la marca) ⇒ MANUAL_REVIEW (sin POST previo de la saga)', $m['manual_review'] === 1
+    && $W->sagas->get($u)['last_error_class'] === 'preexisting' && $W->sagas->get($u)['snipe_asset_id'] === null);
+// Caso B — crash después del POST y el activo remoto ya no corresponde a la unidad.
+$crash = fn (string $p) => $p === 'after_remote_create' ? throw new SimulatedCrash('muere tras el POST') : null;
+$caseB = function (callable $tamper, string $label, string $expectClass) use ($crash): void {
+    $W = new Si4World();
+    $u = $W->unit();
+    si4Throws(fn () => $W->worker($crash)->run());
+    $id = (int) $W->snipe->liveByTag($W->tag($u))[0]['id'];
+    $tamper($W, $id, $u);
+    $W->source->expire($u);
+    $W->now += 5;
+    $m = $W->worker()->run();
+    $s = $W->sagas->get($u);
+    ok("🔒 B: {$label} ⇒ MANUAL_REVIEW sin vincular snipe_asset_id (1 POST)", $m['manual_review'] === 1 && $s['state'] === SagaState::MANUAL_REVIEW
+        && $s['last_error_class'] === $expectClass && $s['snipe_asset_id'] === null && $W->posts() === 1 && $W->source->row($u)['status'] === 'ERROR');
+};
+$caseB(function (Si4World $W, int $id): void { $W->snipe->assets[$id]['model_id'] = 32; }, 'tag + compañía correctos, OTRO modelo', 'model_mismatch');
+$caseB(function (Si4World $W, int $id): void { $W->snipe->assets[$id]['notes'] = 'alta manual en Snipe'; }, 'tag/compañía/modelo correctos, marca AUSENTE', 'ownership_mismatch');
+$caseB(function (Si4World $W, int $id): void { $W->snipe->assets[$id]['notes'] = 'GLPI2 SI-4 · ' . RemoteAssetMatcher::marker('3f9a1c2b-7d4e-4f60-8a1b-0c2d3e4f5a6c'); }, 'marca de OTRO receipt_unit_uuid', 'ownership_mismatch');
+$W = new Si4World();
+$u = $W->unit(['serial' => 'SN-B-1']);
+si4Throws(fn () => $W->worker($crash)->run());
+$W->source->expire($u);
+$W->now += 5;
+$m = $W->worker()->run();
+$s = $W->sagas->get($u);
+ok('B: crash tras el POST ⇒ GET por tag con modelo/compañía/serial/marca coincidentes ⇒ RECONCILED con exactamente 1 POST', $m['reconciled'] === 1
+    && $s['state'] === SagaState::SNIPE_CREATED && (int) $s['snipe_asset_id'] === (int) $W->snipe->liveByTag($W->tag($u))[0]['id'] && $W->posts() === 1);
+
+echo "== SI4 · Verificación posterior al POST con las MISMAS exigencias ==\n";
+foreach ([
+    ['modelo distinto', fn (Si4World $W, string $u) => $W->snipe->assets[(int) $W->snipe->liveByTag($W->tag($u))[0]['id']]['model_id'] = 32],
+    ['marca distinta', fn (Si4World $W, string $u) => $W->snipe->assets[(int) $W->snipe->liveByTag($W->tag($u))[0]['id']]['notes'] = RemoteAssetMatcher::marker('3f9a1c2b-7d4e-4f60-8a1b-0c2d3e4f5a6c')],
+] as [$label, $tamper]) {
+    $W = new Si4World();
+    $u = $W->unit();
+    $m = $W->worker(function (string $p, string $uu) use ($W, $tamper): void {
+        if ($p === 'after_remote_create') {
+            $tamper($W, $uu);
+        }
+    })->run();
+    $s = $W->sagas->get($u);
+    ok("🔒 POST success pero el GET posterior trae {$label} ⇒ MANUAL_REVIEW (nunca SNIPE_CREATED)", $m['manual_review'] === 1 && $m['created'] === 0
+        && $s['state'] === SagaState::MANUAL_REVIEW && $s['last_error_class'] === 'post_verify' && $W->source->row($u)['status'] === 'ERROR');
+}
+$W = new Si4World();
+$u = $W->unit(['serial' => 'SN-PV-1']);
+$m = $W->worker(function (string $p, string $uu) use ($W): void {
+    if ($p === 'after_remote_create') {
+        $W->snipe->assets[(int) $W->snipe->liveByTag($W->tag($uu))[0]['id']]['serial'] = 'SN-PV-OTRO';
+    }
+})->run();
+ok('🔒 POST success pero el GET posterior trae serial distinto ⇒ MANUAL_REVIEW (no se relaja el serial tras crear)', $m['manual_review'] === 1
+    && $W->sagas->get($u)['last_error_class'] === 'post_verify');
+$W = new Si4World();
+$u = $W->unit();
+$m = $W->worker(function (string $p) use ($W): void {
+    if ($p === 'after_record_created') {
+        foreach ([1, 2, 3] as $_) {
+            $W->snipe->failNext('GET', '/api/v1/hardware/bytag', FakeSnipeServer::S500_BEFORE);
+        }
+    }
+})->run();
+$s = $W->sagas->get($u);
+ok('GET posterior no disponible ⇒ RETRY; la saga queda SNIPE_CREATING con el id NO verificado', $m['retry'] === 1 && $s['state'] === SagaState::SNIPE_CREATING
+    && (int) $s['snipe_asset_id'] > 0 && $W->source->row($u)['status'] === 'RETRY');
+$W->now = $W->source->row($u)['next_retry_at'] + 1;
+$m = $W->worker()->run();
+ok('… el retry verifica igual y recién ahí SNIPE_CREATED (outcome created, 1 POST)', $m['created'] === 1 && $W->sagas->get($u)['state'] === SagaState::SNIPE_CREATED
+    && $W->sagas->get($u)['snipe_outcome'] === 'created' && $W->posts() === 1);
+$W = new Si4World();
+$u = $W->unit();
+$W->worker(function (string $p) use ($W): void {
+    if ($p === 'after_record_created') {
+        foreach ([1, 2, 3] as $_) {
+            $W->snipe->failNext('GET', '/api/v1/hardware/bytag', FakeSnipeServer::S500_BEFORE);
+        }
+    }
+})->run();
+$W->snipe->assets = []; // el activo creado por esta saga desaparece de Snipe
+$W->now = $W->source->row($u)['next_retry_at'] + 1;
+$m = $W->worker()->run();
+ok('🔒 el activo creado por esta saga ya no aparece ⇒ MANUAL_REVIEW, NUNCA un segundo POST', $m['manual_review'] === 1
+    && $W->sagas->get($u)['last_error_class'] === 'created_asset_missing' && $W->posts() === 1);
+$W = new Si4World();
+$u = $W->unit(['request_number' => 'SC_2026_ 0011', 'correlation_id' => 'corr_x']);
+$m = $W->worker()->run();
+$notes = (string) $W->snipe->assets[(int) $W->sagas->get($u)['snipe_asset_id']]['notes'];
+ok('la marca va AL FINAL de notes y sobrevive al markdown de Snipe (created + verificado)', $m['created'] === 1 && str_ends_with($notes, RemoteAssetMatcher::marker($u)));
 $W = new Si4World();
 $u = $W->unit();
 $dup = function (string $p, string $uu) use ($W) {

@@ -8,7 +8,9 @@
  *   - POST /api/v1/hardware  → HTTP 200 + {"status":"success","payload":{…}} o HTTP 200 + {"status":"error",
  *     "messages":{campo:[…]}}; `asset_tag` único entre activos VIVOS (comparación sin mayúsculas, como la
  *     colación de MySQL); `serial` único sólo si `uniqueSerial`; model/status/company deben existir.
- *   - GET /api/v1/hardware/bytag/{tag}[?deleted=true] → activo, listado `{total, rows}` o HTTP 200 + status:error.
+ *   - GET /api/v1/hardware/bytag/{tag}[?deleted=true] → activo, listado `{total, rows}` o HTTP 200 + status:error;
+ *     las filas tienen la forma de `AssetsTransformer` (`model`/`company` como `{id,name}`, textos con `e()` y `notes`
+ *     con `Helper::parseEscapedMarkedownInline()` = Parsedown::line en safe mode, emulado en `markdownInline()`).
  *   - GET /api/v1/statuslabels/{id} → fila o HTTP 200 + status:error.
  *   - 401 si falta/no coincide el Bearer; fallas inyectables: timeout/5xx ANTES o DESPUÉS de ejecutar, 401, 403,
  *     409, 429 (+Retry-After) y una creación "concurrente" del mismo tag justo antes de atender el POST.
@@ -79,7 +81,7 @@ final class FakeSnipeServer implements HttpTransport
     public function seed(array $a): int
     {
         $id = $this->nextId++;
-        $this->assets[$id] = $a + ['id' => $id, 'asset_tag' => '', 'serial' => null, 'company_id' => null, 'model_id' => 0, 'status_id' => 0, 'name' => '', 'deleted_at' => null];
+        $this->assets[$id] = $a + ['id' => $id, 'asset_tag' => '', 'serial' => null, 'company_id' => null, 'model_id' => 0, 'status_id' => 0, 'name' => '', 'notes' => null, 'deleted_at' => null];
         $this->assets[$id]['id'] = $id;
         return $id;
     }
@@ -224,8 +226,21 @@ final class FakeSnipeServer implements HttpTransport
             'model'        => ['id' => (int) $a['model_id'], 'name' => 'Model ' . $a['model_id']],
             'status_label' => ['id' => (int) $a['status_id'], 'name' => 'Status ' . $a['status_id']],
             'company'      => $a['company_id'] !== null ? ['id' => (int) $a['company_id'], 'name' => 'Company ' . $a['company_id']] : null,
+            'notes'        => ($a['notes'] ?? '') !== '' && $a['notes'] !== null ? self::markdownInline((string) $a['notes']) : null,
             'deleted_at'   => $a['deleted_at'] !== null ? ['datetime' => $a['deleted_at'], 'formatted' => $a['deleted_at']] : null,
         ];
+    }
+
+    /**
+     * Emulación MÍNIMA de `Helper::parseEscapedMarkedownInline()` (Snipe v8.7.2: `Parsedown::line(strip_tags($str))` en
+     * safe mode): quita tags, escapa HTML y aplica énfasis inline `_…_` / `*…*` (el `_` de cierre debe ir seguido de un
+     * límite de palabra, como en Parsedown). Suficiente para probar que la marca de procedencia sobrevive al transformer.
+     */
+    public static function markdownInline(string $text): string
+    {
+        $t = htmlspecialchars(strip_tags($text), ENT_QUOTES, 'UTF-8');
+        $t = (string) preg_replace('/_([^_]+?)_(?!\w)/u', '<em>$1</em>', $t);
+        return (string) preg_replace('/\*([^*]+?)\*/u', '<em>$1</em>', $t);
     }
 
     /** @return array{method:string,prefix:string,fault:string,retryAfter:int}|null */
