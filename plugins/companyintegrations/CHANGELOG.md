@@ -3,6 +3,35 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.4.0] — SI4-2 (activo GLPI + Infocom + asset_bridge en la misma saga, ADR-0021)
+### Added
+- **Etapas GLPI de la saga** (`Si4GlpiStage`): `SNIPE_CREATED → GLPI_RESOLVED_OR_CREATED → INFOCOM_READY → BRIDGED`,
+  `BLOCKED_CONFIG` con `resume_state` (reanuda desde la etapa post-Snipe) y `MANUAL_REVIEW`. En `BRIDGED` la unidad
+  queda estacionada: **sin `acknowledgeProcessed()`**, sin companyqr, sin etiqueta.
+- **Resolver-o-crear el activo GLPI** con la API nativa (`CommonDBTM::find/add/update/can`):
+  - identidad determinista `otherserial` (número de inventario) = `asset_tag` de la saga;
+  - buscar primero por número de inventario y serial en todas las entidades (`GlpiCandidateMatcher`): crear, vincular
+    (GLPI Agent, reclamando el número de inventario vacío) o `MANUAL_REVIEW` (ambiguo, otra entidad, serial o número
+    de inventario distinto, papelera);
+  - intención persistida con fencing antes de `add()`, id registrado sin verificar y verificación posterior.
+- **Infocom exacto** (`InfocomPolicy`): costo de la unidad a `decimal(20,4)` sin redondeo, moneda configurada
+  (`si4_glpi_infocom_currency`, por defecto `PYG`), proveedor de la compra, n.º de solicitud y fecha de recepción;
+  completa sólo campos propios vacíos; conflicto ⇒ `MANUAL_REVIEW`.
+- **`asset_bridge` 1:1 idempotente** (`BridgeMatcher`, `DbBridgeStore`): inserta con alias vigente, adopta un puente SI-1
+  idéntico, nunca reasigna.
+- Tabla `map_glpi_assettypes` (categoría ⇒ itemtype + modelo GLPI opcional, aprobado) y modelo `MapGlpiAssetType`.
+- `SagaStore::holds()` (dueño + lease restante con el reloj de la BD) antes de cada escritura en GLPI.
+- Re-verificación del activo de Snipe al reanudar (nunca se corrige Snipe).
+- Selftest `Si4GlpiSelftestScenarios` sobre GLPI real y 111 tests unitarios nuevos (crash points, agente, ACL,
+  multi-entidad, Infocom, puente, upgrade).
+
+### Changed
+- `si4_sagas`: columnas `glpi_itemtype`, `glpi_items_id`, `glpi_entity_id`, `glpi_outcome`, `glpi_create_calls`,
+  `glpi_infocom_id`, `infocom_outcome`, `asset_bridge_id`, `resume_state` y `UNIQUE(glpi_itemtype, glpi_items_id)`.
+- `asset_bridge`: columna `receipt_unit_uuid` (UNIQUE; NULL para los puentes SI-1).
+- `install()` agrega columnas/índices sólo si faltan (mismo camino para instalación nueva y upgrade 0.3.0 → 0.4.0).
+- El lease mínimo suma un margen para las etapas GLPI; `si4-run` cablea la etapa GLPI (`Si4RunCommand::buildWorker`).
+
 ## [0.3.0] — SI4-1 (primer incremento de SI-4, ADR-0020)
 ### Added
 - **Contrato WRITE con Snipe-IT** (`SnipeAssetWriter`), verificado contra el código real de v8.7.2:

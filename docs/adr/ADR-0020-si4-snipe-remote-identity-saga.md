@@ -26,6 +26,9 @@ verificó el **contrato real de Snipe-IT v8.7.2** (tag `v8.7.2`, commit `f3f1dd7
 | 9 | Snipe puede bloquear User-Agent vacío o por patrón (`block_api_user_agents`) | `Middleware/EnforceApiUserAgent` |
 | 10 | El transformer devuelve `model.id`, `company.id` y `notes`; `notes` pasa por `Helper::parseEscapedMarkedownInline()` = `Parsedown::line(strip_tags(…))` en safe mode (markdown inline + escape HTML) | `AssetsTransformer::transformAsset`; `Helpers/Helper.php` |
 
+> **Continuación:** SI4-2 ([ADR-0021](ADR-0021-si4-glpi-asset-infocom-bridge.md)) lleva la misma saga de
+> `SNIPE_CREATED` a `GLPI_RESOLVED_OR_CREATED → INFOCOM_READY → BRIDGED` (activo GLPI, Infocom y `asset_bridge`).
+
 ## Decisión
 1. **Identidad remota determinista = `asset_tag`.** Para cada unidad: `asset_tag = <prefijo><UUIDHEX>`, donde
    `UUIDHEX` son los 32 hex (mayúsculas, sin guiones) de `receipt_unit_uuid` y `<prefijo>` sale de la

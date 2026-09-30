@@ -24,6 +24,9 @@ final class DbSagaStore implements SagaStore
     private const SETTABLE = [
         'state', 'snipe_asset_id', 'snipe_asset_tag', 'snipe_outcome', 'snipe_company_id', 'snipe_model_id',
         'snipe_status_id', 'remote_create_calls', 'last_error', 'last_error_class',
+        // SI4-2 (ADR-0021)
+        'glpi_itemtype', 'glpi_items_id', 'glpi_entity_id', 'glpi_outcome', 'glpi_create_calls', 'glpi_infocom_id',
+        'infocom_outcome', 'asset_bridge_id', 'resume_state',
     ];
     private const DATETIME = '/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/';
 
@@ -95,6 +98,9 @@ final class DbSagaStore implements SagaStore
             if ($col === 'state' && !in_array($val, SagaState::ALL, true)) {
                 throw new \InvalidArgumentException('estado de saga inválido');
             }
+            if ($col === 'resume_state' && $val !== null && !in_array($val, SagaState::POST_SNIPE, true)) {
+                throw new \InvalidArgumentException('resume_state inválido');
+            }
             $parts[] = '`' . $col . '` = ' . ($val === null ? 'NULL' : (is_int($val) ? (string) $val : "'" . $DB->escape((string) $val) . "'"));
         }
         $parts[] = '`row_version` = `row_version` + 1';
@@ -115,6 +121,17 @@ final class DbSagaStore implements SagaStore
             $this->rollback($DB);
             throw new \RuntimeException('saga: escritura rechazada (' . Si4Errors::sanitize($e->getMessage()) . ')', 0, $e);
         }
+    }
+
+    public function holds(string $uuid, string $tokenSha256, int $minRemainingSeconds): bool
+    {
+        $this->assertKeys($uuid, $tokenSha256);
+        /** @var \DBmysql $DB */
+        global $DB;
+        $res = $DB->doQuery('SELECT 1 AS ok FROM `' . Si4Saga::getTable() . "` WHERE `receipt_unit_uuid` = '" . $uuid . "'"
+            . " AND `lease_token_sha256` = '" . $tokenSha256 . "' AND `lease_until` IS NOT NULL"
+            . ' AND `lease_until` >= DATE_ADD(NOW(), INTERVAL ' . max(0, $minRemainingSeconds) . ' SECOND)');
+        return $res !== false && $DB->numrows($res) === 1;
     }
 
     public function get(string $uuid): ?array

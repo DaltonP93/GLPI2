@@ -18,7 +18,13 @@
  *   7. Resultado del POST clasificado (ver `CreateResult`). Creado ⇒ `snipe_asset_id` se registra NO verificado
  *      (SNIPE_CREATING) y sólo pasa a SNIPE_CREATED si el GET posterior cumple exactamente las mismas propiedades.
  *
- * NUNCA llama `acknowledgeProcessed()` en SI4-1: la fila del outbox sólo llega a DONE cuando SI-4 COMPLETO termine.
+ * SI4-2 (ADR-0021), con `Si4GlpiStage` inyectada: desde `SNIPE_CREATED` la MISMA pasada (o un claim posterior) sigue
+ * con el activo GLPI, su Infocom y `asset_bridge` hasta `BRIDGED`. Al reanudar desde una etapa post-Snipe, el activo de
+ * Snipe se RELEE antes de escribir en GLPI (tag, compañía y modelo registrados, serial, marca y mismo id); si diverge ⇒
+ * MANUAL_REVIEW. Sin la etapa GLPI (modo SI4-1) la unidad se estaciona en `SNIPE_CREATED` como antes.
+ *
+ * NUNCA llama `acknowledgeProcessed()` (ni en SI4-1 ni en SI4-2): la fila del outbox sólo llega a DONE cuando SI-4
+ * COMPLETO termine (SI4-3: companyqr/etiqueta).
  *
  * @license GPL-3.0-or-later
  */
@@ -45,6 +51,7 @@ final class Si4Worker
     public const R_UNCERTAIN      = 'uncertain';
     public const R_LEASE_LOST     = 'lease_lost';
     public const R_ERROR          = 'error';
+    public const R_BRIDGED        = 'bridged';
 
     private HandoffSource $source;
     private SagaStore $sagas;
@@ -61,11 +68,17 @@ final class Si4Worker
     private $clock;
     private LogSanitizer $sanitizer;
     private ?string $abort = null;
+    private ?Si4GlpiStage $glpi;
+    /** @var array{payload:array<string,mixed>, attempts:int, corr:string}|null contexto de la unidad en proceso */
+    private ?array $unit = null;
+    /** @var array<string,int> sub-resultados de la corrida (Snipe/GLPI) */
+    private array $stats = [];
 
     /**
      * @param callable(string,string,array<string,mixed>):void|null $logger
      * @param callable(string,string):void|null $probe  punto de inyección de fallas SÓLO para tests (null en producción)
      * @param callable():int|null $clock
+     * @param Si4GlpiStage|null $glpi etapas GLPI de SI4-2 (null = modo SI4-1: estacionar en SNIPE_CREATED)
      */
     public function __construct(
         HandoffSource $source,
@@ -77,7 +90,8 @@ final class Si4Worker
         int $maxRetries,
         ?callable $logger = null,
         ?callable $probe = null,
-        ?callable $clock = null
+        ?callable $clock = null,
+        ?Si4GlpiStage $glpi = null
     ) {
         $this->source     = $source;
         $this->sagas      = $sagas;
@@ -90,6 +104,7 @@ final class Si4Worker
         $this->probe      = $probe;
         $this->clock      = $clock ?? static fn (): int => time();
         $this->sanitizer  = new LogSanitizer();
+        $this->glpi       = $glpi;
     }
 
     public function workerId(): string
@@ -105,15 +120,17 @@ final class Si4Worker
      * Una corrida: preflight (config + Snipe) ANTES de reclamar; luego claims de a una unidad hasta vaciar, agotar
      * `si4_max_units_per_run` o abortar (auth/circuit).
      *
-     * @return array<string,mixed> métricas: claimed, created, reconciled, parked, blocked_config, manual_review,
-     *                             retry, uncertain, lease_lost, error, aborted (motivo o null)
+     * @return array<string,mixed> métricas: claimed, created, reconciled, bridged, parked, blocked_config, manual_review,
+     *                             retry, uncertain, lease_lost, error, aborted (motivo o null) y los sub-resultados
+     *                             snipe_created, snipe_reconciled, glpi_created, glpi_linked
      */
     public function run(): array
     {
-        $m = ['claimed' => 0, self::R_CREATED => 0, self::R_RECONCILED => 0, self::R_PARKED => 0, self::R_BLOCKED_CONFIG => 0,
+        $m = ['claimed' => 0, self::R_CREATED => 0, self::R_RECONCILED => 0, self::R_BRIDGED => 0, self::R_PARKED => 0, self::R_BLOCKED_CONFIG => 0,
               self::R_MANUAL_REVIEW => 0, self::R_RETRY => 0, self::R_UNCERTAIN => 0, self::R_LEASE_LOST => 0, self::R_ERROR => 0,
               'aborted' => null, 'config_errors' => []];
         $this->abort = null;
+        $this->stats = ['snipe_created' => 0, 'snipe_reconciled' => 0, 'glpi_created' => 0, 'glpi_linked' => 0];
         if (!$this->cfg->enabled) {
             $m['aborted'] = 'disabled';
             return $m;
@@ -150,6 +167,7 @@ final class Si4Worker
                 break;
             }
         }
+        $m += $this->stats;
         $this->log('info', 'corrida SI-4 terminada', array_diff_key($m, ['config_errors' => 1]));
         return $m;
     }
@@ -182,6 +200,7 @@ final class Si4Worker
         $corr = is_string($payload['correlation_id'] ?? null) && preg_match('/^[A-Za-z0-9._:-]{1,64}$/', $payload['correlation_id']) === 1
             ? $payload['correlation_id'] : CorrelationId::generate('si4');
         $ctx = ['receipt_unit_uuid' => $uuid, 'correlation_id' => $corr];
+        $this->unit = ['payload' => $payload, 'attempts' => $attempts, 'corr' => $corr];
 
         try {
             // 1) Handoff fresco por la API de Compras (misma validación que el claim) + inmutabilidad del payload.
@@ -215,9 +234,18 @@ final class Si4Worker
             }
 
             // 3) Etapas ya cumplidas.
-            if ($state === SagaState::SNIPE_CREATED) {
-                $this->log('info', 'saga estacionada en SNIPE_CREATED (SI4-1): sin llamadas remotas ni ack', $ctx);
+            if ($state === SagaState::BRIDGED) {
+                $this->log('info', 'saga estacionada en BRIDGED (SI4-2): sin llamadas remotas, sin escrituras ni ack', $ctx);
                 return self::R_PARKED;
+            }
+            $resume = (string) ($saga['resume_state'] ?? '');
+            if (in_array($state, SagaState::POST_SNIPE, true)
+                || ($state === SagaState::BLOCKED_CONFIG && in_array($resume, SagaState::POST_SNIPE, true))) {
+                if ($this->glpi === null) {
+                    $this->log('info', 'saga estacionada en ' . $state . ' (modo SI4-1): sin llamadas remotas ni ack', $ctx);
+                    return self::R_PARKED;
+                }
+                return $this->continueGlpi($uuid, $token, $tokenSha, $payload, $attempts, $corr, $ctx, false);
             }
             if ($state === SagaState::MANUAL_REVIEW) {
                 $this->settleError($uuid, $token, 'saga en revisión manual: ' . (string) ($saga['last_error'] ?? ''), $ctx);
@@ -428,8 +456,68 @@ final class Si4Worker
             return self::R_LEASE_LOST;
         }
         $this->probe('after_link', $uuid);
+        $this->stats['snipe_' . $outcome] = ($this->stats['snipe_' . $outcome] ?? 0) + 1;
+        if ($this->glpi !== null && $this->unit !== null) {
+            // SI4-2: el activo de Snipe se acaba de verificar en esta misma pasada ⇒ se sigue sin releerlo.
+            $this->log('info', 'activo remoto vinculado y verificado; sigue la etapa GLPI', $ctx + ['snipe_asset_id' => $assetId, 'outcome' => $outcome]);
+            return $this->continueGlpi($uuid, $token, $tokenSha, $this->unit['payload'], $this->unit['attempts'], $this->unit['corr'], $ctx, true);
+        }
         $this->log('info', 'activo remoto vinculado y verificado; unidad estacionada en SNIPE_CREATED (sin ack: SI-4 incompleto)', $ctx + ['snipe_asset_id' => $assetId, 'outcome' => $outcome]);
         return $outcome === SagaState::OUTCOME_CREATED ? self::R_CREATED : self::R_RECONCILED;
+    }
+
+    /**
+     * SI4-2: activo GLPI → Infocom → asset_bridge (ADR-0021) desde una etapa post-Snipe. Si el activo de Snipe no se
+     * verificó en esta pasada, se RELEE antes de cualquier escritura en GLPI (nunca se corrige Snipe).
+     *
+     * @param array<string,mixed> $payload @param array<string,mixed> $ctx
+     */
+    private function continueGlpi(string $uuid, string $token, string $tokenSha, array $payload, int $attempts, string $corr, array $ctx, bool $snipeVerified): string
+    {
+        $saga = $this->sagas->get($uuid);
+        if ($saga === null || $this->glpi === null) {
+            return self::R_LEASE_LOST;
+        }
+        $state = (string) $saga['state'];
+        if (!$snipeVerified) {
+            $tag = (string) ($saga['snipe_asset_tag'] ?? '');
+            try {
+                $rows = $this->writer->lookupByTag($tag, $corr);
+            } catch (SnipeException $e) {
+                return $this->onReadFailure($e, $uuid, $token, $tokenSha, $state, $attempts, $ctx);
+            }
+            $v = RemoteAssetMatcher::classify($rows, $tag, (int) ($saga['snipe_company_id'] ?? 0), (int) ($saga['snipe_model_id'] ?? 0), $this->serialOf($payload), $uuid, true);
+            if ($v['kind'] !== RemoteAssetMatcher::ONE || $v['asset_id'] !== (int) ($saga['snipe_asset_id'] ?? 0)) {
+                return $this->manualReview($uuid, $token, $tokenSha, $state, 'el activo Snipe ya no es coherente con la saga (' . $v['kind'] . ' ' . $v['detail'] . ')', 'snipe_diverged', $ctx);
+            }
+        }
+        $o = $this->glpi->advance($uuid, $tokenSha, $payload, $corr);
+        switch ($o['kind']) {
+            case Si4GlpiStage::O_BRIDGED:
+                $final = $this->sagas->get($uuid) ?? [];
+                $glpiOutcome = (string) ($final['glpi_outcome'] ?? '');
+                if (isset($this->stats['glpi_' . $glpiOutcome])) {
+                    $this->stats['glpi_' . $glpiOutcome]++;
+                }
+                $this->log('info', 'unidad en BRIDGED: activo GLPI, Infocom y asset_bridge listos; estacionada (sin ack: SI4-3 pendiente)', $ctx + [
+                    'glpi_itemtype' => (string) ($final['glpi_itemtype'] ?? ''), 'glpi_items_id' => (int) ($final['glpi_items_id'] ?? 0),
+                    'glpi_outcome' => $glpiOutcome, 'infocom_outcome' => (string) ($final['infocom_outcome'] ?? ''),
+                    'asset_bridge_id' => (int) ($final['asset_bridge_id'] ?? 0),
+                ]);
+                return self::R_BRIDGED;
+            case Si4GlpiStage::O_LEASE_LOST:
+                $this->log('warning', 'lease perdido o insuficiente en la etapa GLPI: el próximo dueño reanuda', $ctx);
+                return self::R_LEASE_LOST;
+            case Si4GlpiStage::O_BLOCKED:
+                if (!$this->sagas->transition($uuid, $tokenSha, $o['state'], ['state' => SagaState::BLOCKED_CONFIG, 'resume_state' => $o['resume'],
+                    'last_error' => Si4Errors::sanitize($o['why']), 'last_error_class' => $o['class']], 'blocked_config', $o['why'])) {
+                    return self::R_LEASE_LOST;
+                }
+                $this->settleRetry($uuid, $token, $o['why'], $this->cfg->configRetrySec, $ctx);
+                return self::R_BLOCKED_CONFIG;
+            default: // O_MANUAL
+                return $this->manualReview($uuid, $token, $tokenSha, $o['state'], $o['why'], $o['class'], $ctx);
+        }
     }
 
     /** @param array<string,mixed> $ctx */

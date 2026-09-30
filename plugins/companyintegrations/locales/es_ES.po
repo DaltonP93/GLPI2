@@ -62,3 +62,8 @@ msgstr[1] "Mapeos de modelo"
 
 msgid "SI-4 worker is disabled (si4_enabled = 0): nothing to do."
 msgstr "El worker SI-4 está deshabilitado (si4_enabled = 0): no hay nada que hacer."
+
+msgid "GLPI asset type mapping"
+msgid_plural "GLPI asset type mappings"
+msgstr[0] "Mapeo de tipo de activo GLPI"
+msgstr[1] "Mapeos de tipo de activo GLPI"

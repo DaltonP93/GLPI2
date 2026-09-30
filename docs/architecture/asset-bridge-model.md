@@ -93,6 +93,13 @@ PENDING → SNIPE_CREATED → GLPI_RESOLVED_OR_CREATED → BRIDGED → QR_READY 
 - La saga es **fail-closed**: si falla tras `SNIPE_CREATED` pero antes de `BRIDGED`, la unidad
   queda en ese estado con el `snipe_asset_id` guardado; al reintentar, **vincula** (no recrea).
 
+> **Implementación (SI4-1 / SI4-2, ADR-0020 / ADR-0021):** la saga vive en la tabla propia
+> `glpi_plugin_companyintegrations_si4_sagas` (no en `receipt_units`, que es de Compras) con
+> `PENDING → SNIPE_CREATING → SNIPE_CREATED → GLPI_RESOLVED_OR_CREATED → INFOCOM_READY → BRIDGED`
+> (`INFOCOM_READY` hace explícito el paso de Infocom), más `BLOCKED_CONFIG` (con `resume_state`) y `MANUAL_REVIEW`.
+> `asset_bridge` gana `receipt_unit_uuid` (UNIQUE; NULL para puentes creados por la reconciliación SI-1).
+> `QR_READY`/`LABEL_READY` y el ack del outbox quedan para SI4-3.
+
 ## Estabilidad del QR ante cambio de `asset_tag` (una etiqueta impresa nunca se rompe)
 - La **identidad estable** del activo puenteado es técnica (`asset_bridge.id` / `receipt_unit_uuid`),
   **no** el `asset_tag` (que Snipe podría renombrar).

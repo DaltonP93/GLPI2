@@ -37,6 +37,9 @@ final class InMemorySagaStore implements SagaStore
                 'snipe_company_id' => null, 'snipe_model_id' => null, 'snipe_status_id' => null,
                 'lease_token_sha256' => $tokenSha256, 'lease_until' => $until, 'lease_epoch' => $epoch, 'worker_id' => $workerId,
                 'attempts' => 1, 'remote_create_calls' => 0, 'last_error' => null, 'last_error_class' => null,
+                'glpi_itemtype' => null, 'glpi_items_id' => null, 'glpi_entity_id' => null, 'glpi_outcome' => null,
+                'glpi_create_calls' => 0, 'glpi_infocom_id' => null, 'infocom_outcome' => null, 'asset_bridge_id' => null,
+                'resume_state' => null,
             ];
             $this->log[] = ['uuid' => $uuid, 'event' => 'acquire', 'to' => SagaState::PENDING];
             return $this->rows[$uuid];
@@ -72,11 +75,30 @@ final class InMemorySagaStore implements SagaStore
                 }
             }
         }
+        $itemtype = array_key_exists('glpi_itemtype', $set) ? $set['glpi_itemtype'] : $r['glpi_itemtype'];
+        $itemsId  = array_key_exists('glpi_items_id', $set) ? $set['glpi_items_id'] : $r['glpi_items_id'];
+        if ($itemtype !== null && $itemsId !== null) {
+            foreach ($this->rows as $u => $o) {
+                if ($u !== $uuid && $o['glpi_itemtype'] === $itemtype && (int) $o['glpi_items_id'] === (int) $itemsId) {
+                    throw new \RuntimeException('activo GLPI ya ligado a otra unidad (UNIQUE glpi_item)');
+                }
+            }
+        }
+        if (array_key_exists('resume_state', $set) && $set['resume_state'] !== null && !in_array($set['resume_state'], SagaState::POST_SNIPE, true)) {
+            throw new \InvalidArgumentException('resume_state inválido');
+        }
         foreach ($set as $k => $v) {
             $this->rows[$uuid][$k] = $v;
         }
         $this->log[] = ['uuid' => $uuid, 'event' => $event, 'from' => $fromState, 'to' => $this->rows[$uuid]['state'], 'detail' => $detail];
         return true;
+    }
+
+    public function holds(string $uuid, string $tokenSha256, int $minRemainingSeconds): bool
+    {
+        $r = $this->rows[$uuid] ?? null;
+        return $r !== null && hash_equals((string) $r['lease_token_sha256'], $tokenSha256)
+            && $r['lease_until'] !== null && $r['lease_until'] >= (int) ($this->clock)() + $minRemainingSeconds;
     }
 
     public function get(string $uuid): ?array

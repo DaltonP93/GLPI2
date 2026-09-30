@@ -4,8 +4,9 @@
  * Configuración OPERACIONAL del worker SI-4 (value object PURO; se construye desde `PluginConfig::all()`).
  * Sin secretos (el token de Snipe vive en la variable de entorno, ver `SnipeConfigFactory`).
  *
- * Presupuestos de tiempo (ADR-0020 §6): el lease debe cubrir el peor caso de una unidad (lookup con reintentos +
- * POST + verificación posterior) y, antes de un POST, el lease restante debe cubrir el POST en vuelo + persistencia.
+ * Presupuestos de tiempo (ADR-0020 §6, ADR-0021 §10): el lease debe cubrir el peor caso de una unidad (lookup con
+ * reintentos + POST + verificación posterior + etapas GLPI locales) y, antes de un POST, el lease restante debe cubrir
+ * el POST en vuelo + persistencia.
  *
  * @license GPL-3.0-or-later
  */
@@ -18,6 +19,8 @@ final class Si4Config
 {
     /** Backoff máximo (s) por reintento de lectura del cliente (BackoffPolicy tope 16000 ms). */
     private const READ_BACKOFF_CAP_SEC = 16;
+    /** Margen (s) para las etapas GLPI de SI4-2 (activo + Infocom + puente: operaciones locales de la BD). */
+    public const GLPI_STAGES_SEC = 60;
 
     public bool $enabled;
     public string $prefix;
@@ -30,6 +33,8 @@ final class Si4Config
     public int $authRetrySec;
     public int $uncertainCooldownSec;
     public string $workerId;
+    /** Moneda que representan los importes del Infocom de GLPI (GLPI no guarda moneda por Infocom; ADR-0021 §7). */
+    public string $infocomCurrency;
 
     /** @param array<string,mixed> $c valores de configuración (strings, como los guarda `Config`) */
     public static function fromArray(array $c): self
@@ -46,14 +51,18 @@ final class Si4Config
         $s->authRetrySec         = self::int($c, 'si4_auth_retry_seconds', 900);
         $s->uncertainCooldownSec = self::int($c, 'si4_uncertain_cooldown_seconds', 300);
         $s->workerId             = trim((string) ($c['si4_worker_id'] ?? ''));
+        $s->infocomCurrency      = trim((string) ($c['si4_glpi_infocom_currency'] ?? 'PYG'));
         return $s;
     }
 
-    /** Lease mínimo (s) para el peor caso de una unidad: 2 lecturas con reintentos + 1 POST + margen. */
+    /**
+     * Lease mínimo (s) para el peor caso de una unidad: 2 lecturas con reintentos + 1 POST + margen + etapas GLPI. Al
+     * reanudar desde una etapa post-Snipe sólo hay 1 lectura (la re-verificación), así que la cota también la cubre.
+     */
     public static function minLeaseSeconds(int $timeoutMs, int $maxRetries): int
     {
         $t = (int) ceil(max(1, $timeoutMs) / 1000);
-        return 2 * (max(0, $maxRetries) + 1) * ($t + self::READ_BACKOFF_CAP_SEC) + $t + 60;
+        return 2 * (max(0, $maxRetries) + 1) * ($t + self::READ_BACKOFF_CAP_SEC) + $t + 60 + self::GLPI_STAGES_SEC;
     }
 
     /** Lease restante (s) exigido ANTES de un POST: el POST en vuelo + persistir su resultado. */
@@ -94,6 +103,9 @@ final class Si4Config
         }
         if ($this->workerId !== '' && preg_match('/^[A-Za-z0-9._:@-]{1,120}$/', $this->workerId) !== 1) {
             $e[] = 'si4_worker_id inválido';
+        }
+        if (preg_match('/^[A-Z]{3}$/', $this->infocomCurrency) !== 1) {
+            $e[] = 'si4_glpi_infocom_currency inválida (código ISO 4217 de 3 letras)';
         }
         return $e;
     }

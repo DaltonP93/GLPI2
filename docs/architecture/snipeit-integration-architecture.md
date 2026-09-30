@@ -90,9 +90,13 @@ companypurchasing: purchase.received  (ítem is_inventoriable = 1) — llega rec
             3) GLPI_RESOLVED_OR_CREATED: **RESOLVER-o-crear** el activo GLPI por serial/UUID/
                identificador soportado → match único, VINCULAR; **ambiguo** → CONFLICT (sin
                auto-merge); no existe → crear (itemtype config)
+               [implementado en SI4-2, ADR-0021: identidad `otherserial` = asset_tag; mapeo
+               `map_glpi_assettypes`; otra entidad / serial distinto ⇒ MANUAL_REVIEW]
             4) poblar Infocom con el **costo atribuible a ESTA unidad** (`unit_cost` derivado de la
                línea; **proveedor = el de la compra GLPI2**) — nunca el total general prorrateado
+               [implementado en SI4-2 como INFOCOM_READY: decimal(20,4) exacto, sin redondeo]
             5) BRIDGED: insertar/actualizar fila asset_bridge (sync_status=mapped) + alias de asset_tag
+               [implementado en SI4-2: `asset_bridge.receipt_unit_uuid` UNIQUE; sin ack hasta SI4-3]
             6) QR_READY: generar companyqr (Fase 1) + registrar companyqr_code_id
             7) LABEL_READY: etiqueta imprimible por el motor de Snipe (QR → gateway GLPI2)
 ```

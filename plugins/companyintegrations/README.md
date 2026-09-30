@@ -83,6 +83,37 @@ SI-4 es dueño de la saga de integración, de la escritura por API en Snipe y de
     `assets.create` y `statuslabels.view` (sin superuser).
   - **Sin Acción automática:** no programar en producción hasta completar SI-4.
 
+## Alcance SI4-2 (ADR-0021) — la misma saga hasta el activo GLPI, su Infocom y `asset_bridge`
+Continúa cada unidad desde `SNIPE_CREATED`: `GLPI_RESOLVED_OR_CREATED → INFOCOM_READY → BRIDGED`. **Todavía NO**
+companyqr, etiqueta, `acknowledgeProcessed()` ni P2D-4: en `BRIDGED` la unidad queda **estacionada** y el outbox
+sigue abierto para SI4-3. Todo con la API nativa de GLPI 11.0.8 (`CommonDBTM::find/add/update/can`, `Infocom`);
+**sin SQL contra tablas del core**.
+
+- **Mapeo aprobado categoría ⇒ tipo de activo GLPI** (tabla nueva `map_glpi_assettypes`, separada de `map_models`):
+  `glpi_itemtype` + `glpi_model_id` opcional. Ausente, itemtype no soportado o modelo inexistente ⇒ `BLOCKED_CONFIG`.
+  Soportados: `Computer`, `Monitor`, `NetworkEquipment`, `Peripheral`, `Phone`, `Printer`.
+- **Identidad determinista observable en GLPI:** `otherserial` (número de inventario) = `asset_tag` de la saga.
+  Buscar primero por número de inventario y por serial en **todas** las entidades:
+
+  | Situación | Resultado |
+  |---|---|
+  | ningún candidato | crear (`add()` nativo, verificado después) |
+  | 1 inequívoco (propio por tag, o del GLPI Agent por serial) | vincular; si el número de inventario estaba vacío se reclama (GLPI lo bloquea frente al agente) |
+  | > 1, otra entidad, serial o número de inventario distinto, papelera | `MANUAL_REVIEW`, nada se modifica |
+
+  Crash después de `add()` ⇒ el retry encuentra **el mismo** activo. Si la saga ya registró su activo y no aparece ⇒
+  `MANUAL_REVIEW`, nunca un segundo alta.
+- **Infocom exacto:** `value` = `unit_cost` de la unidad convertido exactamente a `decimal(20,4)` (nunca redondeo);
+  moneda distinta de `si4_glpi_infocom_currency` o escala no representable ⇒ `MANUAL_REVIEW` **antes** de crear nada.
+  Proveedor de la compra, `order_number` = n.º de solicitud, `delivery_date` = fecha de recepción. Un Infocom
+  existente sólo se completa en campos propios vacíos; si difiere ⇒ `MANUAL_REVIEW`.
+- **`asset_bridge` 1:1** con `receipt_unit_uuid` (columna nueva, UNIQUE; NULL en puentes SI-1). Un puente SI-1 idéntico
+  se adopta; cualquier coincidencia parcial ⇒ `MANUAL_REVIEW`. Nunca se reasigna.
+- **Snipe no se toca:** al reanudar se relee el activo de Snipe antes de escribir en GLPI; si diverge ⇒ `MANUAL_REVIEW`.
+- **Fencing:** cada escritura en GLPI exige ser dueño del lease con ≥ 30 s restantes (reloj de la BD).
+- **Usuario técnico (mínimo privilegio):** además de `RIGHT_SI4` y `RIGHT_INTEGRATION`, READ/CREATE/UPDATE de los
+  itemtypes mapeados en las entidades de las unidades e `infocom` READ/CREATE/UPDATE. Sin derecho ⇒ `BLOCKED_CONFIG`.
+
 ### Configuración SI-4 (contexto `plugin:companyintegrations`)
 | Clave | Por defecto | Uso |
 |---|---|---|
@@ -96,19 +127,21 @@ SI-4 es dueño de la saga de integración, de la escritura por API en Snipe y de
 | `si4_auth_retry_seconds` | `900` | reintento tras 401/403 |
 | `si4_uncertain_cooldown_seconds` | `300` | enfriamiento tras un POST incierto (≥ max(60, 2 × timeout)) |
 | `si4_worker_id` | `''` | identificador del worker (por defecto `si4:<host>:<pid>`) |
+| `si4_glpi_infocom_currency` | `PYG` | moneda que representan los importes del Infocom de GLPI (SI4-2) |
 
 ## Estructura
 | Ruta | Rol |
 |------|-----|
-| `setup.php` / `hook.php` | metadatos, init, migraciones reversibles (8 tablas; `install()` seguro en upgrade), ACL, config |
+| `setup.php` / `hook.php` | metadatos, init, migraciones reversibles (9 tablas + columnas SI4-2; `install()` seguro en upgrade), ACL, config |
 | `src/Model/` | `AssetBridge · MapCompany · MapUser · AssetTagAlias · ReconResult` |
 | `src/Client/` | `HttpTransport · HttpResponse · CurlTransport · ArrayTransport · SnipeClientConfig · SnipeException · SnipeItClient` |
 | `src/Service/` | `ErrorClassifier · BackoffPolicy · CircuitBreaker · LogSanitizer · CorrelationId · ReconciliationClassifier · LabelConfigChecker · PluginConfig · SnipeConfigFactory · Reconciler · AssetResolver` |
 | `src/Controller/GatewayController.php` | gateway QR (GET, AUTHENTICATED) |
 | `src/Client/` (SI4-1) | `SnipeAssetWriter` (contrato WRITE) · `SnipeEnvelope` · `CreateResult` · `FakeSnipeServer` (doble de prueba del contrato v8.7.2) |
 | `src/Si4/` (SI4-1) | `Si4Worker` · `HandoffSource` (+ `PurchasingHandoffSource`, `InMemoryHandoffSource`) · `SagaStore` (+ `DbSagaStore`, `InMemorySagaStore`) · `MappingResolver` (+ `DbMappingResolver`, `ArrayMappingResolver`, `MappingRules`) · `AssetTagDeriver` · `RemoteAssetMatcher` · `Si4Config` · `Si4Errors` · `WorkerSession` |
+| `src/Si4/` (SI4-2) | `Si4GlpiStage` · `GlpiAssetGateway` (+ `CoreGlpiAssetGateway`, `InMemoryGlpiAssets`) · `GlpiCandidateMatcher` · `InfocomPolicy` · `BridgeStore` (+ `DbBridgeStore`, `InMemoryBridgeStore`) · `BridgeMatcher` · `GlpiMappingResolver` (+ `DbGlpiMappingResolver`, `ArrayGlpiMappingResolver`, `GlpiMappingRules`) |
 | `src/Command/Si4RunCommand.php` | `plugins:companyintegrations:si4-run` (deshabilitado por defecto) |
-| `src/Command/SelftestCommand.php` | `plugins:companyintegrations:selftest` (integración + E2E; SI-4 en `Si4SelftestScenarios`) |
+| `src/Command/SelftestCommand.php` | `plugins:companyintegrations:selftest` (integración + E2E; SI4-1 en `Si4SelftestScenarios`, SI4-2 en `Si4GlpiSelftestScenarios`) |
 | `locales/` | i18n ES/EN |
 | `tests/unit/run.php` | unit + **contract tests** (sin GLPI) |
 
@@ -129,6 +162,10 @@ saneados. Secret scan del repo en verde.
     `PurchasingIntegrationApi` → Snipe fake → saga, sin ack.
   - **SI4-1, crash y lease:** crash después del POST con lease vencido y dos workers ⇒ un solo activo y una sola saga.
   - **SI4-1, resto:** mapeo ausente; secretos; ACL; comando real con sesión técnica; sin efectos laterales.
+  - **SI4-2 (GLPI real):** upgrade 0.3.0 → 0.4.0 con sagas SI4-1 intactas que luego continúan; E2E con el worker del
+    comando real hasta `BRIDGED`; GLPI Agent (vincular + Lockedfield), ambiguo, otra entidad; mapeo/itemtype/modelo;
+    9 crash points con toma por época; los 6 itemtypes soportados; multi-entidad; ACL nativa; Infocom distinto o en
+    otra moneda; sin companyqr ni ack.
 
 ## Limitaciones / deuda técnica (SI-1)
 - **Sin Snipe-IT real en CI:** la integración se valida con **tests de contrato** (transporte fake) —

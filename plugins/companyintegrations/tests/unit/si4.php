@@ -18,7 +18,11 @@ use GlpiPlugin\Companyintegrations\Client\SnipeAssetWriter;
 use GlpiPlugin\Companyintegrations\Client\SnipeClientConfig;
 use GlpiPlugin\Companyintegrations\Client\SnipeEnvelope;
 use GlpiPlugin\Companyintegrations\Client\SnipeException;
+use GlpiPlugin\Companyintegrations\Si4\ArrayGlpiMappingResolver;
 use GlpiPlugin\Companyintegrations\Si4\ArrayMappingResolver;
+use GlpiPlugin\Companyintegrations\Si4\InMemoryBridgeStore;
+use GlpiPlugin\Companyintegrations\Si4\InMemoryGlpiAssets;
+use GlpiPlugin\Companyintegrations\Si4\Si4GlpiStage;
 use GlpiPlugin\Companyintegrations\Si4\AssetTagDeriver;
 use GlpiPlugin\Companyintegrations\Si4\HandoffSource;
 use GlpiPlugin\Companyintegrations\Si4\InMemoryHandoffSource;
@@ -44,6 +48,10 @@ final class Si4World
     public InMemoryHandoffSource $source;
     public InMemorySagaStore $sagas;
     public ArrayMappingResolver $mapping;
+    // SI4-2 (ADR-0021): GLPI en memoria, puente y mapeo categoría ⇒ itemtype/modelo GLPI.
+    public InMemoryGlpiAssets $glpi;
+    public InMemoryBridgeStore $bridges;
+    public ArrayGlpiMappingResolver $glpiMap;
     /** @var array<string,string> */
     public array $cfg;
     /** @var array<int,string> */
@@ -59,6 +67,10 @@ final class Si4World
         $this->source = new InMemoryHandoffSource($clock, [1, 2]);
         $this->sagas = new InMemorySagaStore($clock);
         $this->mapping = new ArrayMappingResolver([1 => [7], 2 => [8]], ['NB' => 31, 'MON' => 32], 5);
+        $this->glpi = new InMemoryGlpiAssets();
+        $this->bridges = new InMemoryBridgeStore();
+        $this->glpiMap = new ArrayGlpiMappingResolver(['NB' => ['glpi_itemtype' => 'Computer', 'glpi_model_id' => 41],
+            'MON' => ['glpi_itemtype' => 'Monitor', 'glpi_model_id' => 0]]);
         $this->cfg = [
             'si4_enabled' => '1', 'si4_asset_tag_prefix' => 'GP2-', 'si4_snipe_status_id' => '5', 'si4_lease_seconds' => '900',
             'si4_max_units_per_run' => '50', 'si4_retry_base_seconds' => '60', 'si4_retry_max_seconds' => '3600',
@@ -97,6 +109,24 @@ final class Si4World
         $conf = new SnipeClientConfig('https://snipe.test', SI4_TOKEN, 5000, 2, 1, 50, 60);
         $writer = new SnipeAssetWriter($this->snipe, $conf, $logger, false);
         return new Si4Worker($this->source, $this->sagas, $this->mapping, $writer, Si4Config::fromArray($cfgOver + $this->cfg), 5000, 2, $logger, $probe, fn (): int => $this->now);
+    }
+
+    /**
+     * Worker SI4-2: el mismo de SI4-1 + `Si4GlpiStage` (activo GLPI, Infocom, asset_bridge).
+     *
+     * @param callable(string,string):void|null $probe @param array<string,string> $cfgOver
+     */
+    public function worker2(?callable $probe = null, array $cfgOver = []): Si4Worker
+    {
+        $logs = &$this->logs;
+        $logger = function (string $l, string $m, array $c) use (&$logs): void {
+            $logs[] = $l . ' ' . $m . ' ' . json_encode($c);
+        };
+        $conf = new SnipeClientConfig('https://snipe.test', SI4_TOKEN, 5000, 2, 1, 50, 60);
+        $writer = new SnipeAssetWriter($this->snipe, $conf, $logger, false);
+        $cfg = Si4Config::fromArray($cfgOver + $this->cfg);
+        $stage = new Si4GlpiStage($this->sagas, $this->glpi, $this->glpiMap, $this->bridges, $cfg->infocomCurrency, $probe);
+        return new Si4Worker($this->source, $this->sagas, $this->mapping, $writer, $cfg, 5000, 2, $logger, $probe, fn (): int => $this->now, $stage);
     }
 
     public function tag(string $uuid): string
