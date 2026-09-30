@@ -110,6 +110,9 @@ crear/vincular activo GLPI → companyqr → etiqueta`. **Idempotente** (reinten
     cliente hace **buscar-primero** (por `snipe_asset_id` ya persistido para ese `receipt_unit_uuid`
     o por serial único) antes de `POST /hardware`, y **persiste `snipe_asset_id` inmediatamente**
     tras crear, de modo que un fallo tras `SNIPE_CREATED` **vincula, no recrea**.
+    *Precisado por [ADR-0020](ADR-0020-si4-snipe-remote-identity-saga.md):* el "buscar-primero" usa un `asset_tag`
+    **determinista** derivado de `receipt_unit_uuid`, para cubrir también un crash **entre** el POST y la
+    persistencia local. El serial no alcanza: es opcional y su unicidad depende de un setting de Snipe.
 12. **Recepciones parciales:** una línea `qty=N` puede recibirse en **varios eventos/lotes**
     (`ordered_qty`/`received_qty`/`pending_qty`, `receipt_batch_id`). Cada `receipt_unit` nace en la
     recepción física; reenviar un lote **no** duplica (UUID + saga).

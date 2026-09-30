@@ -9,6 +9,9 @@
  * de conflictos (sin auto-corregir) y gateway de resolución estable por asset tag.
  *
  * SI-1 NO escribe en Snipe ni modifica activos core de GLPI. Sólo persiste en tablas propias.
+ * SI4-1 (ADR-0020): saga durable por `receipt_unit_uuid` que consume el handoff de Compras SÓLO por
+ * `PurchasingIntegrationApi` y crea-o-reconcilia el activo en Snipe (identidad remota determinista). Todavía NO crea
+ * activos GLPI, ni Infocom, ni invoca companyqr; el worker está deshabilitado por defecto.
  *
  * -------------------------------------------------------------------------
  *  REGLA 0: este plugin NO modifica el core de GLPI (ni el de Snipe-IT). Solo API/hooks
@@ -19,7 +22,7 @@
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYINTEGRATIONS_VERSION', '0.2.0');
+define('PLUGIN_COMPANYINTEGRATIONS_VERSION', '0.3.0');
 
 define('PLUGIN_COMPANYINTEGRATIONS_GLPI_MIN_VERSION', '11.0');
 define('PLUGIN_COMPANYINTEGRATIONS_GLPI_MAX_VERSION', '12.0');
@@ -35,6 +38,8 @@ function plugin_init_companyintegrations() {
     $classes = [
         \GlpiPlugin\Companyintegrations\Model\AssetBridge::class,
         \GlpiPlugin\Companyintegrations\Model\MapCompany::class,
+        \GlpiPlugin\Companyintegrations\Model\MapModel::class,
+        \GlpiPlugin\Companyintegrations\Model\Si4Saga::class,
     ];
     foreach ($classes as $class) {
         if (class_exists($class)) {

@@ -14,6 +14,10 @@
  *   [MULTI-ENT] 🔒 gateway: usuario de entidad A no ve el activo de entidad B (canViewItem).
  *   [READONLY]  🔒 el transporte sólo hizo GET; el activo GLPI no fue modificado.
  *   [LABEL]     configuración de etiquetas (plain_asset_tag + prefijo) detectada por API.
+ *   [SI4-*]     SI4-1 (ADR-0020): persistencia, upgrade 0.2.0→0.3.0, fencing con el reloj de la BD, E2E con Compras
+ *               REAL (outbox ⇒ PurchasingIntegrationApi ⇒ Snipe fake ⇒ saga, sin ack), crash tras el POST + lease
+ *               vencido + dos workers, mapeo ausente, secretos, ACL y ausencia de efectos laterales (ver
+ *               Si4SelftestScenarios).
  *
  * @license GPL-3.0-or-later
  */
@@ -46,6 +50,8 @@ use Symfony\Component\Routing\Annotation\Route;
 
 final class SelftestCommand extends Command
 {
+    use Si4SelftestScenarios;
+
     private int $failures = 0;
     private OutputInterface $out;
     private string $suffix;
@@ -59,7 +65,7 @@ final class SelftestCommand extends Command
     protected function configure(): void
     {
         $this->setName('plugins:companyintegrations:selftest')
-            ->setDescription('Pruebas de integración + E2E de SI-1 (reconciliación read-only, bridge, gateway, multi-entidad).');
+            ->setDescription('Pruebas de integración + E2E de SI-1 (reconciliación read-only, bridge, gateway, multi-entidad) y SI4-1 (saga + Snipe write).');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -79,6 +85,7 @@ final class SelftestCommand extends Command
         $this->scenarioCreateBridgeIdempotent();
         $this->scenarioGatewayMultiEntity();
         $this->scenarioLabelConfig();
+        $this->runSi4Scenarios();
         $this->cleanup();
 
         if ($this->failures > 0) {
@@ -498,7 +505,7 @@ final class SelftestCommand extends Command
         /** @var \DBmysql $DB */
         global $DB;
         try {
-            foreach (['asset_bridge', 'asset_tag_aliases', 'map_companies', 'map_users', 'recon'] as $t) {
+            foreach (['asset_bridge', 'asset_tag_aliases', 'map_companies', 'map_users', 'recon', 'si4_sagas', 'si4_saga_log', 'map_models'] as $t) {
                 $DB->doQuery("DELETE FROM `glpi_plugin_companyintegrations_{$t}` WHERE 1=1");
             }
             foreach ($this->createdComputers as $id) {

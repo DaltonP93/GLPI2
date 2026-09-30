@@ -38,5 +38,6 @@ las cosas son como son.
 | [0017](ADR-0017-glpi-security-key-hardening.md) | Pre-provisión de `glpicrypt.key` (workaround del bug `kernel.secret` de GLPI 11) | Aceptado |
 | [0018](ADR-0018-companypurchasing-approvals.md) | `companypurchasing` P2D-2 — circuito de aprobación sobre workflow + firma | Propuesto |
 | [0019](ADR-0019-companypurchasing-receiving.md) | `companypurchasing` P2D-3 — recepción física, costo por unidad y handoff a SI-4 | Propuesto |
+| [0020](ADR-0020-si4-snipe-remote-identity-saga.md) | SI-4 (SI4-1) — identidad remota determinista en Snipe-IT y saga durable por unidad | Propuesto |
 
 > Plantilla para nuevos ADR: [`adr-template.md`](adr-template.md).

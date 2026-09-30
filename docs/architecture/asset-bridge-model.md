@@ -37,11 +37,15 @@ Tablas **propias** (nunca DB de Snipe ni SQL directo a core). Migraciones revers
 - Cada unidad tiene **su propio** serial, `snipe_asset_id`/`snipe_asset_tag`, activo GLPI y fila
   `asset_bridge`. Reintentar el alta con el **mismo `receipt_unit_uuid`** **no** crea un segundo
   activo.
-- **Idempotencia del request saliente a Snipe** (su API **no** tiene idempotency key nativa):
-  antes de `POST /hardware`, el cliente hace **buscar-primero** (por `snipe_asset_id` ya
-  persistido para ese `receipt_unit_uuid`, o por un marcador único que nosotros controlamos —
-  serial); y **persiste `snipe_asset_id` inmediatamente** tras crear, de modo que un reintento
-  tras `SNIPE_CREATED` **vincula**, no recrea.
+- **Idempotencia del request saliente a Snipe** (su API **no** tiene idempotency key nativa). **Precisado por
+  ADR-0020** tras verificar el contrato real de Snipe-IT v8.7.2; el serial no alcanza porque es opcional y su unicidad
+  depende de un setting.
+  - La identidad remota es **determinista**: `asset_tag = <prefijo><32 hex del receipt_unit_uuid>`. Se conoce ANTES
+    del POST.
+  - Cada intento **busca primero** por ese tag (`bytag?deleted=true`), incluso tras un crash entre el POST y la
+    persistencia local.
+  - `snipe_asset_id` se **persiste en cuanto se conoce**.
+  - Resultado: un reintento **vincula**, no recrea.
 - **Alta/lectura desde Snipe (SI-1):** identidad = `snipe_asset_id` (+ `snipe_asset_tag`). Un
   `asset_tag` **no** puede mapear a dos activos (garantizado por los UNIQUE).
 

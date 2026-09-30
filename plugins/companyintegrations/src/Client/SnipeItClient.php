@@ -80,7 +80,10 @@ final class SnipeItClient
         return is_array($rows) ? $rows : [];
     }
 
-    /** @return array<string,mixed>|null  activo o null si no existe (404). */
+    /**
+     * @return array<string,mixed>|null  activo o null si no existe. Snipe v8.7.2 responde "no existe" con HTTP 200 +
+     *                                   `status:"error"` (no 404): ambos casos ⇒ null (ADR-0020, hecho 2).
+     */
     public function getHardwareByTag(string $tag): ?array
     {
         $resp = $this->get('/api/v1/hardware/bytag/' . rawurlencode($tag));
@@ -88,10 +91,10 @@ final class SnipeItClient
             return null;
         }
         $data = $resp->json();
-        return is_array($data) ? $data : null;
+        return is_array($data) && !SnipeEnvelope::isError($data) ? $data : null;
     }
 
-    /** @return array<string,mixed>|null */
+    /** @return array<string,mixed>|null  (misma regla: 404 o 200 + `status:"error"` ⇒ null) */
     public function getHardwareById(int $id): ?array
     {
         $resp = $this->get('/api/v1/hardware/' . $id);
@@ -99,7 +102,7 @@ final class SnipeItClient
             return null;
         }
         $data = $resp->json();
-        return is_array($data) ? $data : null;
+        return is_array($data) && !SnipeEnvelope::isError($data) ? $data : null;
     }
 
     /**
