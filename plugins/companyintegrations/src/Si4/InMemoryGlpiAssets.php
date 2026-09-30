@@ -13,14 +13,21 @@ declare(strict_types=1);
 
 namespace GlpiPlugin\Companyintegrations\Si4;
 
+use GlpiPlugin\Companypurchasing\Service\ReferenceValidator;
+
 final class InMemoryGlpiAssets implements GlpiAssetGateway
 {
     /** @var array<string,array<int,array<string,mixed>>> itemtype ⇒ id ⇒ fila */
     public array $items = [];
     /** @var array<int,array<string,mixed>> */
     public array $infocoms = [];
-    /** @var array<int,bool> id ⇒ en papelera */
-    public array $suppliers = [3 => false];
+    /** @var array<int,array{deleted:bool, entity:int, recursive:bool}> proveedores (por defecto: 3 en la entidad 1, 4 en la 2) */
+    public array $suppliers = [
+        3 => ['deleted' => false, 'entity' => 1, 'recursive' => false],
+        4 => ['deleted' => false, 'entity' => 2, 'recursive' => false],
+    ];
+    /** @var array<int,int> árbol VIVO de entidades: id ⇒ padre (0 = raíz, cuyo padre es -1) */
+    public array $entityParent = [0 => -1, 1 => 0, 2 => 0];
     /** @var array<string,array<int,bool>> itemtype ⇒ modelos existentes */
     public array $models = ['Computer' => [41 => true], 'Monitor' => [42 => true]];
     /** @var array<int,bool> entidades a las que accede el usuario de la sesión */
@@ -109,9 +116,15 @@ final class InMemoryGlpiAssets implements GlpiAssetGateway
         return true;
     }
 
-    public function supplierUsable(int $supplierId): bool
+    public function supplierUsable(int $supplierId, int $entityId): bool
     {
-        return array_key_exists($supplierId, $this->suppliers) && $this->suppliers[$supplierId] === false;
+        $s = $this->suppliers[$supplierId] ?? null;
+        if ($s === null || $s['deleted']) {
+            return false;
+        }
+        // Mismo núcleo puro que usa Compras (y, vía `assertReferenceForEntity`, `CoreGlpiAssetGateway`).
+        return ReferenceValidator::isEntityApplicableInChain($s['entity'], $s['recursive'], $entityId,
+            fn (int $id): ?int => array_key_exists($id, $this->entityParent) ? $this->entityParent[$id] : null);
     }
 
     public function getInfocom(string $itemtype, int $id): ?array

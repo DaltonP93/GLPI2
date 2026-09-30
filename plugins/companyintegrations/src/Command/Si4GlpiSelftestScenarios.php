@@ -18,6 +18,12 @@
  *   [SI4G-MULTI-ENT] entidad de la unidad respetada y ACL de entidad del usuario técnico
  *   [SI4G-ACL]       sin CREATE del itemtype / sin Infocom ⇒ BLOCKED_CONFIG sin escribir
  *   [SI4G-INFOCOM]   Infocom existente distinto / moneda distinta ⇒ MANUAL_REVIEW sin pisar
+ *   [SI4G-PIN]       destino GLPI pinneado por saga: el retry usa el modelo pinneado aunque el mapeo cambie; una unidad
+ *                    nueva usa el vigente; modelo pinneado eliminado ⇒ MANUAL_REVIEW; el pin no se reescribe
+ *   [SI4G-CLAIM-RACE] reclamo del GLPI Agent y otro candidato (mismo serial / mismo tag) justo después ⇒ MANUAL_REVIEW,
+ *                    sin vínculo, Infocom ni puente
+ *   [SI4G-SUPPLIER]  proveedor movido a otra rama antes de SI4-2 o entre el activo y el Infocom ⇒ MANUAL_REVIEW sin
+ *                    Infocom ni puente; proveedor recursivo de un ancestro ⇒ permitido
  *   [SI4G-NO-SIDE-EFFECTS] sin companyqr, sin ack, Snipe sólo hardware/statuslabels
  *
  * @license GPL-3.0-or-later
@@ -38,6 +44,7 @@ use GlpiPlugin\Companyintegrations\Si4\CoreGlpiAssetGateway;
 use GlpiPlugin\Companyintegrations\Si4\DbBridgeStore;
 use GlpiPlugin\Companyintegrations\Si4\DbGlpiMappingResolver;
 use GlpiPlugin\Companyintegrations\Si4\DbSagaStore;
+use GlpiPlugin\Companyintegrations\Si4\GlpiMappingRules;
 use GlpiPlugin\Companyintegrations\Si4\SagaState;
 use GlpiPlugin\Companyintegrations\Si4\Si4Config;
 use GlpiPlugin\Companyintegrations\Si4\Si4GlpiStage;
@@ -57,7 +64,7 @@ trait Si4GlpiSelftestScenarios
     ];
     private const SI4G_SAGA_COLS_NEW = [
         'glpi_itemtype', 'glpi_items_id', 'glpi_entity_id', 'glpi_outcome', 'glpi_create_calls', 'glpi_infocom_id',
-        'infocom_outcome', 'asset_bridge_id', 'resume_state',
+        'infocom_outcome', 'asset_bridge_id', 'resume_state', 'glpi_mapping_id', 'glpi_model_id', 'glpi_mapping_hash',
     ];
     private const SI4G_BRIDGE_COLS_030 = [
         'id', 'snipe_asset_id', 'snipe_asset_tag', 'glpi_itemtype', 'glpi_items_id', 'glpi_entity_id', 'serial', 'sync_status',
@@ -65,6 +72,12 @@ trait Si4GlpiSelftestScenarios
     ];
 
     private int $si4gModel = 0;
+    private int $si4gMapId = 0;
+    /** @var array<int,int> modelos y proveedores extra creados por los escenarios (para limpiar) */
+    private array $si4gModels = [];
+    private array $si4gSuppliers = [];
+    /** Proveedor de la entidad E2 (el de la compra está en E1, sin recursividad) */
+    private int $si4gSupplierE2 = 0;
     private string $si4gCategory = '';
     private int $si4gSnipeSeq = 0;
     /** @var array<int,array{0:string,1:int}> activos GLPI creados por los escenarios (para limpiar) */
@@ -94,6 +107,9 @@ trait Si4GlpiSelftestScenarios
             $this->si4gMultiEntity();
             $this->si4gAcl();
             $this->si4gInfocom();
+            $this->si4gPin();
+            $this->si4gClaimRace();
+            $this->si4gSupplier();
             $this->si4gNoSideEffects();
         } catch (\Throwable $e) {
             $this->check('[SI4G-E2E] sin excepciones: ' . $e->getMessage() . ' @' . basename($e->getFile()) . ':' . $e->getLine(), false);
@@ -186,9 +202,10 @@ trait Si4GlpiSelftestScenarios
         $this->si4AsAdmin([0, $this->si4E, $this->si4E2]);
         $this->si4gModel = (int) (new \ComputerModel())->add(['name' => 'SI4G-NB-' . $this->suffix]);
         $this->si4gCategory = $this->si4Category; // misma categoría de la línea de compra que SI4-1
-        (new MapGlpiAssetType())->add(['category_key' => $this->si4gCategory, 'glpi_itemtype' => 'Computer', 'glpi_model_id' => $this->si4gModel, 'is_approved' => 1]);
-        $this->check('[SI4G-E2E] fixture: modelo GLPI y mapeo aprobado categoría ⇒ Computer', $this->si4gModel > 0
-            && countElementsInTable(MapGlpiAssetType::getTable(), ['category_key' => $this->si4gCategory, 'is_approved' => 1]) === 1);
+        $this->si4gMapId = (int) (new MapGlpiAssetType())->add(['category_key' => $this->si4gCategory, 'glpi_itemtype' => 'Computer', 'glpi_model_id' => $this->si4gModel, 'is_approved' => 1]);
+        $this->si4gSupplierE2 = $this->si4gMakeSupplier('SI4G-SUP-E2-', $this->si4E2, false);
+        $this->check('[SI4G-E2E] fixture: modelo GLPI, mapeo aprobado categoría ⇒ Computer y proveedor de E2', $this->si4gModel > 0 && $this->si4gMapId > 0
+            && $this->si4gSupplierE2 > 0 && countElementsInTable(MapGlpiAssetType::getTable(), ['category_key' => $this->si4gCategory, 'is_approved' => 1]) === 1);
     }
 
     // ------------------------------------------------------------------ [SI4G-RESUME]
@@ -259,6 +276,8 @@ trait Si4GlpiSelftestScenarios
             $okPc = $pc->getFromDB((int) ($s['glpi_items_id'] ?? 0));
             $this->si4gTrack('Computer', (int) ($s['glpi_items_id'] ?? 0));
             $asset = $asset && $okPc && ($s['state'] ?? '') === SagaState::BRIDGED && (int) $pc->fields['entities_id'] === $this->si4E
+                && (int) ($s['glpi_mapping_id'] ?? 0) === $this->si4gMapId && (int) ($s['glpi_model_id'] ?? -1) === $this->si4gModel
+                && ($s['glpi_mapping_hash'] ?? '') === GlpiMappingRules::pinHash($this->si4gMapId, $this->si4gCategory, 'Computer', $this->si4gModel)
                 && (string) $pc->fields['serial'] === (string) $payload['serial'] && (string) $pc->fields['otherserial'] === $tag
                 && (int) $pc->fields['computermodels_id'] === $this->si4gModel && (string) $pc->fields['name'] === 'Notebook SI4'
                 && (int) $pc->fields['is_recursive'] === 0 && $this->si4gCount('Computer', $tag) === 1;
@@ -276,7 +295,7 @@ trait Si4GlpiSelftestScenarios
             $leased = $leased && ($api->getHandoff($u)['status'] ?? '') === 'LEASED';
             $noQr = $noQr && $this->si4gQrCode($pc) === null;
         }
-        $this->check('[SI4G-E2E] Computer nativo: entidad de la unidad, serial, número de inventario = tag, modelo del mapeo, nombre de la línea', $asset);
+        $this->check('[SI4G-E2E] Computer nativo: entidad de la unidad, serial, número de inventario = tag, modelo del mapeo (pinneado en la saga), nombre de la línea', $asset);
         $this->check('[SI4G-E2E] Infocom nativo: costo EXACTO de la unidad (2500.0000), proveedor de la compra, n.º de solicitud, fecha de recepción', $infocom);
         $this->check('[SI4G-E2E] asset_bridge 1:1 (uuid, Snipe id/tag, activo GLPI, entidad) + alias vigente', $bridge);
         $this->check('[SI4G-E2E] 🔒 NO acknowledgeProcessed: el outbox sigue LEASED (SI4-3 pendiente)', $leased);
@@ -557,6 +576,195 @@ trait Si4GlpiSelftestScenarios
             && $o['class'] === 'infocom_currency' && $this->si4gCount('Computer', $tag2) === 0);
     }
 
+    // ------------------------------------------------------------------ [SI4G-PIN]
+
+    private function si4gPin(): void
+    {
+        $this->out->writeln('== [SI4G-PIN] destino GLPI pinneado por saga: el retry nunca relee el mapeo vivo ==');
+        $this->si4AsAdmin([0, $this->si4E, $this->si4E2]);
+        $modelA = $this->si4gModel;
+        $modelB = (int) (new \ComputerModel())->add(['name' => 'SI4G-NB-B-' . $this->suffix]);
+        $modelC = (int) (new \ComputerModel())->add(['name' => 'SI4G-NB-C-' . $this->suffix]);
+        array_push($this->si4gModels, $modelB, $modelC);
+        $cat = 'SI4G-PIN-' . $this->suffix;
+        $map = new MapGlpiAssetType();
+        $mapId = (int) $map->add(['category_key' => $cat, 'glpi_itemtype' => 'Computer', 'glpi_model_id' => $modelA, 'is_approved' => 1]);
+        $crash = static function (string $p): void {
+            if ($p === 'before_glpi_search') {
+                throw new SimulatedCrash('muere después del pin');
+            }
+        };
+
+        // (1) primer intento: pin NOTEBOOK ⇒ Computer + modelo A; muere antes de buscar/crear.
+        [$u, $hA, $payload, $tag] = $this->si4gSynthetic($this->si4E, 'SI4G-PIN-' . $this->suffix . '-1', $cat);
+        $this->si4gAsWorker([$this->si4E]);
+        try {
+            $this->si4gStage($crash)->advance($u, $hA, $payload, 'st-g-pin');
+        } catch (SimulatedCrash) {
+        }
+        $s = (new DbSagaStore())->get($u) ?? [];
+        $this->check('[SI4G-PIN] primer uso ⇒ saga con mapeo, itemtype, modelo A y huella pinneados; ningún activo aún', (int) ($s['glpi_mapping_id'] ?? 0) === $mapId
+            && ($s['glpi_itemtype'] ?? '') === 'Computer' && (int) ($s['glpi_model_id'] ?? -1) === $modelA
+            && ($s['glpi_mapping_hash'] ?? '') === GlpiMappingRules::pinHash($mapId, $cat, 'Computer', $modelA) && $this->si4gCount('Computer', $tag) === 0);
+
+        // (2) el administrador cambia la MISMA fila del mapeo al modelo B; retry de la misma saga ⇒ sigue en A.
+        $this->si4AsAdmin([0, $this->si4E, $this->si4E2]);
+        $map->update(['id' => $mapId, 'glpi_model_id' => $modelB]);
+        $hB = $this->si4gTakeover($u, 2);
+        $this->si4gAsWorker([$this->si4E]);
+        $o = $this->si4gStage()->advance($u, $hB, $payload, 'st-g-pin');
+        $s = (new DbSagaStore())->get($u) ?? [];
+        $pc = new Computer();
+        $pc->getFromDB((int) ($s['glpi_items_id'] ?? 0));
+        $this->si4gTrack('Computer', (int) $pc->getID());
+        $this->check('[SI4G-PIN] 🔒 mapeo cambiado a B ⇒ el retry de la MISMA saga crea con el modelo A pinneado', $o['kind'] === Si4GlpiStage::O_BRIDGED
+            && (int) ($pc->fields['computermodels_id'] ?? 0) === $modelA && (int) ($s['glpi_model_id'] ?? 0) === $modelA);
+
+        // (3) una unidad NUEVA con la misma categoría usa el mapeo vigente (B).
+        [$u2, $h2, $payload2] = $this->si4gSynthetic($this->si4E, 'SI4G-PIN-' . $this->suffix . '-2', $cat);
+        $o = $this->si4gStage()->advance($u2, $h2, $payload2, 'st-g-pin');
+        $s2 = (new DbSagaStore())->get($u2) ?? [];
+        $pc2 = new Computer();
+        $pc2->getFromDB((int) ($s2['glpi_items_id'] ?? 0));
+        $this->si4gTrack('Computer', (int) $pc2->getID());
+        $this->check('[SI4G-PIN] unidad nueva ⇒ modelo B del mapeo vigente', $o['kind'] === Si4GlpiStage::O_BRIDGED
+            && (int) ($pc2->fields['computermodels_id'] ?? 0) === $modelB && (int) ($s2['glpi_model_id'] ?? 0) === $modelB);
+        $this->check('[SI4G-PIN] 🔒 el pin es inmutable en la BD: re-pinnear ⇒ false y nada cambia', !(new DbSagaStore())->transition($u2, $h2, SagaState::BRIDGED,
+            ['glpi_mapping_id' => $mapId, 'glpi_itemtype' => 'Monitor', 'glpi_model_id' => 0, 'glpi_mapping_hash' => str_repeat('a', 64)], 'st-repin')
+            && (((new DbSagaStore())->get($u2) ?? [])['glpi_itemtype'] ?? '') === 'Computer' && (int) (((new DbSagaStore())->get($u2) ?? [])['glpi_model_id'] ?? 0) === $modelB);
+
+        // (4) el modelo pinneado se elimina ⇒ MANUAL_REVIEW, sin alta y sin pasar en silencio al modelo del mapeo vigente.
+        $cat3 = 'SI4G-PIN3-' . $this->suffix;
+        $this->si4AsAdmin([0, $this->si4E, $this->si4E2]);
+        $map3 = new MapGlpiAssetType();
+        $map3Id = (int) $map3->add(['category_key' => $cat3, 'glpi_itemtype' => 'Computer', 'glpi_model_id' => $modelC, 'is_approved' => 1]);
+        [$u3, $h3a, $payload3, $tag3] = $this->si4gSynthetic($this->si4E, 'SI4G-PIN-' . $this->suffix . '-3', $cat3);
+        $this->si4gAsWorker([$this->si4E]);
+        try {
+            $this->si4gStage($crash)->advance($u3, $h3a, $payload3, 'st-g-pin');
+        } catch (SimulatedCrash) {
+        }
+        $this->si4AsAdmin([0, $this->si4E, $this->si4E2]);
+        $purged = (new \ComputerModel())->delete(['id' => $modelC], true) && !(new \ComputerModel())->getFromDB($modelC);
+        $map3->update(['id' => $map3Id, 'glpi_model_id' => $modelB]);
+        $h3 = $this->si4gTakeover($u3, 2);
+        $this->si4gAsWorker([$this->si4E]);
+        $o = $this->si4gStage()->advance($u3, $h3, $payload3, 'st-g-pin');
+        $s3 = (new DbSagaStore())->get($u3) ?? [];
+        $this->check('[SI4G-PIN] 🔒 modelo pinneado eliminado ⇒ MANUAL_REVIEW (glpi_pin_invalid), sin alta ni cambio de modelo', $purged
+            && $o['kind'] === Si4GlpiStage::O_MANUAL && $o['class'] === 'glpi_pin_invalid' && $this->si4gCount('Computer', $tag3) === 0
+            && (int) ($s3['glpi_model_id'] ?? 0) === $modelC && ($s3['glpi_items_id'] ?? null) === null);
+    }
+
+    // ------------------------------------------------------------------ [SI4G-CLAIM-RACE]
+
+    private function si4gClaimRace(): void
+    {
+        $this->out->writeln('== [SI4G-CLAIM-RACE] reclamo del GLPI Agent + otro candidato justo después ⇒ MANUAL_REVIEW ==');
+        foreach (['serial' => 'mismo serial', 'tag' => 'mismo número de inventario'] as $variant => $label) {
+            $serial = 'SI4G-RACE-' . $variant . '-' . $this->suffix;
+            $this->si4AsAdmin([0, $this->si4E, $this->si4E2]);
+            $agent = (int) (new Computer())->add(['name' => 'race-' . $this->suffix, 'entities_id' => $this->si4E, 'serial' => $serial, 'is_dynamic' => 1]);
+            $this->si4gTrack('Computer', $agent);
+            [$u, $h, $payload, $tag] = $this->si4gSynthetic($this->si4E, $serial, $this->si4gCategory);
+            $this->si4gAsWorker([$this->si4E]);
+            $other = 0;
+            $o = $this->si4gStage(function (string $p) use ($variant, $serial, $tag, &$other): void {
+                if ($p === 'after_glpi_claim') {
+                    // Carrera determinista: justo después del reclamo aparece otro Computer (alta nativa).
+                    $other = (int) (new Computer())->add(['name' => 'race2-' . $this->suffix, 'entities_id' => $this->si4E, 'is_dynamic' => 1]
+                        + ($variant === 'serial' ? ['serial' => $serial] : ['otherserial' => $tag]));
+                }
+            })->advance($u, $h, $payload, 'st-g-race');
+            $this->si4gTrack('Computer', $other);
+            $s = (new DbSagaStore())->get($u) ?? [];
+            $this->check("[SI4G-CLAIM-RACE] 🔒 {$label} tras el reclamo ⇒ AMBIGUOUS ⇒ MANUAL_REVIEW (glpi_claim_verify)", $other > 0
+                && $o['kind'] === Si4GlpiStage::O_MANUAL && $o['class'] === 'glpi_claim_verify' && str_contains($o['why'], 'ambiguous'));
+            $this->check("[SI4G-CLAIM-RACE] 🔒 {$label}: vínculo NO consolidado (sin glpi_items_id), sin Infocom ni puente", ($s['glpi_items_id'] ?? null) === null
+                && ($s['state'] ?? '') === SagaState::SNIPE_CREATED
+                && count((new \Infocom())->find(['itemtype' => 'Computer', 'items_id' => [$agent, $other]])) === 0
+                && countElementsInTable(AssetBridge::getTable(), ['receipt_unit_uuid' => $u]) === 0);
+        }
+    }
+
+    // ------------------------------------------------------------------ [SI4G-SUPPLIER]
+
+    private function si4gSupplier(): void
+    {
+        $this->out->writeln('== [SI4G-SUPPLIER] el proveedor del Infocom debe seguir siendo aplicable a la entidad de la unidad ==');
+        // (1) válido al comprar/recibir (misma entidad); se mueve a otra rama ANTES de SI4-2.
+        $moved = $this->si4gMakeSupplier('SI4G-SUP-MV1-', $this->si4E, false);
+        [$u, $h, $payload, $tag] = $this->si4gSynthetic($this->si4E, null, $this->si4gCategory);
+        $payload['supplier_id'] = $moved;
+        $okMove = $this->si4gMoveSupplier($moved, $this->si4E2);
+        $this->si4gAsWorker([$this->si4E]);
+        $o = $this->si4gStage()->advance($u, $h, $payload, 'st-g-sup');
+        $this->check('[SI4G-SUPPLIER] 🔒 proveedor movido a otra rama antes de SI4-2 ⇒ MANUAL_REVIEW (infocom_supplier), sin activo, Infocom ni puente', $okMove
+            && $o['kind'] === Si4GlpiStage::O_MANUAL && $o['class'] === 'infocom_supplier' && $this->si4gCount('Computer', $tag) === 0
+            && countElementsInTable(AssetBridge::getTable(), ['receipt_unit_uuid' => $u]) === 0);
+
+        // (2) se mueve DESPUÉS del activo y antes del Infocom (bloqueado por ACL) ⇒ al reanudar no escribe el Infocom.
+        $moved2 = $this->si4gMakeSupplier('SI4G-SUP-MV2-', $this->si4E, false);
+        [$u2, $h2, $payload2, $tag2] = $this->si4gSynthetic($this->si4E, 'SI4G-SUP-' . $this->suffix . '-2', $this->si4gCategory);
+        $payload2['supplier_id'] = $moved2;
+        $this->si4gAsWorker([$this->si4E], ['infocom' => READ]);
+        $o1 = $this->si4gStage()->advance($u2, $h2, $payload2, 'st-g-sup');
+        $s2 = (new DbSagaStore())->get($u2) ?? [];
+        $this->si4gTrack('Computer', (int) ($s2['glpi_items_id'] ?? 0));
+        $okMove2 = $this->si4gMoveSupplier($moved2, $this->si4E2);
+        $this->si4gAsWorker([$this->si4E]);
+        $o = $this->si4gStage()->advance($u2, $h2, $payload2, 'st-g-sup');
+        $this->check('[SI4G-SUPPLIER] 🔒 proveedor movido entre el activo y el Infocom ⇒ MANUAL_REVIEW, sin Infocom ni puente', $okMove2
+            && $o1['kind'] === Si4GlpiStage::O_BLOCKED && $this->si4gCount('Computer', $tag2) === 1
+            && $o['kind'] === Si4GlpiStage::O_MANUAL && $o['class'] === 'infocom_supplier'
+            && count((new \Infocom())->find(['itemtype' => 'Computer', 'items_id' => (int) ($s2['glpi_items_id'] ?? 0)])) === 0
+            && countElementsInTable(AssetBridge::getTable(), ['receipt_unit_uuid' => $u2]) === 0);
+
+        // (3) positivo: proveedor RECURSIVO de un ancestro (raíz) ⇒ permitido.
+        $rec = $this->si4gMakeSupplier('SI4G-SUP-REC-', 0, true);
+        [$u3, $h3, $payload3] = $this->si4gSynthetic($this->si4E, 'SI4G-SUP-' . $this->suffix . '-3', $this->si4gCategory);
+        $payload3['supplier_id'] = $rec;
+        $this->si4gAsWorker([$this->si4E]);
+        $o = $this->si4gStage()->advance($u3, $h3, $payload3, 'st-g-sup');
+        $s3 = (new DbSagaStore())->get($u3) ?? [];
+        $this->si4gTrack('Computer', (int) ($s3['glpi_items_id'] ?? 0));
+        $ic = new \Infocom();
+        $this->check('[SI4G-SUPPLIER] proveedor recursivo de un ancestro ⇒ permitido (Infocom con ese proveedor)', $o['kind'] === Si4GlpiStage::O_BRIDGED
+            && $ic->getFromDBforDevice('Computer', (int) ($s3['glpi_items_id'] ?? 0)) && (int) $ic->fields['suppliers_id'] === $rec);
+
+        // (4) negativo: proveedor de un ancestro SIN recursividad ⇒ MANUAL_REVIEW.
+        $flat = $this->si4gMakeSupplier('SI4G-SUP-FLAT-', 0, false);
+        [$u4, $h4, $payload4, $tag4] = $this->si4gSynthetic($this->si4E, null, $this->si4gCategory);
+        $payload4['supplier_id'] = $flat;
+        $this->si4gAsWorker([$this->si4E]);
+        $o = $this->si4gStage()->advance($u4, $h4, $payload4, 'st-g-sup');
+        $this->check('[SI4G-SUPPLIER] 🔒 proveedor de un ancestro NO recursivo ⇒ MANUAL_REVIEW, sin activo', $o['kind'] === Si4GlpiStage::O_MANUAL
+            && $o['class'] === 'infocom_supplier' && $this->si4gCount('Computer', $tag4) === 0);
+    }
+
+    /** Proveedor fixture con el `is_recursive` EXACTO pedido (se corrige si `add()` no lo honra). */
+    private function si4gMakeSupplier(string $prefix, int $entity, bool $recursive): int
+    {
+        $this->si4AsAdmin([0, $this->si4E, $this->si4E2]);
+        $want = $recursive ? 1 : 0;
+        $sup = new \Supplier();
+        $id = (int) $sup->add(['name' => $prefix . $this->suffix, 'entities_id' => $entity, 'is_recursive' => $want]);
+        if ($id > 0 && $sup->getFromDB($id) && (int) ($sup->fields['is_recursive'] ?? 0) !== $want) {
+            $sup->update(['id' => $id, 'is_recursive' => $want]);
+        }
+        $this->si4gSuppliers[] = $id;
+        return $id;
+    }
+
+    /** Mueve un proveedor a otra entidad con la API nativa y confirma el cambio releyendo. */
+    private function si4gMoveSupplier(int $id, int $entity): bool
+    {
+        $this->si4AsAdmin([0, $this->si4E, $this->si4E2]);
+        $sup = new \Supplier();
+        $sup->update(['id' => $id, 'entities_id' => $entity]);
+        return $sup->getFromDB($id) && (int) $sup->fields['entities_id'] === $entity;
+    }
+
     // ------------------------------------------------------------------ [SI4G-NO-SIDE-EFFECTS]
 
     private function si4gNoSideEffects(): void
@@ -643,7 +851,7 @@ trait Si4GlpiSelftestScenarios
             'snipe_status_id' => 5, 'remote_create_calls' => 1], 'st');
         $payload = ['schema_version' => 1, 'receipt_unit_uuid' => $u, 'request_id' => $this->si4Req, 'request_number' => 'SC-ST-G-' . $this->suffix,
             'item_id' => $this->si4Line, 'entity_id' => $entity, 'serial' => $serial, 'description' => 'SI4-2 selftest', 'category' => $category,
-            'supplier_id' => (int) $this->si4Suppliers[0], 'currency' => 'PYG', 'currency_scale' => 0, 'unit_cost' => '2500',
+            'supplier_id' => $entity === $this->si4E2 ? $this->si4gSupplierE2 : (int) $this->si4Suppliers[0], 'currency' => 'PYG', 'currency_scale' => 0, 'unit_cost' => '2500',
             'received_at' => date('c'), 'correlation_id' => 'st-g'];
         return [$u, $h, $payload, $tag];
     }
@@ -742,8 +950,15 @@ trait Si4GlpiSelftestScenarios
                 }
                 (new $type())->delete(['id' => $id], true);
             }
-            if ($this->si4gModel > 0) {
-                (new \ComputerModel())->delete(['id' => $this->si4gModel], true);
+            foreach (array_merge([$this->si4gModel], $this->si4gModels) as $model) {
+                if ($model > 0 && (new \ComputerModel())->getFromDB($model)) {
+                    (new \ComputerModel())->delete(['id' => $model], true);
+                }
+            }
+            foreach (array_merge([$this->si4gSupplierE2], $this->si4gSuppliers) as $sup) {
+                if ($sup > 0) {
+                    (new \Supplier())->delete(['id' => $sup], true);
+                }
             }
         } catch (\Throwable) {
             // best-effort; el stack de CI es efímero.

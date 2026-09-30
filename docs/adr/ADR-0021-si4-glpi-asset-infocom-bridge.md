@@ -26,7 +26,8 @@ reasignar puentes. Todo sin tocar el core ni hacer SQL sobre tablas del core.
 | 8 | `glpi_infocoms`: `UNIQUE(itemtype, items_id)`; `value` `decimal(20,4)`; `buy_date` (compra), `order_date`, `delivery_date`, `use_date`, `warranty_date`; `suppliers_id`; `order_number`; **sin columna de moneda** | `glpi-empty.sql` |
 | 9 | `Infocom::getFromDBforDevice($itemtype, $id)`; `Infocom::prepareInputForAdd()` rechaza un segundo Infocom del mismo activo; derechos `infocom` CREATE/UPDATE | `Infocom.php` 266, 432, 2204-2227 |
 | 10 | `auto_create_infocoms` (por defecto `0`) crea un Infocom vacío tras `add()` salvo `disable_infocom_creation` | `CommonDBTM::add()`, `install/empty_data.php` |
-| 11 | `Supplier` es un `CommonDBTM` con papelera (`is_deleted`) | `Supplier.php` |
+| 11 | `Supplier` es un `CommonDBTM` con papelera (`is_deleted`), `entities_id` e `is_recursive`; `update()` puede cambiarle la entidad | `Supplier.php`, `CommonDBTM::update()` |
+| 12 | `getAncestorsOf()`/`getSonsOf()` leen `ancestors_cache`/`sons_cache` y `$GLPI_CACHE`, que pueden quedar desactualizados al mover una entidad; `Entity::getFromDB()` lee el `entities_id` vigente | `src/DbUtils.php`, `Entity.php` |
 
 Snipe-IT: SI4-2 sólo **relee** con `GET /api/v1/hardware/bytag/{tag}?deleted=true`, contrato ya verificado en v8.7.2 (ADR-0020, hechos 2, 6 y 10). No hay escrituras nuevas en Snipe.
 
@@ -43,6 +44,16 @@ el plugin propio con API soportada de GLPI (`CommonDBTM`, `Infocom`, `Supplier`,
    - mapeo ausente/no aprobado ⇒ `BLOCKED_CONFIG`;
    - `itemtype` fuera de los soportados ⇒ `BLOCKED_CONFIG`;
    - modelo inexistente o de otra clase ⇒ `BLOCKED_CONFIG`.
+
+   **Pinning por saga.** El primer uso válido del mapeo fija el destino en la saga: `glpi_mapping_id`,
+   `glpi_itemtype`, `glpi_model_id` y `glpi_mapping_hash` (sha256 de esos valores y la categoría). Las cuatro columnas
+   se escriben juntas, una sola vez (el store exige `glpi_mapping_hash IS NULL`), y quedan como snapshot histórico.
+   Desde entonces la saga **nunca relee el mapeo vivo**: si el administrador cambia `NOTEBOOK → Computer + modelo 10`
+   por `modelo 20`, el retry de la misma saga sigue con el 10 y sólo las unidades nuevas usan el 20.
+   - pin con huella distinta ⇒ `MANUAL_REVIEW` (`glpi_pin_corrupt`);
+   - destino pinneado que dejó de ser válido (p. ej. modelo eliminado) ⇒ `MANUAL_REVIEW` (`glpi_pin_invalid`); nunca
+     se cambia de modelo en silencio;
+   - saga con itemtype o activo pero sin pin ⇒ `MANUAL_REVIEW` (`glpi_pin_missing`).
    Soportados en SI4-2 (idempotencia demostrada por la tabla del hecho 1): `Computer`, `Monitor`, `NetworkEquipment`,
    `Peripheral`, `Phone`, `Printer`. Los activos personalizados (`Glpi\Asset\Asset`) quedan fuera hasta probarlos.
 3. **Identidad determinista observable en GLPI = `otherserial` (número de inventario) = `asset_tag` de la saga.** Es el
@@ -71,7 +82,11 @@ el plugin propio con API soportada de GLPI (`CommonDBTM`, `Infocom`, `Supplier`,
    `MANUAL_REVIEW`). Crash después de `add()` ⇒ el retry lo encuentra por `otherserial` ⇒ **mismo activo**.
    Si la saga ya registró un id y la búsqueda no lo devuelve ⇒ `MANUAL_REVIEW`, nunca un segundo `add()`.
 6. **Vincular un activo existente** modifica sólo `otherserial` y sólo si estaba vacío (si es dinámico, GLPI lo bloquea
-   frente al agente, hecho 5). Nada más del activo existente se toca.
+   frente al agente, hecho 5). Nada más del activo existente se toca. **Post-verificación del reclamo:** después de
+   `setInventoryNumber()` se repite la búsqueda completa (`findCandidates` + `GlpiCandidateMatcher`) y se exige
+   exactamente ese activo, ya identificado por su tag (`ONE`, mismo id, `claim` = false). Si apareció otro candidato
+   (mismo serial o mismo tag; carrera con el agente o un humano) ⇒ `MANUAL_REVIEW` (`glpi_claim_verify`) sin registrar
+   `glpi_items_id`, sin Infocom y sin puente.
 7. **Infocom — política monetaria explícita (antes de escribir nada en GLPI):**
    - `value` = `unit_cost` del handoff (fuente canónica de P2D-3; nunca total ÷ cantidad) convertido **exactamente**
      a `decimal(20,4)`: escala ≤ 4 se completa con ceros; escala 5–6 sólo si los dígitos sobrantes son 0; más de 16
@@ -79,7 +94,11 @@ el plugin propio con API soportada de GLPI (`CommonDBTM`, `Infocom`, `Supplier`,
      PYG (escala 0) siempre es exacto.
    - GLPI no guarda moneda por Infocom (hecho 8): la moneda del handoff debe ser igual a `si4_glpi_infocom_currency`
      (config, por defecto `PYG`); si no ⇒ `MANUAL_REVIEW` (`infocom_currency`). No se convierte moneda.
-   - `suppliers_id` = proveedor de la compra (debe existir y no estar en papelera, si no `MANUAL_REVIEW`);
+   - `suppliers_id` = proveedor de la compra. Debe existir, no estar en la papelera y seguir siendo **aplicable a la
+     entidad de la unidad**: misma entidad o ancestro actual con `is_recursive`. Se usa la misma regla autoritativa
+     que Compras (`ReferenceValidator`): recorre la cadena viva de `entities_id` con `Entity::getFromDB()` y nunca la
+     caché del árbol (hecho 12); ante la duda, fail-closed. Se comprueba en cada pasada, antes de escribir el Infocom.
+     Si no aplica ⇒ `MANUAL_REVIEW` (`infocom_supplier`), sin Infocom ni puente;
      `order_number` = número de solicitud; `delivery_date` = fecha local de `received_at` (recepción física).
    - `buy_date`/`order_date` **no** se escriben: el handoff v1 no trae la fecha de compra e inventarla sería falso
      (queda para un handoff v2 de Compras).
@@ -110,6 +129,8 @@ el plugin propio con API soportada de GLPI (`CommonDBTM`, `Infocom`, `Supplier`,
 |---|---|
 | antes de buscar en GLPI | nada hecho ⇒ busca y crea/vincula |
 | tras encontrar un activo existente, antes de guardar la saga | el mismo candidato (por serial o por el tag ya reclamado) |
+| tras reclamar el tag, antes de la post-verificación | el mismo activo por su tag ⇒ vincula |
+| tras fijar el pin, antes de buscar | el destino pinneado, aunque el mapeo haya cambiado |
 | tras `add()`, antes de guardar `glpi_items_id` | el activo propio por `otherserial` ⇒ vincula (outcome `created`) |
 | tras guardar `glpi_items_id`, antes de Infocom | `GLPI_RESOLVED_OR_CREATED` ⇒ revalida y sigue |
 | tras escribir Infocom, antes de `INFOCOM_READY` | Infocom único con los mismos valores ⇒ `unchanged` |
@@ -121,6 +142,8 @@ el plugin propio con API soportada de GLPI (`CommonDBTM`, `Infocom`, `Supplier`,
 - **SQL directo a `glpi_computers`/`glpi_infocoms`:** salta reglas, hooks, historial y ACL (Regla 0).
 - **Redondear a 4 decimales o convertir moneda:** alteraría el dato canónico de P2D-3 sin decisión humana.
 - **Reusar `map_models` para el itemtype:** mezcla el catálogo de Snipe con el de GLPI.
+- **Releer el mapeo vivo en cada retry:** un cambio administrativo cambiaría el destino de una unidad a mitad de camino.
+- **`getAncestorsOf()` para el proveedor:** su caché puede quedar desactualizada tras mover una entidad (fail-open).
 
 ## Consecuencias
 - (+) Reintentos idempotentes en cada paso, dedup con el agente, costo exacto y auditable, puente estable.
@@ -128,3 +151,6 @@ el plugin propio con API soportada de GLPI (`CommonDBTM`, `Infocom`, `Supplier`,
   visible para la reconciliación SI-1.
 - (−) Compras en una moneda distinta de la del Infocom quedan en `MANUAL_REVIEW` hasta decidir una política.
 - (−) El worker sigue sin producción: SI4-3 (companyqr/etiqueta) y el ack final están pendientes.
+- (−) Una saga cuyo modelo pinneado se elimina queda en `MANUAL_REVIEW`: decidir el nuevo destino es humano.
+- (−) Si la post-verificación del reclamo detecta otro candidato, el activo reclamado conserva el tag; la revisión
+  manual decide cuál es la unidad.

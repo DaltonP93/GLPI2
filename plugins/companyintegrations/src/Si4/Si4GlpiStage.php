@@ -3,12 +3,14 @@
 /**
  * Etapas GLPI de la saga SI-4 — incremento SI4-2 (ADR-0021). Continúa la MISMA saga desde `SNIPE_CREATED`:
  *
- *   0. Pre-validación SIN escribir nada: mapeo aprobado (itemtype + modelo GLPI), itemtype soportado, modelo existente,
- *      política monetaria del Infocom (moneda configurada, valor exacto en decimal(20,4)) y proveedor utilizable.
+ *   0. Pre-validación SIN escribir nada en GLPI: destino PINNEADO por saga (el primer uso fija mapeo aprobado +
+ *      itemtype + modelo; los retries nunca releen el mapeo vivo), itemtype soportado, modelo existente, política
+ *      monetaria del Infocom (moneda configurada, valor exacto en decimal(20,4)) y proveedor utilizable y APLICABLE a
+ *      la entidad de la unidad.
  *   1. GLPI_RESOLVED_OR_CREATED: BUSCAR PRIMERO por `otherserial` (= tag determinista de la saga) y por `serial`;
- *      `GlpiCandidateMatcher` decide crear / vincular (reclamando el número de inventario si estaba vacío) / revisión
- *      manual. Crear = intención persistida con presupuesto de lease + `add()` nativo + id guardado sin verificar +
- *      verificación con la misma búsqueda.
+ *      `GlpiCandidateMatcher` decide crear / vincular (reclamando el número de inventario si estaba vacío, y
+ *      re-clasificando TODOS los candidatos después del reclamo) / revisión manual. Crear = intención persistida con
+ *      presupuesto de lease + `add()` nativo + id guardado sin verificar + verificación con la misma búsqueda.
  *   2. INFOCOM_READY: un Infocom por activo con valor, proveedor, número de solicitud y fecha de entrega exactos; sólo
  *      se completan campos propios vacíos; distinto ⇒ revisión manual; se verifica releyendo.
  *   3. BRIDGED: `asset_bridge` 1:1 (uuid, Snipe id/tag, activo GLPI, entidad) + alias vigente, idempotente.
@@ -82,24 +84,48 @@ final class Si4GlpiStage
         $serial = is_string($payload['serial'] ?? null) && $payload['serial'] !== '' ? $payload['serial'] : null;
 
         // 0) Pre-validación: nada se escribe en GLPI si la unidad no puede completarse con exactitud.
-        $target = $this->mapping->resolve($payload);
-        if (!$target['ok']) {
-            return $this->blocked($state, $stage, $target['reason'], 'glpi_mapping');
-        }
-        // Una saga que ya registró su itemtype (intención o activo) lo conserva aunque el mapeo cambie después.
-        $recordedType = (string) ($saga['glpi_itemtype'] ?? '');
-        $itemtype = $recordedType !== '' ? $recordedType : $target['itemtype'];
-        $modelId = $itemtype === $target['itemtype'] ? $target['model_id'] : 0;
-        $problem = $this->glpi->targetProblem($itemtype, $modelId);
-        if ($problem !== null) {
-            return $this->blocked($state, $stage, $problem, 'glpi_mapping');
+        //    Destino GLPI PINNEADO por saga (ADR-0021 §2): el primer uso válido fija mapeo + itemtype + modelo; desde
+        //    entonces NUNCA se relee el mapeo vivo (un cambio administrativo sólo afecta a unidades nuevas).
+        $category = (string) ($payload['category'] ?? '');
+        $pin = GlpiMappingRules::pinned($saga, $category);
+        if ($pin === null) {
+            if ((string) ($saga['glpi_itemtype'] ?? '') !== '' || (int) ($saga['glpi_items_id'] ?? 0) > 0) {
+                return $this->manual($state, 'la saga ya tiene activo GLPI pero no un destino pinneado', 'glpi_pin_missing');
+            }
+            $target = $this->mapping->resolve($payload);
+            if (!$target['ok']) {
+                return $this->blocked($state, $stage, $target['reason'], 'glpi_mapping');
+            }
+            $problem = $this->glpi->targetProblem($target['itemtype'], $target['model_id']);
+            if ($problem !== null) {
+                return $this->blocked($state, $stage, $problem, 'glpi_mapping');
+            }
+            if (!$this->sagas->transition($uuid, $tokenSha, $state, [
+                'glpi_mapping_id' => $target['mapping_id'], 'glpi_itemtype' => $target['itemtype'], 'glpi_model_id' => $target['model_id'],
+                'glpi_mapping_hash' => GlpiMappingRules::pinHash($target['mapping_id'], $category, $target['itemtype'], $target['model_id']),
+            ], 'glpi_mapping_pinned', $target['itemtype'] . ' modelo #' . $target['model_id'] . ' (mapeo #' . $target['mapping_id'] . ')')) {
+                return $this->out(self::O_LEASE_LOST, $state);
+            }
+            $itemtype = $target['itemtype'];
+            $modelId = $target['model_id'];
+        } else {
+            if (!$pin['ok']) {
+                return $this->manual($state, $pin['reason'], 'glpi_pin_corrupt');
+            }
+            $itemtype = $pin['itemtype'];
+            $modelId = $pin['model_id'];
+            $problem = $this->glpi->targetProblem($itemtype, $modelId);
+            if ($problem !== null) {
+                // El destino pinneado dejó de ser válido (p. ej. se eliminó el modelo): nunca se cambia en silencio.
+                return $this->manual($state, 'destino GLPI pinneado inválido: ' . $problem, 'glpi_pin_invalid');
+            }
         }
         $plan = InfocomPolicy::plan($payload, $this->infocomCurrency);
         if (!$plan['ok']) {
             return $this->manual($state, $plan['reason'], $plan['class']);
         }
-        if (!$this->glpi->supplierUsable((int) $plan['fields']['suppliers_id'])) {
-            return $this->manual($state, 'proveedor de la compra inexistente o en la papelera', 'infocom_supplier');
+        if (!$this->glpi->supplierUsable((int) $plan['fields']['suppliers_id'], $entity)) {
+            return $this->manual($state, 'proveedor de la compra inexistente, en la papelera o no aplicable a la entidad de la unidad', 'infocom_supplier');
         }
 
         // 1) Activo GLPI.
@@ -165,6 +191,14 @@ final class Si4GlpiStage
                 if (!$ok || $after === null || $after['otherserial'] !== $tag) {
                     return $this->manual($state, 'GLPI no registró el número de inventario en ' . $itemtype . ' #' . $c['id'], 'glpi_claim_refused');
                 }
+                $this->probe('after_glpi_claim', $uuid);
+                // Post-verificación del reclamo: el conjunto COMPLETO de candidatos debe ser exactamente este activo, ya
+                // identificado por su número de inventario. Otro candidato (carrera con el agente o un humano) ⇒ no se
+                // consolida el vínculo.
+                $v = GlpiCandidateMatcher::classify($this->glpi->findCandidates($itemtype, $tag, $serial), $entity, $tag, $serial);
+                if ($v['kind'] !== GlpiCandidateMatcher::ONE || $v['id'] !== $c['id'] || $v['claim']) {
+                    return $this->manual($state, 'verificación posterior del reclamo del activo GLPI #' . $c['id'] . ': ' . $v['kind'] . ' ' . $v['detail'], 'glpi_claim_verify');
+                }
             }
             $own = (int) ($saga['glpi_create_calls'] ?? 0) > 0 && !$c['claim'];
             return $this->recordResolved($uuid, $tokenSha, $state, $itemtype, $c['id'], $entity, $own ? SagaState::OUTCOME_CREATED : SagaState::OUTCOME_LINKED);
@@ -182,7 +216,7 @@ final class Si4GlpiStage
             return $this->blocked($state, SagaState::SNIPE_CREATED, 'el usuario técnico no puede crear ' . $itemtype . ' en la entidad ' . $entity, 'acl');
         }
         $calls = (int) ($saga['glpi_create_calls'] ?? 0) + 1;
-        if (!$this->sagas->transition($uuid, $tokenSha, $state, ['glpi_itemtype' => $itemtype, 'glpi_create_calls' => $calls],
+        if (!$this->sagas->transition($uuid, $tokenSha, $state, ['glpi_create_calls' => $calls],
             'glpi_create_intent', $itemtype . ' add #' . $calls, self::GLPI_WRITE_BUDGET_SEC)) {
             return $this->out(self::O_LEASE_LOST, $state);
         }
@@ -217,7 +251,7 @@ final class Si4GlpiStage
     {
         try {
             $ok = $this->sagas->transition($uuid, $tokenSha, $state, [
-                'state' => SagaState::GLPI_RESOLVED_OR_CREATED, 'glpi_itemtype' => $itemtype, 'glpi_items_id' => $id,
+                'state' => SagaState::GLPI_RESOLVED_OR_CREATED, 'glpi_items_id' => $id,
                 'glpi_entity_id' => $entity, 'glpi_outcome' => $outcome, 'resume_state' => null, 'last_error' => null, 'last_error_class' => null,
             ], 'glpi_resolved', $outcome . ' ' . $itemtype . ' #' . $id);
         } catch (\RuntimeException $e) {

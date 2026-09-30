@@ -9,7 +9,7 @@
  * Esquema SI-1 (ver docs/architecture/asset-bridge-model.md):
  *   asset_bridge · asset_tag_aliases · map_companies · map_users · recon
  * Esquema SI4-1 (ADR-0020): si4_sagas · si4_saga_log · map_models
- * Esquema SI4-2 (ADR-0021): map_glpi_assettypes + columnas GLPI/Infocom/puente en si4_sagas (UNIQUE glpi_item) +
+ * Esquema SI4-2 (ADR-0021): map_glpi_assettypes + columnas GLPI/Infocom/puente/pin del mapeo en si4_sagas (UNIQUE glpi_item) +
  *                           asset_bridge.receipt_unit_uuid (UNIQUE, NULL para puentes SI-1)
  *
  * install() es SEGURO EN UPGRADE (GLPI lo vuelve a llamar al actualizar 0.2.0 → 0.3.0 → 0.4.0): tablas con IF-not-exists,
@@ -234,6 +234,10 @@ function plugin_companyintegrations_install() {
         'infocom_outcome'   => "VARCHAR(20) DEFAULT NULL",
         'asset_bridge_id'   => "INT UNSIGNED DEFAULT NULL",
         'resume_state'      => "VARCHAR(30) DEFAULT NULL",
+        // Destino GLPI PINNEADO al primer uso (ADR-0021 §2): mapeo + modelo + huella; glpi_itemtype completa el pin.
+        'glpi_mapping_id'   => "INT UNSIGNED DEFAULT NULL",
+        'glpi_model_id'     => "INT UNSIGNED DEFAULT NULL",
+        'glpi_mapping_hash' => "CHAR(64) DEFAULT NULL",
     ]);
     // Un activo GLPI nunca queda ligado a dos unidades.
     if (!isIndex("{$p}si4_sagas", 'glpi_item')) {

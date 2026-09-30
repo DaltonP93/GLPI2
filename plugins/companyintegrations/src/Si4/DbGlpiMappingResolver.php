@@ -22,12 +22,12 @@ final class DbGlpiMappingResolver implements GlpiMappingResolver
         $rows = [];
         if ($category !== '') {
             foreach ($DB->request([
-                'SELECT' => ['category_key', 'glpi_itemtype', 'glpi_model_id'],
+                'SELECT' => ['id', 'category_key', 'glpi_itemtype', 'glpi_model_id'],
                 'FROM'   => MapGlpiAssetType::getTable(),
                 'WHERE'  => ['category_key' => $category, 'is_approved' => 1],
             ]) as $r) {
                 if ((string) $r['category_key'] === $category) { // exacta (la colación de la BD es case-insensitive)
-                    $rows[] = ['glpi_itemtype' => (string) $r['glpi_itemtype'], 'glpi_model_id' => (int) $r['glpi_model_id']];
+                    $rows[] = ['id' => (int) $r['id'], 'glpi_itemtype' => (string) $r['glpi_itemtype'], 'glpi_model_id' => (int) $r['glpi_model_id']];
                 }
             }
         }

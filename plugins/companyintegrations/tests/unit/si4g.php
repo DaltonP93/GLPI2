@@ -106,7 +106,16 @@ echo "== SI4-2 · GlpiMappingRules / Si4Config ==\n";
 ok('sin mapeo aprobado ⇒ bloqueado', !GlpiMappingRules::decide('NB', [])['ok']);
 ok('mapeo ambiguo ⇒ bloqueado', !GlpiMappingRules::decide('NB', [['glpi_itemtype' => 'Computer', 'glpi_model_id' => 0], ['glpi_itemtype' => 'Monitor', 'glpi_model_id' => 0]])['ok']);
 ok('itemtype mal formado ⇒ bloqueado', !GlpiMappingRules::decide('NB', [['glpi_itemtype' => 'Computer; DROP', 'glpi_model_id' => 0]])['ok']);
-ok('mapeo completo ⇒ itemtype + modelo del mapeo (sin literales)', GlpiMappingRules::decide('NB', [['glpi_itemtype' => 'Computer', 'glpi_model_id' => 41]]) === ['ok' => true, 'itemtype' => 'Computer', 'model_id' => 41, 'reason' => '']);
+ok('mapeo completo ⇒ id de la fila + itemtype + modelo del mapeo (sin literales)', GlpiMappingRules::decide('NB', [['id' => 9, 'glpi_itemtype' => 'Computer', 'glpi_model_id' => 41]])
+    === ['ok' => true, 'mapping_id' => 9, 'itemtype' => 'Computer', 'model_id' => 41, 'reason' => '']);
+ok('fila de mapeo sin id ⇒ bloqueado (no se puede pinnear)', !GlpiMappingRules::decide('NB', [['glpi_itemtype' => 'Computer', 'glpi_model_id' => 41]])['ok']);
+$pinRow = ['glpi_mapping_id' => 9, 'glpi_itemtype' => 'Computer', 'glpi_model_id' => 41, 'glpi_mapping_hash' => GlpiMappingRules::pinHash(9, 'NB', 'Computer', 41)];
+ok('saga sin pin ⇒ pinned() null (primer uso)', GlpiMappingRules::pinned(['glpi_mapping_hash' => null], 'NB') === null);
+ok('pin íntegro ⇒ destino pinneado', GlpiMappingRules::pinned($pinRow, 'NB') === ['ok' => true, 'mapping_id' => 9, 'itemtype' => 'Computer', 'model_id' => 41, 'reason' => '']);
+ok('🔒 pin alterado (modelo) o de otra categoría ⇒ inconsistente', !GlpiMappingRules::pinned(['glpi_model_id' => 43] + $pinRow, 'NB')['ok']
+    && !GlpiMappingRules::pinned($pinRow, 'MON')['ok'] && !GlpiMappingRules::pinned(['glpi_itemtype' => 'Monitor'] + $pinRow, 'NB')['ok']);
+ok('🔒 el pin se escribe completo: parcial ⇒ excepción; sin columnas del pin ⇒ no es pin', si4Throws(fn () => GlpiMappingRules::isPinWrite(['glpi_model_id' => 41]))
+    && si4Throws(fn () => GlpiMappingRules::isPinWrite(['glpi_mapping_hash' => ''] + $pinRow)) && GlpiMappingRules::isPinWrite($pinRow) && !GlpiMappingRules::isPinWrite(['state' => 'X']));
 $w0 = new Si4World();
 ok('moneda del Infocom inválida ⇒ error de configuración', Si4Config::fromArray(['si4_glpi_infocom_currency' => 'guarani'] + $w0->cfg)->errors(5000, 2) !== []);
 ok('moneda del Infocom por defecto PYG', Si4Config::fromArray($w0->cfg)->infocomCurrency === 'PYG');
@@ -304,7 +313,7 @@ $W->worker2(null, ['si4_glpi_infocom_currency' => 'USD'])->run();
 $s = $W->sagas->get($u);
 ok('USD escala 3 con Infocom en USD ⇒ 3.6670 exacto', $s['state'] === SagaState::BRIDGED && ($W->glpi->getInfocom('Computer', (int) $s['glpi_items_id'])['value'] ?? '') === '3.6670');
 $W = new Si4World();
-$W->glpi->suppliers = [3 => true]; // en la papelera
+$W->glpi->suppliers[3]['deleted'] = true; // en la papelera
 $u = $W->unit();
 $W->worker2()->run();
 ok('proveedor en la papelera ⇒ MANUAL_REVIEW sin crear el activo', $W->sagas->get($u)['last_error_class'] === 'infocom_supplier' && $W->glpi->items === []);
@@ -464,13 +473,162 @@ ok('B re-toma, encuentra el activo de A por su número de inventario y termina: 
 echo "== SI4-2 · Multi-entidad ==\n";
 $W = new Si4World();
 $u1 = $W->unit(['serial' => 'SN-ME-1', 'entity_id' => 1]);
-$u2 = $W->unit(['serial' => 'SN-ME-2', 'entity_id' => 2]);
+$u2 = $W->unit(['serial' => 'SN-ME-2', 'entity_id' => 2, 'supplier_id' => 4]);
 $m = $W->worker2()->run();
 $s1 = $W->sagas->get($u1);
 $s2 = $W->sagas->get($u2);
 ok('cada unidad en SU entidad (activo, puente) y con su compañía Snipe', $m['bridged'] === 2
     && $W->glpi->items['Computer'][(int) $s1['glpi_items_id']]['entities_id'] === 1 && $W->glpi->items['Computer'][(int) $s2['glpi_items_id']]['entities_id'] === 2
     && (int) $W->bridges->rows[(int) $s2['asset_bridge_id']]['glpi_entity_id'] === 2 && (int) $s1['snipe_company_id'] === 7 && (int) $s2['snipe_company_id'] === 8);
+
+echo "== SI4-2 · Mapeo PINNEADO por saga: el retry nunca relee el mapeo vivo ==\n";
+$W = new Si4World();
+$W->glpi->models['Computer'][43] = true;
+$W->glpi->denied['Computer:create'] = true; // el primer intento se bloquea ANTES del alta
+$u = $W->unit(['serial' => 'SN-PIN-1']);
+$W->worker2()->run();
+$s = $W->sagas->get($u);
+$mapId = (int) $W->glpiMap->resolve(['category' => 'NB'])['mapping_id'];
+ok('primer uso: NB ⇒ Computer + modelo 41 PINNEADO en la saga (mapeo, itemtype, modelo, huella)', $s['state'] === SagaState::BLOCKED_CONFIG
+    && (int) $s['glpi_mapping_id'] === $mapId && $s['glpi_itemtype'] === 'Computer' && (int) $s['glpi_model_id'] === 41
+    && $s['glpi_mapping_hash'] === GlpiMappingRules::pinHash($mapId, 'NB', 'Computer', 41) && $W->glpi->items === []);
+ok('el pin queda en la bitácora de la saga', count(array_filter($W->sagas->log, static fn (array $l): bool => $l['uuid'] === $u && $l['event'] === 'glpi_mapping_pinned')) === 1);
+$W->glpiMap->byCategory['NB'] = ['glpi_itemtype' => 'Computer', 'glpi_model_id' => 43]; // el administrador cambia la MISMA fila
+unset($W->glpi->denied['Computer:create']);
+si4gExpire($W, $u);
+$W->worker2()->run();
+$s = $W->sagas->get($u);
+ok('🔒 retry de la MISMA saga ⇒ sigue usando el modelo 41 pinneado', $s['state'] === SagaState::BRIDGED && ($W->glpi->items['Computer'][(int) $s['glpi_items_id']]['model_id'] ?? 0) === 41
+    && (int) $s['glpi_model_id'] === 41);
+$u2 = $W->unit(['serial' => 'SN-PIN-2']);
+$W->worker2()->run();
+$s2 = $W->sagas->get($u2);
+ok('unidad NUEVA ⇒ usa el modelo 43 del mapeo vigente', $s2['state'] === SagaState::BRIDGED && ($W->glpi->items['Computer'][(int) $s2['glpi_items_id']]['model_id'] ?? 0) === 43
+    && (int) $s2['glpi_model_id'] === 43);
+ok('🔒 el pin es inmutable: re-pinnear la misma saga ⇒ false, nada escrito', !$W->sagas->transition($u2, (string) $s2['lease_token_sha256'], $s2['state'],
+    ['glpi_mapping_id' => 1, 'glpi_itemtype' => 'Monitor', 'glpi_model_id' => 0, 'glpi_mapping_hash' => str_repeat('a', 64)], 'x') && $W->sagas->get($u2)['glpi_itemtype'] === 'Computer');
+
+$W = new Si4World();
+$u = $W->unit(['serial' => 'SN-PIN-MAPGONE']);
+si4Throws(fn () => $W->worker2($crashAt('before_glpi_search'))->run());
+unset($W->glpiMap->byCategory['NB']); // el mapeo se retira después del pin
+si4gExpire($W, $u);
+$W->worker2()->run();
+ok('🔒 mapeo retirado después del pin ⇒ la saga termina con su destino pinneado (no se bloquea ni cambia)', $W->sagas->get($u)['state'] === SagaState::BRIDGED && si4gAssets($W, $u) === 1);
+
+$W = new Si4World();
+$W->glpi->models['Computer'][43] = true;
+$u = $W->unit(['serial' => 'SN-PIN-DEL']);
+si4Throws(fn () => $W->worker2($crashAt('before_glpi_search'))->run());
+unset($W->glpi->models['Computer'][41]); // el modelo pinneado se elimina
+$W->glpiMap->byCategory['NB'] = ['glpi_itemtype' => 'Computer', 'glpi_model_id' => 43];
+si4gExpire($W, $u);
+$m = $W->worker2()->run();
+$s = $W->sagas->get($u);
+ok('🔒 modelo pinneado eliminado ⇒ MANUAL_REVIEW (glpi_pin_invalid), sin alta y sin cambiar de modelo', $m['manual_review'] === 1 && $s['state'] === SagaState::MANUAL_REVIEW
+    && $s['last_error_class'] === 'glpi_pin_invalid' && $W->glpi->items === [] && (int) $s['glpi_model_id'] === 41);
+
+$W = new Si4World();
+$W->glpi->models['Computer'][43] = true;
+$u = $W->unit(['serial' => 'SN-PIN-TAMPER']);
+si4Throws(fn () => $W->worker2($crashAt('before_glpi_search'))->run());
+$W->sagas->rows[$u]['glpi_model_id'] = 43; // alguien altera el pin fuera de la saga
+si4gExpire($W, $u);
+$W->worker2()->run();
+ok('🔒 pin alterado (huella distinta) ⇒ MANUAL_REVIEW (glpi_pin_corrupt), sin alta', $W->sagas->get($u)['last_error_class'] === 'glpi_pin_corrupt' && $W->glpi->items === []);
+
+$W = new Si4World();
+$u = $W->unit(['serial' => 'SN-PIN-LEGACY']);
+$W->worker()->run(); // SI4-1
+$W->sagas->rows[$u]['glpi_itemtype'] = 'Computer'; // estado imposible: itemtype sin pin
+si4gExpire($W, $u);
+$W->worker2()->run();
+ok('🔒 saga con itemtype pero sin pin ⇒ MANUAL_REVIEW (glpi_pin_missing), nunca re-resolver en silencio', $W->sagas->get($u)['last_error_class'] === 'glpi_pin_missing' && $W->glpi->items === []);
+
+echo "== SI4-2 · Reclamo del GLPI Agent: post-verificación del conjunto completo ==\n";
+$W = new Si4World();
+$agent = $W->glpi->seed('Computer', 1, 'SN-RACE-1', null, true);
+$u = $W->unit(['serial' => 'SN-RACE-1']);
+$raced = 0;
+$m = $W->worker2(function (string $p) use ($W, &$raced): void {
+    if ($p === 'after_glpi_claim') {
+        $raced = $W->glpi->seed('Computer', 1, 'SN-RACE-1', null, true); // justo después del reclamo aparece otro con el mismo serial
+    }
+})->run();
+$s = $W->sagas->get($u);
+ok('🔒 carrera: otro Computer con el mismo serial tras el reclamo ⇒ AMBIGUOUS ⇒ MANUAL_REVIEW (glpi_claim_verify)', $raced > 0 && $m['manual_review'] === 1
+    && $s['state'] === SagaState::MANUAL_REVIEW && $s['last_error_class'] === 'glpi_claim_verify' && str_contains((string) $s['last_error'], 'ambiguous'));
+ok('🔒 el vínculo NO se consolida: sin glpi_items_id, sin Infocom, sin puente; outbox ERROR', $s['glpi_items_id'] === null && $W->glpi->infocoms === []
+    && $W->bridges->rows === [] && $W->source->row($u)['status'] === 'ERROR' && $W->glpi->addCalls === 0);
+$W = new Si4World();
+$agent = $W->glpi->seed('Computer', 1, 'SN-RACE-2', null, true);
+$u = $W->unit(['serial' => 'SN-RACE-2']);
+$W->worker2(function (string $p) use ($W, $u): void {
+    if ($p === 'after_glpi_claim') {
+        $W->glpi->seed('Computer', 1, null, $W->tag($u), false); // aparece otro con el MISMO número de inventario
+    }
+})->run();
+$s = $W->sagas->get($u);
+ok('🔒 carrera: otro activo con el mismo tag tras el reclamo ⇒ MANUAL_REVIEW, sin Infocom ni puente', $s['last_error_class'] === 'glpi_claim_verify'
+    && $s['glpi_items_id'] === null && $W->glpi->infocoms === [] && $W->bridges->rows === []);
+$W = new Si4World();
+$agent = $W->glpi->seed('Computer', 1, 'SN-CLAIM-CRASH', null, true);
+$u = $W->unit(['serial' => 'SN-CLAIM-CRASH']);
+$crashed = si4Throws(fn () => $W->worker2($crashAt('after_glpi_claim'))->run());
+si4gExpire($W, $u);
+$m = $W->worker2()->run();
+ok('crash «after_glpi_claim» (reclamado, sin post-verificar) ⇒ retry lo encuentra por su tag y vincula el MISMO', $crashed && $m['bridged'] === 1
+    && (int) $W->sagas->get($u)['glpi_items_id'] === $agent && $W->glpi->addCalls === 0 && $W->sagas->get($u)['glpi_outcome'] === 'linked');
+
+echo "== SI4-2 · Proveedor del Infocom aplicable a la entidad de la unidad ==\n";
+$W = new Si4World();
+$u = $W->unit(['serial' => 'SN-SUPMOVE-1']);
+$W->worker()->run(); // SI4-1: con el proveedor válido (entidad 1) al comprar/recibir
+$W->glpi->suppliers[3]['entity'] = 2; // antes de SI4-2 el proveedor se mueve a otra rama
+si4gExpire($W, $u);
+$m = $W->worker2()->run();
+$s = $W->sagas->get($u);
+ok('🔒 proveedor movido a otra rama antes de SI4-2 ⇒ MANUAL_REVIEW (infocom_supplier), sin activo, Infocom ni puente', $m['manual_review'] === 1
+    && $s['last_error_class'] === 'infocom_supplier' && $W->glpi->items === [] && $W->glpi->infocoms === [] && $W->bridges->rows === []);
+$W = new Si4World();
+$W->glpi->denied['infocom:create'] = true;
+$u = $W->unit(['serial' => 'SN-SUPMOVE-2']);
+$W->worker2()->run(); // activo creado; Infocom bloqueado por ACL
+$W->glpi->suppliers[3]['entity'] = 2;
+unset($W->glpi->denied['infocom:create']);
+si4gExpire($W, $u);
+$W->worker2()->run();
+$s = $W->sagas->get($u);
+ok('🔒 proveedor movido entre el activo y el Infocom ⇒ MANUAL_REVIEW, sin Infocom ni puente', $s['last_error_class'] === 'infocom_supplier'
+    && si4gAssets($W, $u) === 1 && $W->glpi->infocoms === [] && $W->bridges->rows === []);
+$W = new Si4World();
+$W->glpi->suppliers[3] = ['deleted' => false, 'entity' => 0, 'recursive' => true];
+$u = $W->unit(['serial' => 'SN-SUPANC-1']);
+ok('proveedor RECURSIVO de un ancestro (raíz) ⇒ permitido', $W->worker2()->run()['bridged'] === 1
+    && (int) ($W->glpi->getInfocom('Computer', (int) $W->sagas->get($u)['glpi_items_id'])['suppliers_id'] ?? 0) === 3);
+$W = new Si4World();
+$W->glpi->entityParent = [0 => -1, 5 => 0, 1 => 5, 2 => 0]; // raíz ⇒ 5 ⇒ 1 (entidad de la unidad)
+$W->glpi->suppliers[3] = ['deleted' => false, 'entity' => 5, 'recursive' => true];
+$u = $W->unit(['serial' => 'SN-SUPANC-2']);
+ok('proveedor recursivo de un ancestro INTERMEDIO ⇒ permitido', $W->worker2()->run()['bridged'] === 1);
+$W = new Si4World();
+$W->glpi->entityParent = [0 => -1, 5 => 0, 1 => 5, 2 => 0];
+$W->glpi->suppliers[3] = ['deleted' => false, 'entity' => 5, 'recursive' => true];
+$u = $W->unit(['serial' => 'SN-SUPANC-3']);
+$W->worker()->run();
+$W->glpi->entityParent[1] = 0; // la entidad de la unidad se mueve fuera de la rama del proveedor (cadena VIVA)
+si4gExpire($W, $u);
+$W->worker2()->run();
+ok('🔒 la entidad de la unidad sale de la rama del proveedor ⇒ MANUAL_REVIEW (se usa la cadena viva, no una caché)', $W->sagas->get($u)['last_error_class'] === 'infocom_supplier' && $W->glpi->items === []);
+$W = new Si4World();
+$W->glpi->suppliers[3] = ['deleted' => false, 'entity' => 0, 'recursive' => false];
+$u = $W->unit(['serial' => 'SN-SUPANC-4']);
+$W->worker2()->run();
+ok('🔒 proveedor de un ancestro NO recursivo ⇒ MANUAL_REVIEW', $W->sagas->get($u)['last_error_class'] === 'infocom_supplier' && $W->glpi->items === []);
+$W = new Si4World();
+$u = $W->unit(['serial' => 'SN-SUPSIB-1', 'supplier_id' => 4]);
+$W->worker2()->run();
+ok('🔒 proveedor de una rama hermana ⇒ MANUAL_REVIEW', $W->sagas->get($u)['last_error_class'] === 'infocom_supplier' && $W->glpi->items === []);
 
 echo "== SI4-2 · Token nunca en logs / saga / puente; nunca ack ==\n";
 $W = new Si4World();

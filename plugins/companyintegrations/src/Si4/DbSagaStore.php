@@ -26,7 +26,7 @@ final class DbSagaStore implements SagaStore
         'snipe_status_id', 'remote_create_calls', 'last_error', 'last_error_class',
         // SI4-2 (ADR-0021)
         'glpi_itemtype', 'glpi_items_id', 'glpi_entity_id', 'glpi_outcome', 'glpi_create_calls', 'glpi_infocom_id',
-        'infocom_outcome', 'asset_bridge_id', 'resume_state',
+        'infocom_outcome', 'asset_bridge_id', 'resume_state', 'glpi_mapping_id', 'glpi_model_id', 'glpi_mapping_hash',
     ];
     private const DATETIME = '/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/';
 
@@ -103,13 +103,16 @@ final class DbSagaStore implements SagaStore
             }
             $parts[] = '`' . $col . '` = ' . ($val === null ? 'NULL' : (is_int($val) ? (string) $val : "'" . $DB->escape((string) $val) . "'"));
         }
+        // Pin del destino GLPI (ADR-0021 §2): las cuatro columnas juntas, no nulas, y SÓLO si la saga aún no tiene pin.
+        $pin = GlpiMappingRules::isPinWrite($set);
         $parts[] = '`row_version` = `row_version` + 1';
         $parts[] = '`date_mod` = NOW()';
         $DB->beginTransaction();
         try {
             $DB->doQuery("UPDATE `{$t}` SET " . implode(', ', $parts)
                 . " WHERE `receipt_unit_uuid` = '" . $uuid . "' AND `lease_token_sha256` = '" . $tokenSha256 . "'"
-                . ' AND `lease_until` IS NOT NULL AND `lease_until` >= DATE_ADD(NOW(), INTERVAL ' . max(0, $minRemainingSeconds) . ' SECOND)');
+                . ' AND `lease_until` IS NOT NULL AND `lease_until` >= DATE_ADD(NOW(), INTERVAL ' . max(0, $minRemainingSeconds) . ' SECOND)'
+                . ($pin ? ' AND `glpi_mapping_hash` IS NULL' : ''));
             if ($DB->affectedRows() !== 1) {
                 $DB->rollBack();
                 return false;

@@ -92,20 +92,25 @@ sigue abierto para SI4-3. Todo con la API nativa de GLPI 11.0.8 (`CommonDBTM::fi
 - **Mapeo aprobado categoría ⇒ tipo de activo GLPI** (tabla nueva `map_glpi_assettypes`, separada de `map_models`):
   `glpi_itemtype` + `glpi_model_id` opcional. Ausente, itemtype no soportado o modelo inexistente ⇒ `BLOCKED_CONFIG`.
   Soportados: `Computer`, `Monitor`, `NetworkEquipment`, `Peripheral`, `Phone`, `Printer`.
+  **Pinneado por saga:** el primer uso guarda en la saga `glpi_mapping_id`, `glpi_itemtype`, `glpi_model_id` y una
+  huella; los retries usan ese destino aunque el administrador cambie el mapeo (sólo las unidades nuevas ven el
+  cambio). Si el modelo pinneado se elimina ⇒ `MANUAL_REVIEW`, nunca otro modelo en silencio.
 - **Identidad determinista observable en GLPI:** `otherserial` (número de inventario) = `asset_tag` de la saga.
   Buscar primero por número de inventario y por serial en **todas** las entidades:
 
   | Situación | Resultado |
   |---|---|
   | ningún candidato | crear (`add()` nativo, verificado después) |
-  | 1 inequívoco (propio por tag, o del GLPI Agent por serial) | vincular; si el número de inventario estaba vacío se reclama (GLPI lo bloquea frente al agente) |
+  | 1 inequívoco (propio por tag, o del GLPI Agent por serial) | vincular; si el número de inventario estaba vacío se reclama (GLPI lo bloquea frente al agente) y se **re-clasifican todos los candidatos**: si apareció otro ⇒ `MANUAL_REVIEW` sin vincular |
   | > 1, otra entidad, serial o número de inventario distinto, papelera | `MANUAL_REVIEW`, nada se modifica |
 
   Crash después de `add()` ⇒ el retry encuentra **el mismo** activo. Si la saga ya registró su activo y no aparece ⇒
   `MANUAL_REVIEW`, nunca un segundo alta.
 - **Infocom exacto:** `value` = `unit_cost` de la unidad convertido exactamente a `decimal(20,4)` (nunca redondeo);
   moneda distinta de `si4_glpi_infocom_currency` o escala no representable ⇒ `MANUAL_REVIEW` **antes** de crear nada.
-  Proveedor de la compra, `order_number` = n.º de solicitud, `delivery_date` = fecha de recepción. Un Infocom
+  Proveedor de la compra (existente, fuera de la papelera y **aplicable a la entidad de la unidad**: misma entidad o
+  ancestro recursivo, con la regla autoritativa de Compras), `order_number` = n.º de solicitud, `delivery_date` = fecha
+  de recepción. Un Infocom
   existente sólo se completa en campos propios vacíos; si difiere ⇒ `MANUAL_REVIEW`.
 - **`asset_bridge` 1:1** con `receipt_unit_uuid` (columna nueva, UNIQUE; NULL en puentes SI-1). Un puente SI-1 idéntico
   se adopta; cualquier coincidencia parcial ⇒ `MANUAL_REVIEW`. Nunca se reasigna.
@@ -165,7 +170,8 @@ saneados. Secret scan del repo en verde.
   - **SI4-2 (GLPI real):** upgrade 0.3.0 → 0.4.0 con sagas SI4-1 intactas que luego continúan; E2E con el worker del
     comando real hasta `BRIDGED`; GLPI Agent (vincular + Lockedfield), ambiguo, otra entidad; mapeo/itemtype/modelo;
     9 crash points con toma por época; los 6 itemtypes soportados; multi-entidad; ACL nativa; Infocom distinto o en
-    otra moneda; sin companyqr ni ack.
+    otra moneda; mapeo pinneado (retry con el modelo pinneado, unidad nueva con el vigente, modelo eliminado);
+    carrera tras el reclamo del agente; proveedor movido de rama / ancestro recursivo; sin companyqr ni ack.
 
 ## Limitaciones / deuda técnica (SI-1)
 - **Sin Snipe-IT real en CI:** la integración se valida con **tests de contrato** (transporte fake) —

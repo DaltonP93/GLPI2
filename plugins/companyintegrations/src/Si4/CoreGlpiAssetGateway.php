@@ -8,6 +8,8 @@
  * - Alta: `CommonDBTM::add($input, ['disable_infocom_creation' => true])` (hooks, reglas, unicidad e historial nativos).
  * - Número de inventario: `CommonDBTM::update()` (si el activo es dinámico, GLPI crea el Lockedfield).
  * - Infocom: `Infocom::getFromDBforDevice()` / `add()` / `update()`; derechos con `can()`.
+ * - Proveedor: `Supplier::getFromDB()` + aplicabilidad a la entidad con `ReferenceValidator` de Compras (cadena viva de
+ *   entidades con el modelo nativo `Entity`, sin caché del árbol).
  *
  * Itemtypes SOPORTADOS (capacidad técnica verificada, no decisión de negocio): tienen `serial`, `otherserial`,
  * `entities_id`, FK de modelo y admiten Infocom. El itemtype de cada unidad lo decide el mapeo aprobado.
@@ -18,6 +20,8 @@
 declare(strict_types=1);
 
 namespace GlpiPlugin\Companyintegrations\Si4;
+
+use GlpiPlugin\Companypurchasing\Service\ReferenceValidator;
 
 final class CoreGlpiAssetGateway implements GlpiAssetGateway
 {
@@ -109,10 +113,24 @@ final class CoreGlpiAssetGateway implements GlpiAssetGateway
         return (bool) (new $itemtype())->update(['id' => $id, 'otherserial' => $otherserial]);
     }
 
-    public function supplierUsable(int $supplierId): bool
+    public function supplierUsable(int $supplierId, int $entityId): bool
     {
         $s = new \Supplier();
-        return $supplierId > 0 && $s->getFromDB($supplierId) && (int) ($s->fields['is_deleted'] ?? 0) === 0;
+        if ($supplierId <= 0 || $entityId < 0 || !$s->getFromDB($supplierId) || (int) ($s->fields['is_deleted'] ?? 1) !== 0) {
+            return false;
+        }
+        // La MISMA regla autoritativa que Compras aplica al registrar el proveedor (ADR-0021 §7): misma entidad o
+        // ancestro ACTUAL recursivo, por la cadena viva `entities_id` (nunca la caché del árbol, que puede quedar
+        // stale). Si Compras no está disponible o la referencia ya no aplica ⇒ false (fail-closed).
+        if (!class_exists(ReferenceValidator::class)) {
+            return false;
+        }
+        try {
+            (new ReferenceValidator())->assertReferenceForEntity(\Supplier::class, $supplierId, $entityId);
+        } catch (\Throwable) {
+            return false;
+        }
+        return true;
     }
 
     public function getInfocom(string $itemtype, int $id): ?array

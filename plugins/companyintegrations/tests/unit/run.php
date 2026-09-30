@@ -36,6 +36,8 @@ require $cli . 'SnipeItClient.php';
 require $cli . 'CreateResult.php';
 require $cli . 'SnipeAssetWriter.php';
 require $cli . 'FakeSnipeServer.php';
+// Regla autoritativa de aplicabilidad de entidad compartida con Compras (núcleo puro; ADR-0021 §7).
+require dirname(__DIR__, 3) . '/companypurchasing/src/Service/ReferenceValidator.php';
 $si4 = dirname(__DIR__, 2) . '/src/Si4/';
 foreach (['SagaState', 'AssetTagDeriver', 'Si4Errors', 'SimulatedCrash', 'Si4Config', 'RemoteAssetMatcher', 'HandoffSource',
           'InMemoryHandoffSource', 'SagaStore', 'InMemorySagaStore', 'MappingResolver', 'MappingRules', 'ArrayMappingResolver',

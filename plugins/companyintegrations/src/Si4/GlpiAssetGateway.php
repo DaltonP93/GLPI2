@@ -44,8 +44,11 @@ interface GlpiAssetGateway
     /** Escribe SÓLO el número de inventario (`otherserial`) de un activo existente. */
     public function setInventoryNumber(string $itemtype, int $id, string $otherserial): bool;
 
-    /** ¿El proveedor existe y no está en la papelera? */
-    public function supplierUsable(int $supplierId): bool;
+    /**
+     * ¿El proveedor existe, no está en la papelera y sigue siendo APLICABLE a la entidad de la unidad (misma entidad o
+     * ancestro ACTUAL con `is_recursive`, resuelto por la cadena viva de entidades; fail-closed)?
+     */
+    public function supplierUsable(int $supplierId, int $entityId): bool;
 
     /** @return array<string,mixed>|null Infocom del activo (a lo sumo uno: UNIQUE(itemtype, items_id)) */
     public function getInfocom(string $itemtype, int $id): ?array;
