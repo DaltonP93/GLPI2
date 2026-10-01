@@ -14,7 +14,7 @@
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYPURCHASING_VERSION', '0.4.0');
+define('PLUGIN_COMPANYPURCHASING_VERSION', '0.5.0');
 
 // Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
 // max='12.0' => GLPI 11.x soportado; 12.x NO hasta pasar la suite de regresion.
@@ -37,7 +37,8 @@ function plugin_init_companypurchasing() {
     // `plugin_companypurchasing` y sus bits (ACL por acción) viven en este modelo. `document_types`: el PDF
     // aprobado (companysignature) se vincula a la solicitud como `Document_Item` NATIVO.
     if (class_exists(\GlpiPlugin\Companypurchasing\Model\Request::class)) {
-        Plugin::registerClass(\GlpiPlugin\Companypurchasing\Model\Request::class, ['document_types' => true]);
+        // P2D-4: `notificationtemplates_types` ⇒ notificaciones/plantillas NATIVAS para el tipo (NotificationTargetRequest).
+        Plugin::registerClass(\GlpiPlugin\Companypurchasing\Model\Request::class, ['document_types' => true, 'notificationtemplates_types' => true]);
     }
     // P2D-2: cotizaciones con N adjuntos vía `Document` + `Document_Item` NATIVOS (sin duplicar maestros).
     if (class_exists(\GlpiPlugin\Companypurchasing\Model\Quote::class)) {
@@ -51,7 +52,13 @@ function plugin_init_companypurchasing() {
     $PLUGIN_HOOKS['companyworkflow:approval_invalidated']['companypurchasing'] = 'plugin_companypurchasing_on_workflow_event';
 
     // P2D-3: recepción física + outbox (sin hooks nuevos: la saga del motor corre tras el COMMIT de la recepción
-    // y converge por la misma Acción automática `reconcileprojection`). P2D-4 (no implementado): entrega y UI.
+    // y converge por la misma Acción automática `reconcileprojection`).
+
+    // P2D-4: UI propia delgada (controladores Symfony del plugin bajo /plugins/companypurchasing/…, layout/CSRF/menú
+    // NATIVOS) + entrada de menú "Compras" en Gestión. La autorización real vive en cada servicio/controlador.
+    if (class_exists(\GlpiPlugin\Companypurchasing\Menu::class)) {
+        $PLUGIN_HOOKS['menu_toadd']['companypurchasing'] = ['management' => [\GlpiPlugin\Companypurchasing\Menu::class]];
+    }
 }
 
 /**

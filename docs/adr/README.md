@@ -41,5 +41,6 @@ las cosas son como son.
 | [0020](ADR-0020-si4-snipe-remote-identity-saga.md) | SI-4 (SI4-1) — identidad remota determinista en Snipe-IT y saga durable por unidad | Propuesto |
 | [0021](ADR-0021-si4-glpi-asset-infocom-bridge.md) | SI-4 (SI4-2) — resolver-o-crear el activo GLPI, Infocom y AssetBridge en la misma saga | Propuesto |
 | [0022](ADR-0022-si4-qr-label-ack-finalize.md) | SI-4 (SI4-3) — código companyqr, etiqueta, ack del outbox y cierre de la saga | Propuesto |
+| [0023](ADR-0023-companypurchasing-delivery-ui.md) | `companypurchasing` P2D-4 — entrega, cierre, UI, bandejas, notificaciones nativas y métricas | Propuesto |
 
 > Plantilla para nuevos ADR: [`adr-template.md`](adr-template.md).

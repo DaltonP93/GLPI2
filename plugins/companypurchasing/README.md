@@ -5,15 +5,18 @@ Plugin propio de la **Plataforma GLPI Modular**.
 - **Estrategia (matriz):** Build (apoyado en Forms/Assets nativos)
 - **Propósito:** Solicitudes de compra, cotizaciones versionadas, aprobaciones, recepcion y alta/vinculo de activos GLPI.
 - **GLPI soportado:** `>=11.0` y `<12.0` (el `max=12.0` es límite superior **excluyente**; probado en 11.0.8; GLPI 12 no soportado hasta suite de regresión — ver `../../docs/architecture/glpi-version-compatibility.md`)
-- **Estado:** Fase 2D — **P2D-1 (núcleo)** + **P2D-2 (circuito de aprobación)** + **P2D-3 (recepción)**
-  implementados: solicitud → jefe de área (`REQUEST_SCOPE`) → Compras/cotización → Gerencia financiera
-  (`COMMERCIAL_FINANCIAL_SCOPE`) → `APPROVED` → `IN_PURCHASE` → `PARTIALLY_RECEIVED` → `RECEIVED`, sobre
-  `companyworkflow` (único motor) y `companysignature` (evidencia/PDF), con recepción física por unidad y
-  handoff (outbox) para SI-4. **Sin** escritura a Snipe-IT, alta de activos GLPI, Infocom ni companyqr (SI-4 /
-  P2D-4); sin entrega ni UI final (P2D-4).
-- **Versión:** `0.4.0` (P2D-3; esquema nuevo con upgrade idempotente desde 0.3.0).
+- **Estado:** Fase 2D — **P2D-1 (núcleo)** + **P2D-2 (circuito de aprobación)** + **P2D-3 (recepción)** +
+  **P2D-4 (entrega, cierre, UI, notificaciones, métricas)** implementados: solicitud → jefe de área
+  (`REQUEST_SCOPE`) → Compras/cotización → Gerencia financiera (`COMMERCIAL_FINANCIAL_SCOPE`) → `APPROVED` →
+  `IN_PURCHASE` → `PARTIALLY_RECEIVED` → `RECEIVED` → `DELIVERED` → `CLOSED`, sobre `companyworkflow` (único
+  motor) y `companysignature` (evidencia/PDF), con recepción y entrega física por unidad y handoff (outbox) para
+  SI-4. El alta de activos GLPI / Snipe-IT / companyqr la hace SI-4 (`companyintegrations`), **no** Compras.
+- **Versión:** `0.5.0` (P2D-4; esquema nuevo con upgrade idempotente desde 0.4.0). Requiere `companyworkflow`
+  `>= 0.6.0` para bandejas/notificaciones (API de lectura); con una versión anterior esas lecturas fallan
+  cerradas.
 - **Decisiones:** P2D-2 `../../docs/adr/ADR-0018-companypurchasing-approvals.md` · P2D-3
-  `../../docs/adr/ADR-0019-companypurchasing-receiving.md`.
+  `../../docs/adr/ADR-0019-companypurchasing-receiving.md` · P2D-4
+  `../../docs/adr/ADR-0023-companypurchasing-delivery-ui.md`.
 - **Gate native-first (contrato de v1):**
   `../../docs/architecture/companypurchasing-native-first-gate.md` — reconciliado con el código real
   ya mergeado (`companyworkflow`, `companysignature`, `companyintegrations` SI-1).
@@ -88,13 +91,47 @@ defecto), `outbox_max_attempts`, `outbox_max_lease_seconds`, `receipt_max_units_
 el motor refleje la recepción en vivo; sin él, la recepción se confirma igual y la Acción automática converge);
 Compras `MANAGE_PURCHASING` para iniciar la compra; worker de integración **sólo** `RIGHT_INTEGRATION`.
 
+## Qué agrega P2D-4 (entrega física, cierre, UI, bandejas, notificaciones nativas, métricas)
+| Pieza | Rol |
+|------|-----|
+| `Service/PurchasingWorkflow` (extendido) | Nueva **versión** de la misma definición: `RECEIVED →deliver_complete→ DELIVERED →close→ CLOSED` (`delivery_bound` / `close_bound`, sólo las aporta Compras). `RECEIVED` y `DELIVERED` intermedios, `CLOSED` final. **Sin** `PARTIALLY_DELIVERED` (la entrega parcial vive en las unidades). Regla pura `physicalTarget()`; `syncPath()` extendido. |
+| `Service/DeliveryService` + `DeliveryRules` + `DeliveryException` | `deliver()` (`RIGHT_DELIVER` + entidad, `idempotency_key` obligatoria): UNA transacción — `FOR UPDATE` de las unidades en orden estable (id) → clave (`FOR UPDATE`; replay exacto ⇒ mismo lote, otra entrada ⇒ conflicto) → validación bajo lock → **gate de inventario** (inventariable ⇒ su outbox `DONE`) → lote append-only → `UPDATE` condicionado (`affectedRows` exacto) → `delivery_seq` + auditoría. Cualquier fallo ⇒ ROLLBACK total. Un reintento acotado ante deadlock/lock-wait. `closeRequest()` (`MANAGE_PURCHASING` + entidad): exige motor `DELIVERED`, todas las unidades entregadas, nada pendiente de recibir, outbox `DONE` e integridad limpia; idempotente (`already_closed`). Errores funcionales tipados (`acl`, `entity`, `recipient`, `unit_not_deliverable`, `inventory_gate`, `not_ready_to_close`…), nunca SQL. |
+| `Model/DeliveryBatch` + `ReceiptUnit` (extendido) | Lote de entrega APPEND-ONLY (destinatario, actor, fecha, notas, `units_count`, `input_sha256`, `correlation_id`); la unidad guarda `delivery_batches_id`, `delivered_at`, `delivered_to_users_id`. Una unidad se entrega **una vez**; identidad `receipt_unit_uuid`. |
+| `Service/ReceivingSync` (saga física) | Recepción **y** entrega: COMMIT local primero, motor después; marcador durable `delivery_seq`/`delivery_synced_seq`; la Acción automática converge si el proceso cae. Jamás se deshace una entrega por un fallo del motor. |
+| `Service/InboxService` + `WorkflowGateway` | Bandejas **derivadas del motor** (API de lectura de `companyworkflow` 0.6.0): "para mí" = `pendingDecisionsForCurrentUser()`; Compras / recepción / entrega = `availableActions()` de la instancia ∩ derecho de dominio. Nunca por `domain_state` hardcodeado. |
+| `Controller/PageController` + `ActionController` + `Menu` + `templates/` | UI delgada con el layout, menú (*Gestión → Compras*) y CSRF **nativos**. 7 páginas GET (listado, bandejas, nueva, detalle, edición, métricas, configuración) y 17 acciones **POST-only** con CSRF, ACL y entidad del lado servidor y **PRG** (un GET sobre una acción ⇒ 405, `MethodGuardController`). Los botones salen de `RequestDetailBuilder` (`availableActions` / `actionsForCurrentUser` ∩ derecho). Twig escapa; sin tokens, `lease_token`, hashes internos ni errores SQL (`SafeError`). |
+| `Service/NotificationDispatcher` + `NotificationRules` + `NotificationSeeder` + `Model/NotificationTargetRequest` | Notificaciones **nativas** (`NotificationEvent::raiseEvent` → `QueuedNotification`): 10 eventos con plantillas/notificaciones sembradas sólo si faltan. Disparador = ledger del motor (listener en vivo + recorrido con cursor en la Acción automática). Como mucho una vez por hecho (`notify:<history_id>:<evento>`). Un fallo de envío **no revierte** el negocio (`notification.failed`). |
+| `Service/MetricsService` + `MetricsMath` | Tablero (`RIGHT_VIEW_METRICS`): solicitudes por estado/mes, montos solicitado/aprobado/comprado **separados por moneda** (exactos, sin float), desglose por entidad/departamento/categoría/proveedor, ciclo y duración por etapa (ledger del motor), recepción, inventario (outbox) y entrega. Aislamiento por entidad (`scopeEntities`). |
+| `Service/RequestQuery` / `RequestDetailBuilder` / `Labels` / `ConfigForm` | Listado con ACL server-side (`VIEW_OWN` ⇒ sólo propias; `VIEW_ENTITY` ⇒ su entidad); detalle consolidado; etiquetas i18n de estados/acciones/eventos; validación del formulario de configuración. |
+| `IntegrationLinkGateway` → `companyintegrations` `InventoryLinkApi` | Muestra en el detalle de la unidad la fase SI-4 y el activo GLPI vinculado mediante una API pública READ-ONLY de `companyintegrations` (sin SQL cross-plugin). |
+
+**Configuración P2D-4:** `delivery_max_units_per_batch` (1000), `inbox_scan_cap` (2000), `metrics_max_requests`
+(5000), `notifications_enabled` (1; además requiere las notificaciones nativas de GLPI activas),
+`notify_cursor` (estado interno del recorrido del ledger).
+
+**Perfiles P2D-4:** entregador `plugin_companypurchasing:RIGHT_DELIVER` (+ `plugin_companyworkflow:READ`);
+cierre `MANAGE_PURCHASING`; tablero `RIGHT_VIEW_METRICS`. El **destinatario** de una entrega debe tener un perfil en
+la entidad de la solicitud.
+
+**Notificaciones:** el administrador ajusta destinatarios/plantillas en *Configuración → Notificaciones* (tipo
+"Solicitud de compra"); el plugin no envía correos por su cuenta ni tiene cola propia.
+
 ## Tests
 - **Unit (puro):** `php plugins/companypurchasing/tests/unit/run.php` — dinero exacto, scopes, política,
   costo por unidad (incl. propiedades aleatorias), transiciones/`syncPath`, payload/hash, UUID v4, saneamiento
   de `last_error` y escaneo estático (sin HTTP/Snipe/activos/Infocom/companyqr/float en el código nuevo).
 - **Integración + E2E (en GLPI, obligatorio en CI):** `php bin/console plugins:companypurchasing:selftest` —
-  P2D-1, P2D-2 y P2D-3 (`[UPGRADE-P2D3]`, `[RECEIVE-*]`, `[OUTBOX]`, `[LEGACY-DEF]`…), con procesos paralelos
-  reales (`plugins:companypurchasing:concurrency-probe`, sólo con `COMPANYPURCHASING_ALLOW_PROBE=1`).
+  P2D-1, P2D-2, P2D-3 (`[UPGRADE-P2D3]`, `[RECEIVE-*]`, `[OUTBOX]`, `[LEGACY-DEF]`…) y P2D-4 (`[UPGRADE-P2D4]`,
+  `[DELIVERY-*]`, `[CLOSE]`, `[LEGACY-DELIVERY]`, `[P2D4-RIGHTS]`, `[INBOX]`, `[METRICS]`, `[NOTIFY]`,
+  `[E2E-FULL]`), con procesos paralelos reales (`plugins:companypurchasing:concurrency-probe`, sólo con
+  `COMPANYPURCHASING_ALLOW_PROBE=1`).
+- **E2E HTTP real (obligatorio en CI):** `bash tests/e2e/companypurchasing-http.sh` — sesión, métodos (GET sobre una
+  acción ⇒ 405 vía `MethodGuardController`), CSRF nativo (sin token / inválido / reutilizado ⇒ 403), PRG, escape de
+  salida y ACL del lado servidor con un usuario sin derechos.
+- **Guardas estáticas de la UI** (en `tests/unit/p2d4.php`): rutas de acción sólo POST, páginas sólo GET,
+  `SecurityStrategy` en cada controlador, PRG, sin SQL en controladores, CSRF en cada formulario POST, `|raw` sólo
+  para dropdowns nativos, sin tokens en plantillas, botones derivados del motor (nunca por estado) y cobertura
+  i18n ES/EN.
 
 ## Regla 0
 Este plugin **no modifica el core de GLPI**. Solo usa hooks/API oficiales.

@@ -8,7 +8,8 @@ Plugin propio de la **Plataforma GLPI Modular**.
 - **GLPI soportado:** `>=11.0` y `<12.0` (probado en 11.0.8).
 - **Estado:** Fase 2 — **SI-1** (read-only) + **SI-4 completo por unidad**: SI4-1 (Snipe, ADR-0020), SI4-2 (activo
   GLPI + Infocom + `asset_bridge`, ADR-0021) y SI4-3 (código companyqr + etiqueta + ack + cierre, ADR-0022). Worker
-  **deshabilitado por defecto** y sin Acción automática.
+  **deshabilitado por defecto** y sin Acción automática. Desde 0.6.0 expone además `Api\InventoryLinkApi` (READ-ONLY)
+  para que Compras muestre la fase SI-4 y el activo vinculado de cada unidad (ver CHANGELOG).
 
 ## Regla 0 y licencia
 No modifica el core de GLPI **ni el de Snipe-IT**. **Snipe-IT es AGPL-3.0 → integración SÓLO por
@@ -121,7 +122,8 @@ core**.
   itemtypes mapeados en las entidades de las unidades e `infocom` READ/CREATE/UPDATE. Sin derecho ⇒ `BLOCKED_CONFIG`.
 
 ## Alcance SI4-3 (ADR-0022) — código companyqr, etiqueta, ack y cierre
-Continúa cada unidad desde `BRIDGED`: `QR_READY → COMPLETED`. **Todavía NO** P2D-4 (entrega/UI).
+Continúa cada unidad desde `BRIDGED`: `QR_READY → COMPLETED`. La entrega/UI es de Compras (P2D-4), que lee el
+resultado sólo por `Api\InventoryLinkApi` (READ-ONLY, 0.6.0).
 
 - **companyqr sólo por su API pública** (`GlpiPlugin\Companyqr\Api\CompanyQrApi`, vía `CoreQrGateway`):
   - sin otro sistema de QR ni de PDF;
@@ -182,6 +184,7 @@ Continúa cada unidad desde `BRIDGED`: `QR_READY → COMPLETED`. **Todavía NO**
 | `src/Si4/` (SI4-1) | `Si4Worker` · `HandoffSource` (+ `PurchasingHandoffSource`, `InMemoryHandoffSource`) · `SagaStore` (+ `DbSagaStore`, `InMemorySagaStore`) · `MappingResolver` (+ `DbMappingResolver`, `ArrayMappingResolver`, `MappingRules`) · `AssetTagDeriver` · `RemoteAssetMatcher` · `Si4Config` · `Si4Errors` · `WorkerSession` |
 | `src/Si4/` (SI4-2) | `Si4GlpiStage` · `GlpiAssetGateway` (+ `CoreGlpiAssetGateway`, `InMemoryGlpiAssets`) · `GlpiCandidateMatcher` · `InfocomPolicy` · `BridgeStore` (+ `DbBridgeStore`, `InMemoryBridgeStore`) · `BridgeMatcher` · `GlpiMappingResolver` (+ `DbGlpiMappingResolver`, `ArrayGlpiMappingResolver`, `GlpiMappingRules`) |
 | `src/Si4/` (SI4-3) | `Si4QrStage` · `Si4Finalizer` (+ `FinalizerCursor`: `DbFinalizerCursor`, `InMemoryFinalizerCursor`) · `QrGateway` (+ `CoreQrGateway` ⇒ `CompanyQrApi`, `InMemoryQrGateway`) · `QrGatewayException` · `QrCodeRules` |
+| `src/Api/InventoryLinkApi.php` (0.6.0) | API pública READ-ONLY: fase SI-4 + activo vinculado por `receipt_unit_uuid` (ACL nativa del activo, multi-entidad) |
 | `src/Command/Si4RunCommand.php` | `plugins:companyintegrations:si4-run` (deshabilitado por defecto) |
 | `src/Command/SelftestCommand.php` | `plugins:companyintegrations:selftest` (integración + E2E; SI4-1 en `Si4SelftestScenarios`, SI4-2 en `Si4GlpiSelftestScenarios`, SI4-3 en `Si4QrSelftestScenarios`) |
 | `locales/` | i18n ES/EN |

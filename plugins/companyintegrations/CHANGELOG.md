@@ -3,6 +3,24 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.6.0] — API pública READ-ONLY de vínculo de inventario (P2D-4, ADR-0023)
+### Added
+- `Api\InventoryLinkApi::forUnits(receiptUnitUuids)`: para que Compras muestre el estado de integración de cada
+  unidad **sin** SQL cross-plugin.
+  - Devuelve sólo `phase` (coarse: `pending` / `in_progress` / `completed` / `attention`), `itemtype`, `items_id` y
+    `public_code`.
+  - Sólo considera sagas de entidades accesibles por la sesión.
+  - Incluye el activo y el `public_code` sólo si la sesión puede **ver** ese activo con la ACL nativa
+    (`canViewItem`); si no, sólo la fase.
+  - Nunca devuelve token QR, lease, ids de Snipe, `last_error` ni datos del worker.
+  - UUIDs inválidos se ignoran; máximo 500 por llamada; nunca escribe.
+- Selftest `[SI4-LINK-API]`: whitelist de claves, sin secretos, sin derecho sobre el activo ⇒ sólo la fase,
+  otra entidad ⇒ nada, fases coarse, sólo lectura. Unit: `phaseOf()` y forma de la API (427 en total).
+
+### Unchanged
+- Sin cambios de esquema ni de comportamiento del worker SI-4 (sigue **deshabilitado por defecto**, sin Acción
+  automática).
+
 ## [0.5.0] — SI4-3 (código companyqr + etiqueta + ack del outbox + cierre de la saga, ADR-0022)
 ### Added
 - **Etapa QR de la saga** (`Si4QrStage`): `BRIDGED → QR_READY → COMPLETED`. `BLOCKED_CONFIG` admite

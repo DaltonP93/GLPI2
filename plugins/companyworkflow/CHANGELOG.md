@@ -3,7 +3,27 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
-## [Unreleased]
+## [0.6.0] — API de LECTURA para bandejas y notificaciones (P2D-4, ADR-0023)
+### Added
+- `WorkflowApi::actionsForCurrentUser(Instance)`: acciones que la sesión actual puede ejecutar AHORA.
+  - Aplica los mismos controles previos que `transition()`: derecho de la transición, entidad, aprobador efectivo
+    de la etapa (grupo/perfil + delegaciones) y `approve` ya votado.
+  - Es SÓLO LECTURA: no muta nada ni escribe historial.
+- `WorkflowApi::pendingDecisionsForCurrentUser(itemtype, limit, scanCap)`: bandeja "pendiente de MI decisión".
+  - Recorre instancias abiertas del tipo en las entidades activas, con tope de recorrido configurable por el
+    consumidor.
+  - Devuelve sólo aquellas donde la sesión es aprobador efectivo y no votó.
+- `WorkflowApi::currentApprovers(Instance)`: aprobadores efectivos de la etapa actual (p. ej. destinatarios de
+  notificaciones).
+- `WorkflowApi::history()` acepta el filtro `instances_ids` (varias instancias en una lectura).
+- `WorkflowApi::lastHistoryId()`: permite a un consumidor arrancar su cursor "desde ahora".
+- `Engine::DECISION_ACTIONS` (`approve` / `reject` / `return`).
+- Selftest `[INBOX]` (14 comprobaciones):
+  - el aprobador efectivo la ve, aunque sea por delegación;
+  - un aprobador de otra etapa, otra entidad activa o sin derecho no la ve;
+  - tras votar sale de la bandeja;
+  - la lectura no muta la instancia ni el historial.
+
 ### Fixed — `install()` seguro en upgrade (issue #14)
 - GLPI vuelve a llamar `plugin_companyworkflow_install()` al actualizar el plugin. Antes,
   `ProfileRight::addProfileRights()` re-insertaba el derecho y el upgrade abortaba con

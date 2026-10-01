@@ -1,0 +1,346 @@
+{% extends "layout/page_without_tabs.html.twig" %}
+
+{% block content_title %}{{ title }}{% endblock %}
+
+{% block content_body %}
+   {{ include('@companypurchasing/parts/nav.html.twig') }}
+   {% set h = r.header %}
+
+   {% if not r.integrity.clean %}
+      <div class="alert alert-warning">{{ __('Approval integrity must be repaired first', 'companypurchasing') }}</div>
+   {% endif %}
+   {% if h.sync_pending %}
+      <div class="alert alert-info">{{ __('The physical facts are confirmed; the workflow state is being synchronized', 'companypurchasing') }}</div>
+   {% endif %}
+
+   {# ------------------------------------------------ cabecera #}
+   <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between">
+         <h3 class="card-title">{{ __('Request header', 'companypurchasing') }}</h3>
+         <div><span class="badge bg-primary">{{ h.state_label }}</span> <span class="badge bg-secondary-lt">{{ h.phase_label }}</span></div>
+      </div>
+      <div class="card-body row g-2">
+         <div class="col-md-3"><strong>{{ __('Number', 'companypurchasing') }}:</strong> {{ h.number }}</div>
+         <div class="col-md-3"><strong>{{ __('Requester', 'companypurchasing') }}:</strong> {{ h.requester }}</div>
+         <div class="col-md-3"><strong>{{ __('Entity', 'companypurchasing') }}:</strong> {{ h.entity }}</div>
+         <div class="col-md-3"><strong>{{ __('Department', 'companypurchasing') }}:</strong> {{ h.department }}</div>
+         <div class="col-md-3"><strong>{{ __('Category', 'companypurchasing') }}:</strong> {{ h.category }}</div>
+         <div class="col-md-3"><strong>{{ __('Destination', 'companypurchasing') }}:</strong> {{ h.destination }}</div>
+         <div class="col-md-3"><strong>{{ __('Suggested supplier', 'companypurchasing') }}:</strong> {{ h.supplier_suggested }}</div>
+         <div class="col-md-3"><strong>{{ __('Budget', 'companypurchasing') }}:</strong> {{ h.budget }}</div>
+         <div class="col-md-3"><strong>{{ __('Estimated amount', 'companypurchasing') }}:</strong> {{ h.amount.display }} {{ h.currency }}</div>
+         <div class="col-md-3"><strong>{{ __('Date', 'companypurchasing') }}:</strong> {{ h.date_creation|formatted_datetime }}</div>
+         <div class="col-md-3"><strong>{{ __('Last update', 'companypurchasing') }}:</strong> {{ h.date_mod|formatted_datetime }}</div>
+         {% if h.frozen %}<div class="col-md-3"><span class="badge bg-warning-lt">{{ __('Purchase started: quantities, prices and selection are frozen', 'companypurchasing') }}</span></div>{% endif %}
+         <div class="col-md-6"><strong>{{ __('Justification', 'companypurchasing') }}:</strong><div class="text-wrap">{{ h.reason|nl2br }}</div></div>
+         <div class="col-md-6"><strong>{{ __('Observations', 'companypurchasing') }}:</strong><div class="text-wrap">{{ h.observations|nl2br }}</div></div>
+      </div>
+      {% if r.can.edit %}
+         <div class="card-footer"><a class="btn btn-outline-primary" href="{{ base }}/request/{{ r.id }}/edit"><i class="ti ti-pencil me-1"></i>{{ __('Edit draft', 'companypurchasing') }}</a></div>
+      {% endif %}
+   </div>
+
+   {# ------------------------------------------------ decisiones (derivadas del MOTOR: actionsForCurrentUser) #}
+   {% if r.can.decide is not empty %}
+      <form method="post" action="{{ base }}/request/{{ r.id }}/decide" class="card mb-3">
+         <div class="card-header"><h3 class="card-title">{{ __('Your decision', 'companypurchasing') }}</h3></div>
+         <div class="card-body row g-2 align-items-end">
+            <div class="col-md-8">
+               <label class="form-label">{{ __('Comment', 'companypurchasing') }}</label>
+               <textarea class="form-control" name="comment" rows="2" maxlength="4000"></textarea>
+            </div>
+            <div class="col-md-4 d-flex gap-2">
+               {{ include('@companypurchasing/parts/csrf.html.twig') }}
+               <input type="hidden" name="expected_state" value="{{ h.state }}">
+               {% for action, label in decide_labels %}
+                  <button type="submit" name="decision" value="{{ action }}" class="btn {{ action == 'approve' ? 'btn-success' : (action == 'reject' ? 'btn-danger' : 'btn-warning') }}">{{ label }}</button>
+               {% endfor %}
+            </div>
+         </div>
+      </form>
+   {% endif %}
+   {% if r.can.submit %}
+      <form method="post" action="{{ base }}/request/{{ r.id }}/submit" class="mb-3">
+         {{ include('@companypurchasing/parts/csrf.html.twig') }}
+         <button type="submit" class="btn btn-success"><i class="ti ti-send me-1"></i>{{ __('Submit for approval', 'companypurchasing') }}</button>
+      </form>
+   {% endif %}
+
+   {# ------------------------------------------------ líneas #}
+   <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">{{ __('Lines', 'companypurchasing') }}</h3></div>
+      <div class="table-responsive">
+         <table class="table table-sm align-middle mb-0">
+            <thead><tr>
+               <th>#</th><th>{{ __('Description', 'companypurchasing') }}</th><th>{{ __('Category', 'companypurchasing') }}</th>
+               <th class="text-end">{{ __('Quantity', 'companypurchasing') }}</th><th>{{ __('Unit', 'companypurchasing') }}</th>
+               <th>{{ __('Inventoriable', 'companypurchasing') }}</th>
+               <th class="text-end">{{ __('Estimated unit price', 'companypurchasing') }}</th><th class="text-end">{{ __('Estimated total', 'companypurchasing') }}</th>
+               <th class="text-end">{{ __('Ordered', 'companypurchasing') }}</th><th class="text-end">{{ __('Received', 'companypurchasing') }}</th><th class="text-end">{{ __('Pending', 'companypurchasing') }}</th>
+               <th class="text-end">{{ __('Purchase unit price', 'companypurchasing') }}</th>
+            </tr></thead>
+            <tbody>
+               {% for l in r.lines %}
+                  <tr>
+                     <td>{{ l.line_no }}</td><td>{{ l.description }}</td><td>{{ l.category }}</td>
+                     <td class="text-end">{{ l.quantity }}</td><td>{{ l.unit }}</td>
+                     <td>{{ l.is_inventoriable ? __('Yes', 'companypurchasing') : __('No', 'companypurchasing') }}</td>
+                     <td class="text-end">{{ l.estimated_unit_price.display }}</td><td class="text-end">{{ l.estimated_line_total.display }}</td>
+                     <td class="text-end">{{ l.ordered_qty }}</td><td class="text-end">{{ l.received_qty }}</td><td class="text-end">{{ l.pending_qty }}</td>
+                     <td class="text-end">{{ l.purchase_unit_price.display }}</td>
+                  </tr>
+               {% endfor %}
+            </tbody>
+         </table>
+      </div>
+   </div>
+
+   {# ------------------------------------------------ cotizaciones #}
+   <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">{{ __('Quotes', 'companypurchasing') }}</h3></div>
+      <div class="card-body">
+         {% for q in r.quotes %}
+            <div class="border rounded p-2 mb-2 {{ q.selected ? 'border-success' : '' }}">
+               <div class="d-flex justify-content-between">
+                  <div>
+                     <strong>{{ q.supplier }}</strong> {{ q.reference }}
+                     {% if q.selected %}<span class="badge bg-success ms-1">{{ __('Selected quote', 'companypurchasing') }}</span>{% endif %}
+                     {% if q.purchase %}<span class="badge bg-warning ms-1">{{ __('Purchase quote', 'companypurchasing') }}</span>{% endif %}
+                  </div>
+                  <div>{{ __('Total', 'companypurchasing') }}: {{ q.total.display is not empty ? q.total.display ~ ' ' ~ h.currency : __('Incomplete quote', 'companypurchasing') }}</div>
+               </div>
+               <div class="small text-muted">
+                  {{ __('Discounts', 'companypurchasing') }}: {{ q.discounts.display }} · {{ __('Taxes', 'companypurchasing') }}: {{ q.taxes.display }} · {{ __('Freight', 'companypurchasing') }}: {{ q.freight.display }}
+               </div>
+               {% if q.documents is not empty %}
+                  <ul class="mb-1">{% for d in q.documents %}<li><a href="{{ d.url }}" rel="noopener">{{ d.name }}</a></li>{% endfor %}</ul>
+               {% endif %}
+               {% if r.can.quotes %}
+                  <form method="post" action="{{ base }}/request/{{ r.id }}/quote/{{ q.id }}/update" class="row g-2 align-items-end mt-1">
+                     {% for l in r.lines %}
+                        <div class="col-md-2"><label class="form-label small">{{ l.line_no }}. {{ l.description }}</label>
+                           <input class="form-control form-control-sm" name="price[{{ l.id }}]" inputmode="decimal" value="{{ q.prices[l.id] ?? '' }}"></div>
+                     {% endfor %}
+                     <div class="col-md-1"><label class="form-label small">{{ __('Discounts', 'companypurchasing') }}</label><input class="form-control form-control-sm" name="discounts" value="{{ q.discounts.raw }}"></div>
+                     <div class="col-md-1"><label class="form-label small">{{ __('Taxes', 'companypurchasing') }}</label><input class="form-control form-control-sm" name="taxes" value="{{ q.taxes.raw }}"></div>
+                     <div class="col-md-1"><label class="form-label small">{{ __('Freight', 'companypurchasing') }}</label><input class="form-control form-control-sm" name="freight" value="{{ q.freight.raw }}"></div>
+                     <div class="col-md-2">
+                        {{ include('@companypurchasing/parts/csrf.html.twig') }}
+                        <button class="btn btn-sm btn-primary" type="submit">{{ __('Save quote', 'companypurchasing') }}</button>
+                     </div>
+                  </form>
+                  <div class="d-flex gap-2 mt-2">
+                     {% if not q.selected %}
+                        <form method="post" action="{{ base }}/request/{{ r.id }}/quote/{{ q.id }}/select">
+                           {{ include('@companypurchasing/parts/csrf.html.twig') }}
+                           <input type="hidden" name="lock_version" value="{{ r.lock_version }}">
+                           <button class="btn btn-sm btn-outline-success" type="submit">{{ __('Select this quote', 'companypurchasing') }}</button>
+                        </form>
+                     {% endif %}
+                     <form method="post" action="{{ base }}/request/{{ r.id }}/quote/{{ q.id }}/attach" enctype="multipart/form-data" class="d-flex gap-1">
+                        {{ include('@companypurchasing/parts/csrf.html.twig') }}
+                        <input type="file" class="form-control form-control-sm" name="document" required>
+                        <button class="btn btn-sm btn-outline-primary" type="submit">{{ __('Attach document', 'companypurchasing') }}</button>
+                     </form>
+                  </div>
+               {% endif %}
+            </div>
+         {% else %}
+            <div class="text-muted">{{ __('No quotes yet', 'companypurchasing') }}</div>
+         {% endfor %}
+
+         {% if r.can.quotes %}
+            <h4 class="mt-3">{{ __('New quote', 'companypurchasing') }}</h4>
+            <form method="post" action="{{ base }}/request/{{ r.id }}/quote/create" class="row g-2 align-items-end">
+               <div class="col-md-3"><label class="form-label">{{ __('Supplier', 'companypurchasing') }}</label>{{ supplier_dropdown|raw }}</div>
+               <div class="col-md-2"><label class="form-label">{{ __('Reference', 'companypurchasing') }}</label><input class="form-control" name="reference" maxlength="190"></div>
+               {% for l in r.lines %}
+                  <div class="col-md-2"><label class="form-label small">{{ l.line_no }}. {{ l.description }}</label><input class="form-control" name="price[{{ l.id }}]" inputmode="decimal"></div>
+               {% endfor %}
+               <div class="col-md-1"><label class="form-label">{{ __('Discounts', 'companypurchasing') }}</label><input class="form-control" name="discounts" value="0"></div>
+               <div class="col-md-1"><label class="form-label">{{ __('Taxes', 'companypurchasing') }}</label><input class="form-control" name="taxes" value="0"></div>
+               <div class="col-md-1"><label class="form-label">{{ __('Freight', 'companypurchasing') }}</label><input class="form-control" name="freight" value="0"></div>
+               <div class="col-md-2">
+                  {{ include('@companypurchasing/parts/csrf.html.twig') }}
+                  <button class="btn btn-primary" type="submit"><i class="ti ti-plus me-1"></i>{{ __('Create quote', 'companypurchasing') }}</button>
+               </div>
+            </form>
+         {% endif %}
+
+         {% if r.can.start_purchase %}
+            <form method="post" action="{{ base }}/request/{{ r.id }}/purchase/start" class="mt-3 d-flex gap-2 align-items-end">
+               <div class="flex-grow-1"><label class="form-label">{{ __('Comment', 'companypurchasing') }}</label><input class="form-control" name="comment" maxlength="4000"></div>
+               {{ include('@companypurchasing/parts/csrf.html.twig') }}
+               <button class="btn btn-warning" type="submit"><i class="ti ti-shopping-cart me-1"></i>{{ __('Start purchase', 'companypurchasing') }}</button>
+            </form>
+         {% endif %}
+      </div>
+   </div>
+
+   {# ------------------------------------------------ aprobaciones / historial (ledger del motor) #}
+   <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">{{ __('Approvals and history', 'companypurchasing') }}</h3></div>
+      <div class="table-responsive">
+         <table class="table table-sm mb-0">
+            <thead><tr><th>{{ __('Date', 'companypurchasing') }}</th><th>{{ __('Event', 'companypurchasing') }}</th><th>{{ __('From', 'companypurchasing') }}</th><th>{{ __('To', 'companypurchasing') }}</th><th>{{ __('User', 'companypurchasing') }}</th><th>{{ __('Comment', 'companypurchasing') }}</th></tr></thead>
+            <tbody>
+               {% for e in r.history %}
+                  <tr><td>{{ e.date|formatted_datetime }}</td><td>{{ e.event }}</td><td>{{ e.from }}</td><td>{{ e.to }}</td><td>{{ e.actor }}</td><td>{{ e.comment }}</td></tr>
+               {% endfor %}
+            </tbody>
+         </table>
+      </div>
+   </div>
+
+   {# ------------------------------------------------ PDFs / evidencias #}
+   <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">{{ __('Approved PDFs and evidence', 'companypurchasing') }}</h3></div>
+      <div class="card-body">
+         <ul>
+            {% for v in r.versions %}<li>{{ v.scope }} · v{{ v.version }} · {{ v.pdf_status }}</li>{% endfor %}
+         </ul>
+         <ul>
+            {% for d in r.pdfs %}<li><a href="{{ d.url }}" rel="noopener"><i class="ti ti-file-type-pdf me-1"></i>{{ d.name }}</a></li>{% endfor %}
+         </ul>
+         {% if r.pdf_retry %}
+            <form method="post" action="{{ base }}/request/{{ r.id }}/pdf/retry">
+               {{ include('@companypurchasing/parts/csrf.html.twig') }}
+               <button class="btn btn-sm btn-outline-secondary" type="submit">{{ __('Retry approved PDF', 'companypurchasing') }}</button>
+            </form>
+         {% endif %}
+      </div>
+   </div>
+
+   {# ------------------------------------------------ recepción #}
+   <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">{{ __('Reception', 'companypurchasing') }}</h3></div>
+      <div class="card-body">
+         {% for b in r.receipts %}
+            <div>{{ b.date|formatted_datetime }} · {{ b.actor }} · {{ b.units }} {{ __('units', 'companypurchasing') }} {{ b.notes }}</div>
+         {% else %}
+            <div class="text-muted">{{ __('Nothing received yet', 'companypurchasing') }}</div>
+         {% endfor %}
+         {% if r.can.receive %}
+            <form method="post" action="{{ base }}/request/{{ r.id }}/receive" class="mt-3">
+               <table class="table table-sm">
+                  <thead><tr><th>{{ __('Line', 'companypurchasing') }}</th><th class="text-end">{{ __('Ordered', 'companypurchasing') }}</th><th class="text-end">{{ __('Received', 'companypurchasing') }}</th><th class="text-end">{{ __('Pending', 'companypurchasing') }}</th><th>{{ __('Quantity to receive', 'companypurchasing') }}</th><th>{{ __('Serials (one per line)', 'companypurchasing') }}</th></tr></thead>
+                  <tbody>
+                     {% for l in r.lines %}
+                        {% if l.pending_qty > 0 %}
+                           <tr>
+                              <td>{{ l.line_no }}. {{ l.description }}</td><td class="text-end">{{ l.ordered_qty }}</td><td class="text-end">{{ l.received_qty }}</td><td class="text-end">{{ l.pending_qty }}</td>
+                              <td><input class="form-control form-control-sm" name="qty[{{ l.id }}]" inputmode="numeric" value="0"></td>
+                              <td><textarea class="form-control form-control-sm" name="serials[{{ l.id }}]" rows="2"></textarea></td>
+                           </tr>
+                        {% endif %}
+                     {% endfor %}
+                  </tbody>
+               </table>
+               <div class="d-flex gap-2 align-items-end">
+                  <div class="flex-grow-1"><label class="form-label">{{ __('Notes', 'companypurchasing') }}</label><input class="form-control" name="notes" maxlength="4000"></div>
+                  {{ include('@companypurchasing/parts/csrf.html.twig') }}
+                  <input type="hidden" name="idempotency_key" value="{{ receive_key }}">
+                  <button class="btn btn-primary" type="submit"><i class="ti ti-package-import me-1"></i>{{ __('Record reception', 'companypurchasing') }}</button>
+               </div>
+            </form>
+         {% endif %}
+      </div>
+   </div>
+
+   {# ------------------------------------------------ unidades físicas + integración de inventario #}
+   <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">{{ __('Physical units and inventory integration', 'companypurchasing') }}</h3></div>
+      <div class="table-responsive">
+         <table class="table table-sm mb-0">
+            <thead><tr>
+               <th>{{ __('Unit', 'companypurchasing') }}</th><th>{{ __('Line', 'companypurchasing') }}</th><th>{{ __('Serial', 'companypurchasing') }}</th>
+               <th>{{ __('Physical state', 'companypurchasing') }}</th><th>{{ __('Inventory integration', 'companypurchasing') }}</th>
+               <th>{{ __('Inventory code', 'companypurchasing') }}</th><th>{{ __('Delivered to', 'companypurchasing') }}</th>
+            </tr></thead>
+            <tbody>
+               {% for u in r.units %}
+                  <tr>
+                     <td><code>{{ u.short_uuid }}</code></td>
+                     <td>{{ u.line_no }}. {{ u.description }} ({{ u.unit_index }})</td>
+                     <td>{{ u.serial }}</td>
+                     <td>{{ u.physical_label }}</td>
+                     <td>{{ u.is_inventoriable ? u.outbox_label : __('Not inventoriable', 'companypurchasing') }}{% if u.integration_label is not empty %} · {{ u.integration_label }}{% endif %}</td>
+                     <td>{% if u.asset_url is not empty %}<a href="{{ u.asset_url }}">{{ u.public_code is not empty ? u.public_code : __('GLPI asset', 'companypurchasing') }}</a>{% else %}{{ u.public_code }}{% endif %}</td>
+                     <td>{{ u.delivered_to }} {% if u.delivered_at is not empty %}({{ u.delivered_at|formatted_datetime }}){% endif %}</td>
+                  </tr>
+               {% else %}
+                  <tr><td colspan="7" class="text-muted">{{ __('No physical units yet', 'companypurchasing') }}</td></tr>
+               {% endfor %}
+            </tbody>
+         </table>
+      </div>
+   </div>
+
+   {# ------------------------------------------------ entrega #}
+   <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">{{ __('Delivery', 'companypurchasing') }}</h3></div>
+      <div class="card-body">
+         {% for b in r.deliveries %}
+            <div>{{ b.date|formatted_datetime }} · {{ b.actor }} → {{ b.recipient }} · {{ b.units }} {{ __('units', 'companypurchasing') }} {{ b.notes }}</div>
+         {% else %}
+            <div class="text-muted">{{ __('Nothing delivered yet', 'companypurchasing') }}</div>
+         {% endfor %}
+         {% if r.can.deliver %}
+            <form method="post" action="{{ base }}/request/{{ r.id }}/deliver" class="mt-3">
+               <table class="table table-sm">
+                  <thead><tr><th></th><th>{{ __('Unit', 'companypurchasing') }}</th><th>{{ __('Line', 'companypurchasing') }}</th><th>{{ __('Serial', 'companypurchasing') }}</th><th>{{ __('Status', 'companypurchasing') }}</th></tr></thead>
+                  <tbody>
+                     {% for u in r.deliverable %}
+                        <tr class="{{ u.enabled ? '' : 'text-muted' }}">
+                           <td><input type="checkbox" class="form-check-input" name="units[]" value="{{ u.uuid }}" {{ u.enabled ? '' : 'disabled' }}></td>
+                           <td><code>{{ u.short }}</code></td><td>{{ u.description }}</td><td>{{ u.serial }}</td><td>{{ u.gate_label }}</td>
+                        </tr>
+                     {% endfor %}
+                  </tbody>
+               </table>
+               <div class="row g-2 align-items-end">
+                  <div class="col-md-4"><label class="form-label">{{ __('Recipient', 'companypurchasing') }}</label>{{ recipient_dropdown|raw }}</div>
+                  <div class="col-md-5"><label class="form-label">{{ __('Notes', 'companypurchasing') }}</label><input class="form-control" name="notes" maxlength="4000"></div>
+                  <div class="col-md-3">
+                     {{ include('@companypurchasing/parts/csrf.html.twig') }}
+                     <input type="hidden" name="idempotency_key" value="{{ deliver_key }}">
+                     <button class="btn btn-primary" type="submit"><i class="ti ti-truck-delivery me-1"></i>{{ __('Record delivery', 'companypurchasing') }}</button>
+                  </div>
+               </div>
+            </form>
+         {% endif %}
+      </div>
+   </div>
+
+   {# ------------------------------------------------ cierre #}
+   {% if h.frozen %}
+      <div class="card mb-3">
+         <div class="card-header"><h3 class="card-title">{{ __('Closure', 'companypurchasing') }}</h3></div>
+         <div class="card-body">
+            {% if r.blockers is not empty %}
+               <ul class="mb-2">{% for b in r.blockers %}<li>{{ b }}</li>{% endfor %}</ul>
+            {% endif %}
+            {% if r.can.close %}
+               <form method="post" action="{{ base }}/request/{{ r.id }}/close" class="d-flex gap-2 align-items-end">
+                  <div class="flex-grow-1"><label class="form-label">{{ __('Comment', 'companypurchasing') }}</label><input class="form-control" name="comment" maxlength="4000"></div>
+                  {{ include('@companypurchasing/parts/csrf.html.twig') }}
+                  <button class="btn btn-dark" type="submit"><i class="ti ti-lock me-1"></i>{{ __('Close request', 'companypurchasing') }}</button>
+               </form>
+            {% endif %}
+         </div>
+      </div>
+   {% endif %}
+
+   {# ------------------------------------------------ auditoría #}
+   <div class="card mb-3">
+      <div class="card-header"><h3 class="card-title">{{ __('Audit', 'companypurchasing') }}</h3></div>
+      <div class="table-responsive">
+         <table class="table table-sm mb-0">
+            <thead><tr><th>{{ __('Date', 'companypurchasing') }}</th><th>{{ __('Event', 'companypurchasing') }}</th><th>{{ __('User', 'companypurchasing') }}</th></tr></thead>
+            <tbody>
+               {% for a in r.audit %}<tr><td>{{ a.date|formatted_datetime }}</td><td>{{ a.event }}</td><td>{{ a.actor }}</td></tr>{% endfor %}
+            </tbody>
+         </table>
+      </div>
+   </div>
+{% endblock %}

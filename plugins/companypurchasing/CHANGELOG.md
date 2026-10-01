@@ -3,6 +3,88 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.5.0] — Fase 2D · P2D-4 (entrega física, cierre, UI, bandejas, notificaciones nativas, métricas)
+Ver `../../docs/adr/ADR-0023-companypurchasing-delivery-ui.md`. Requiere `companyworkflow >= 0.6.0` (API de
+lectura para bandejas/notificaciones; con una versión anterior esas lecturas fallan cerradas).
+
+### Added
+- **Fase de entrega y cierre en el motor** (nueva VERSIÓN de la definición; las instancias previas conservan la
+  suya): `RECEIVED →deliver_complete→ DELIVERED →close→ CLOSED`, con condiciones `delivery_bound` / `close_bound`
+  que sólo aporta Compras. `DELIVERED` es intermedio y `CLOSED` es final. Sin `PARTIALLY_DELIVERED`: la entrega
+  parcial vive en las unidades.
+- **`DeliveryService::deliver()`** (`RIGHT_DELIVER` + entidad, `idempotency_key` obligatoria), en UNA transacción:
+  1. lock `FOR UPDATE` de las unidades en orden estable;
+  2. lock de la clave (replay exacto ⇒ mismo lote; otra entrada ⇒ conflicto);
+  3. validación bajo lock y **gate de inventario** (unidad inventariable ⇒ su outbox `DONE`);
+  4. lote append-only y `UPDATE` condicionado con `affectedRows` exacto;
+  5. `delivery_seq` + auditoría.
+
+  Cualquier fallo ⇒ ROLLBACK total. Hay un reintento acotado ante deadlock/lock-wait. El destinatario debe ser un
+  usuario activo con perfil en la entidad.
+- **`DeliveryService::closeRequest()`** (`MANAGE_PURCHASING` + entidad):
+  - exige motor `DELIVERED`, todas las unidades entregadas, nada pendiente de recibir, outbox `DONE` e integridad
+    limpia;
+  - transición con `expected_lock_version`;
+  - idempotente (`already_closed`, auditado una vez).
+- Errores funcionales tipados (`DeliveryException`) y motivos de bloqueo legibles (`DeliveryRules`); nunca SQL ni
+  datos técnicos.
+- **Saga física** (`ReceivingSync`): recepción y entrega con marcador durable `delivery_seq` /
+  `delivery_synced_seq`. COMMIT local primero, motor después; la Acción automática converge. `reconcile` reporta
+  instancias P2D-3 sin fase de entrega (`legacy`), sin migrarlas.
+- **UI nativa delgada:**
+  - menú *Gestión → Compras*;
+  - 7 páginas GET: mis solicitudes, bandejas, nueva, detalle, edición, métricas y configuración;
+  - 17 acciones POST con CSRF nativo, ACL y entidad del lado servidor y PRG;
+  - formularios de solicitud/líneas, decisiones, cotizaciones (con adjuntos como `Document` nativo), compra,
+    recepción, entrega, cierre, reintento de PDF y configuración/publicación;
+  - botones derivados de `availableActions()` / `actionsForCurrentUser()` del motor ∩ derecho de dominio;
+  - Twig escapado, sin tokens/lease/hashes internos ni errores SQL (`SafeError`).
+- **Bandejas derivadas del motor** (`InboxService`): para mí (aprobador efectivo, sin voto), Compras, recepciones
+  pendientes y entregas pendientes.
+- **Notificaciones nativas:**
+  - `NotificationTargetRequest`, con 10 eventos: enviada, pendiente de aprobación, aprobada, rechazada, devuelta,
+    compra iniciada, recepción completa, lista para entregar, entregada y cerrada;
+  - plantillas y notificaciones sembradas sólo si faltan;
+  - destinatarios: solicitante, aprobadores efectivos, actor, destinatario, más los destinos nativos;
+  - disparo desde el ledger del motor (listener + recorrido con `notify_cursor` en la Acción automática), como
+    mucho una vez por hecho;
+  - un fallo de envío no revierte nada (`notification.failed`).
+- **Métricas** (`MetricsService`, `RIGHT_VIEW_METRICS`):
+  - estado/mes;
+  - montos solicitado/aprobado/comprado **por moneda** (exactos, sin float);
+  - desglose por entidad/departamento/categoría/proveedor;
+  - ciclo y duración por etapa desde el ledger del motor;
+  - recepción, inventario y entrega;
+  - aislamiento por entidad (el filtro sólo reduce).
+- Detalle de unidad con la fase SI-4 y el activo GLPI vinculado mediante `companyintegrations`
+  `Api\InventoryLinkApi` (READ-ONLY; sin SQL cross-plugin).
+- Esquema (upgrade idempotente desde 0.4.0):
+  - tabla `delivery_batches` (`idempotency_key` UNIQUE);
+  - columnas `receipt_units.delivery_batches_id/delivered_at/delivered_to_users_id` y
+    `requests.delivery_seq/delivery_synced_seq`;
+  - claves de configuración `delivery_max_units_per_batch`, `inbox_scan_cap`, `metrics_max_requests`,
+    `notifications_enabled`, `notify_cursor`, sembradas sólo si faltan.
+- Eventos de auditoría `delivery.recorded`, `delivery.synced`, `request.closed`, `notification.raised`,
+  `notification.failed`. i18n ES/EN de todos los textos nuevos (~260 cadenas).
+- Tests:
+  - unit `tests/unit/p2d4.php`: reglas puras y guardas estáticas de seguridad web/UI;
+  - selftest `[UPGRADE-P2D4]`, `[DELIVERY-46/DUP/IDEMPOTENT/GATE/CONC/CRASH-SYNC/ACL]`, `[CLOSE]`,
+    `[LEGACY-DELIVERY]`, `[P2D4-RIGHTS]`, `[INBOX]`, `[METRICS]`, `[NOTIFY]`, `[E2E-FULL]`;
+  - probe `deliver` con procesos paralelos reales.
+
+### Changed
+- `RIGHT_DELIVER` (256) y `RIGHT_VIEW_METRICS` (512) pasan a estar activos.
+- `uninstall()` elimina también `delivery_batches` y las notificaciones/plantillas nativas del tipo.
+
+### Security
+- Toda mutación HTTP es POST + CSRF + ACL/entidad en el servidor; las páginas son GET sin efectos. Los filtros
+  del navegador nunca amplían el alcance de entidad.
+- `MethodGuardController`: un GET/HEAD sobre una ruta de acción responde **405**. Sin él, GLPI 11.0.8 respondía
+  500 (el router de plugins no traduce `MethodNotAllowedException`); el core no se modifica.
+- E2E HTTP real `tests/e2e/companypurchasing-http.sh` (en CI): sin sesión ⇒ no se sirve; acciones GET ⇒ 405;
+  POST sin token, con token inválido o reutilizado ⇒ 403 y nada creado; POST válido ⇒ PRG; texto con `<script>`
+  escapado; usuario sin derechos ⇒ 403 en las páginas y su POST (con CSRF válido) no crea nada.
+
 ## [0.4.0] — Fase 2D · P2D-3 (recepción física + handoff a SI-4)
 Ver `../../docs/adr/ADR-0019-companypurchasing-receiving.md` (sólo decisiones nuevas; el resto lo fija el gate §5–§7).
 

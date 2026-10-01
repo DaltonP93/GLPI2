@@ -325,6 +325,23 @@ require __DIR__ . '/si4.php';
 require __DIR__ . '/si4g.php';
 // ---- SI4-3: código companyqr + etiqueta + ack + finalizador (ADR-0022) ----
 require __DIR__ . '/si4q.php';
+// ---- P2D-4: API pública READ-ONLY para la UI de Compras (fase coarse; ACL nativa del activo en el selftest) ----
+require dirname(__DIR__, 2) . '/src/Api/InventoryLinkApi.php';
+echo "== P2D-4 · InventoryLinkApi (sólo lectura) ==\n";
+ok('fase coarse por estado de saga (completed / attention / pending / in_progress)',
+    \GlpiPlugin\Companyintegrations\Api\InventoryLinkApi::phaseOf('COMPLETED') === 'completed'
+    && \GlpiPlugin\Companyintegrations\Api\InventoryLinkApi::phaseOf('MANUAL_REVIEW') === 'attention'
+    && \GlpiPlugin\Companyintegrations\Api\InventoryLinkApi::phaseOf('BLOCKED_CONFIG') === 'attention'
+    && \GlpiPlugin\Companyintegrations\Api\InventoryLinkApi::phaseOf('PENDING') === 'pending'
+    && \GlpiPlugin\Companyintegrations\Api\InventoryLinkApi::phaseOf('QR_READY') === 'in_progress'
+    && \GlpiPlugin\Companyintegrations\Api\InventoryLinkApi::phaseOf('SNIPE_CREATING') === 'in_progress');
+ok('whitelist de claves devueltas: sin token/lease/snipe/error', \GlpiPlugin\Companyintegrations\Api\InventoryLinkApi::KEYS === ['phase', 'itemtype', 'items_id', 'public_code']);
+$linkSrc = '';
+foreach (token_get_all((string) file_get_contents(dirname(__DIR__, 2) . '/src/Api/InventoryLinkApi.php')) as $tok) {
+    $linkSrc .= (is_array($tok) && in_array($tok[0], [T_COMMENT, T_DOC_COMMENT], true)) ? '' : (is_array($tok) ? $tok[1] : $tok);
+}
+ok('InventoryLinkApi no escribe (sin add/update/delete/doQuery/transition)', preg_match('/->(add|update|delete|doQuery|insert|transition|advance)\(/', $linkSrc) !== 1
+    && str_contains($linkSrc, 'canViewItem()') && str_contains($linkSrc, 'haveAccessToEntity'));
 
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"

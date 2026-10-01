@@ -1,0 +1,95 @@
+{% extends "layout/page_without_tabs.html.twig" %}
+
+{% macro amounts(list) %}
+   {% for cur, a in list %}<div>{{ a }} {{ cur }}</div>{% else %}<span class="text-muted">—</span>{% endfor %}
+{% endmacro %}
+
+{% block content_title %}{{ title }}{% endblock %}
+
+{% block content_body %}
+   {% import _self as m_ %}
+   {{ include('@companypurchasing/parts/nav.html.twig') }}
+
+   <form method="get" action="{{ base }}/metrics" class="row g-2 mb-3">
+      <div class="col-md-3"><label class="form-label">{{ __('From', 'companypurchasing') }}</label><input type="date" class="form-control" name="from" value="{{ filter.from }}"></div>
+      <div class="col-md-3"><label class="form-label">{{ __('To', 'companypurchasing') }}</label><input type="date" class="form-control" name="to" value="{{ filter.to }}"></div>
+      <div class="col-md-3"><label class="form-label">{{ __('Entity', 'companypurchasing') }}</label>
+         <select class="form-select" name="entities_id">
+            <option value="">{{ __('All my entities', 'companypurchasing') }}</option>
+            {% for id, name in entities %}<option value="{{ id }}" {{ filter.entities_id ~ '' == id ~ '' ? 'selected' : '' }}>{{ name }}</option>{% endfor %}
+         </select>
+      </div>
+      <div class="col-md-3 d-flex align-items-end"><button class="btn btn-primary" type="submit"><i class="ti ti-filter me-1"></i>{{ __('Filter', 'companypurchasing') }}</button></div>
+   </form>
+
+   {% if m.inexact > 0 %}
+      <div class="alert alert-warning">{{ __('Some requests have inconsistent amounts and were excluded from the totals', 'companypurchasing') }} ({{ m.inexact }})</div>
+   {% endif %}
+
+   <div class="row row-cards mb-3">
+      <div class="col-md-4"><div class="card"><div class="card-body">
+         <div class="subheader">{{ __('Requested / approved / closed', 'companypurchasing') }}</div>
+         <div class="h2">{{ m.counts.requested }} / {{ m.counts.approved }} / {{ m.counts.closed }}</div>
+      </div></div></div>
+      <div class="col-md-4"><div class="card"><div class="card-body">
+         <div class="subheader">{{ __('Requested amount', 'companypurchasing') }}</div>{{ m_.amounts(m.amounts.requested) }}
+      </div></div></div>
+      <div class="col-md-4"><div class="card"><div class="card-body">
+         <div class="subheader">{{ __('Approved amount', 'companypurchasing') }} · {{ __('Purchased amount', 'companypurchasing') }}</div>
+         {{ m_.amounts(m.amounts.approved) }}<hr class="my-1">{{ m_.amounts(m.amounts.purchased) }}
+      </div></div></div>
+   </div>
+
+   <div class="row row-cards mb-3">
+      <div class="col-md-4"><div class="card"><div class="card-header"><h3 class="card-title">{{ __('Requests by state', 'companypurchasing') }}</h3></div>
+         <table class="table table-sm mb-0">{% for code, n in m.counts.by_state %}<tr><td>{{ state_labels[code] ?? code }}</td><td class="text-end">{{ n }}</td></tr>{% endfor %}</table>
+      </div></div>
+      <div class="col-md-4"><div class="card"><div class="card-header"><h3 class="card-title">{{ __('Requests by period', 'companypurchasing') }}</h3></div>
+         <table class="table table-sm mb-0">{% for month, n in m.counts.by_month %}<tr><td>{{ month }}</td><td class="text-end">{{ n }}</td></tr>{% endfor %}</table>
+      </div></div>
+      <div class="col-md-4"><div class="card"><div class="card-header"><h3 class="card-title">{{ __('Cycle time and stage duration (hours)', 'companypurchasing') }}</h3></div>
+         <table class="table table-sm mb-0">
+            <tr><td><strong>{{ __('Total cycle (submitted → closed)', 'companypurchasing') }}</strong></td><td class="text-end">{{ m.cycle.avg_hours }} / {{ m.cycle.max_hours }} ({{ m.cycle.count }})</td></tr>
+            {% for code, s in m.stages %}<tr><td>{{ state_labels[code] ?? code }}</td><td class="text-end">{{ s.avg_hours }} / {{ s.max_hours }} ({{ s.count }})</td></tr>{% endfor %}
+         </table>
+         <div class="card-footer small text-muted">{{ __('Average / maximum (count)', 'companypurchasing') }}</div>
+      </div></div>
+   </div>
+
+   <div class="row row-cards mb-3">
+      <div class="col-md-4"><div class="card"><div class="card-header"><h3 class="card-title">{{ __('Receptions', 'companypurchasing') }}</h3></div>
+         <table class="table table-sm mb-0">
+            <tr><td>{{ __('Pending', 'companypurchasing') }}</td><td class="text-end">{{ m.receiving.pending }}</td></tr>
+            <tr><td>{{ __('Partial', 'companypurchasing') }}</td><td class="text-end">{{ m.receiving.partial }}</td></tr>
+            <tr><td>{{ __('Complete', 'companypurchasing') }}</td><td class="text-end">{{ m.receiving.complete }}</td></tr>
+         </table>
+      </div></div>
+      <div class="col-md-4"><div class="card"><div class="card-header"><h3 class="card-title">{{ __('Inventory integration', 'companypurchasing') }}</h3></div>
+         <table class="table table-sm mb-0">{% for st, n in m.inventory %}<tr><td>{{ st }}</td><td class="text-end">{{ n }}</td></tr>{% endfor %}</table>
+      </div></div>
+      <div class="col-md-4"><div class="card"><div class="card-header"><h3 class="card-title">{{ __('Deliveries', 'companypurchasing') }}</h3></div>
+         <table class="table table-sm mb-0">
+            <tr><td>{{ __('Received units pending delivery', 'companypurchasing') }}</td><td class="text-end">{{ m.delivery.units_pending }}</td></tr>
+            <tr><td>{{ __('Delivered units', 'companypurchasing') }}</td><td class="text-end">{{ m.delivery.units_delivered }}</td></tr>
+            <tr><td>{{ __('Delivery batches', 'companypurchasing') }}</td><td class="text-end">{{ m.delivery.batches }}</td></tr>
+         </table>
+      </div></div>
+   </div>
+
+   {% set dims = {'entity': __('By entity', 'companypurchasing'), 'department': __('By department', 'companypurchasing'), 'category': __('By category', 'companypurchasing'), 'supplier': __('By supplier', 'companypurchasing')} %}
+   {% for dim, label in dims %}
+      <div class="card mb-3">
+         <div class="card-header"><h3 class="card-title">{{ label }}</h3></div>
+         <div class="table-responsive">
+            <table class="table table-sm mb-0">
+               <thead><tr><th></th><th class="text-end">{{ __('Requests', 'companypurchasing') }}</th><th>{{ __('Requested amount', 'companypurchasing') }}</th><th>{{ __('Approved amount', 'companypurchasing') }}</th><th>{{ __('Purchased amount', 'companypurchasing') }}</th></tr></thead>
+               <tbody>
+                  {% for row in m.breakdown[dim] %}
+                     <tr><td>{{ row.label }}</td><td class="text-end">{{ row.count }}</td><td>{{ m_.amounts(row.requested) }}</td><td>{{ m_.amounts(row.approved) }}</td><td>{{ m_.amounts(row.purchased) }}</td></tr>
+                  {% endfor %}
+               </tbody>
+            </table>
+         </div>
+      </div>
+   {% endfor %}
+{% endblock %}

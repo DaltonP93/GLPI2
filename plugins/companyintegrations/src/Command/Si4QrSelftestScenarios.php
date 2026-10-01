@@ -40,6 +40,7 @@ declare(strict_types=1);
 namespace GlpiPlugin\Companyintegrations\Command;
 
 use Computer;
+use GlpiPlugin\Companyintegrations\Api\InventoryLinkApi;
 use GlpiPlugin\Companyintegrations\Model\AssetBridge;
 use GlpiPlugin\Companyintegrations\Model\Si4Saga;
 use GlpiPlugin\Companyintegrations\Model\Si4SagaLog;
@@ -96,6 +97,7 @@ trait Si4QrSelftestScenarios
             $this->si4qUpgrade();
             $this->si4qResume();
             $this->si4qE2e();
+            $this->si4qLinkApi();
             $this->si4qExisting();
             $this->si4qCrash();
             $this->si4qWorkers();
@@ -245,6 +247,62 @@ trait Si4QrSelftestScenarios
         $this->check('[SI4Q-E2E] etiqueta real con el renderer de companyqr: PDF válido con el public_code, sin serial ni token', $label);
         $m = $this->si4qWorker('st-q-A')->run();
         $this->check('[SI4Q-E2E] re-ejecutar el comando: nada que reclamar ni cerrar', $m['claimed'] === 0 && $m['finalized'] === 0);
+    }
+
+    // ------------------------------------------------------------------ [SI4-LINK-API] (0.6.0, sólo lectura)
+
+    /**
+     * API pública READ-ONLY para la UI de Compras (P2D-4): fase coarse + activo/public_code sólo con la ACL NATIVA del
+     * activo; jamás tokens ni datos técnicos; multi-entidad fail-closed; no muta nada.
+     */
+    private function si4qLinkApi(): void
+    {
+        $this->out->writeln('== [SI4-LINK-API] InventoryLinkApi::forUnits (sólo lectura, ACL nativa del activo) ==');
+        $uuids = array_slice($this->si4qUuids, 0, 2);
+        if (count($uuids) < 2) {
+            $this->check('[SI4-LINK-API] fixture: 2 unidades COMPLETED del E2E', false);
+            return;
+        }
+        $before = [];
+        foreach ($uuids as $u) {
+            $before[$u] = (new DbSagaStore())->get($u);
+        }
+        $api = new InventoryLinkApi();
+        $this->applySession(2, [$this->si4E], ['computer' => READ]);
+        $links = $api->forUnits(array_merge($uuids, ['not-a-uuid', '00000000-0000-4000-8000-000000000000']));
+        $ok = count($links) === 2;
+        foreach ($uuids as $u) {
+            $s = (new DbSagaStore())->get($u) ?? [];
+            $l = $links[$u] ?? [];
+            $ok = $ok && array_keys($l) === InventoryLinkApi::KEYS && $l['phase'] === InventoryLinkApi::PHASE_COMPLETED
+                && $l['itemtype'] === 'Computer' && $l['items_id'] === (int) ($s['glpi_items_id'] ?? 0)
+                && $l['public_code'] === AssetTagDeriver::tagFor('ST4-', $u);
+        }
+        $this->check('[SI4-LINK-API] entidad + ACL nativa del activo ⇒ completed + activo GLPI + public_code (whitelist de claves; uuids inválidos/ajenos ignorados)', $ok);
+        $code = new QrCode();
+        $code->getFromDB((int) ((((new DbSagaStore())->get($uuids[0])) ?? [])['qr_code_id'] ?? 0));
+        $json = json_encode($links);
+        $this->check('[SI4-LINK-API] 🔒 sin token QR, lease, ids de Snipe ni last_error en la respuesta',
+            !str_contains((string) $json, (string) ($code->fields['token'] ?? 'x-no-token')) && !str_contains((string) $json, 'lease')
+            && !str_contains((string) $json, 'snipe') && !str_contains((string) $json, 'error'));
+        $this->applySession(2, [$this->si4E], []);
+        $l = $api->forUnits($uuids);
+        $this->check('[SI4-LINK-API] 🔒 sin derecho nativo sobre el activo ⇒ sólo la fase (sin activo ni public_code)',
+            count($l) === 2 && ($l[$uuids[0]]['phase'] ?? '') === InventoryLinkApi::PHASE_COMPLETED
+            && $l[$uuids[0]]['itemtype'] === null && $l[$uuids[0]]['public_code'] === null);
+        $this->applySession(2, [$this->si4E2], ['computer' => READ]);
+        $this->check('[SI4-LINK-API] 🔒 otra entidad activa ⇒ nada (multi-entidad fail-closed)', $api->forUnits($uuids) === []);
+        $this->check('[SI4-LINK-API] fases coarse: COMPLETED/MANUAL_REVIEW/BLOCKED_CONFIG/PENDING/intermedias',
+            InventoryLinkApi::phaseOf(SagaState::COMPLETED) === InventoryLinkApi::PHASE_COMPLETED
+            && InventoryLinkApi::phaseOf(SagaState::MANUAL_REVIEW) === InventoryLinkApi::PHASE_ATTENTION
+            && InventoryLinkApi::phaseOf(SagaState::BLOCKED_CONFIG) === InventoryLinkApi::PHASE_ATTENTION
+            && InventoryLinkApi::phaseOf(SagaState::PENDING) === InventoryLinkApi::PHASE_PENDING
+            && InventoryLinkApi::phaseOf(SagaState::QR_READY) === InventoryLinkApi::PHASE_IN_PROGRESS);
+        $same = true;
+        foreach ($uuids as $u) {
+            $same = $same && (new DbSagaStore())->get($u) === $before[$u];
+        }
+        $this->check('[SI4-LINK-API] SÓLO LECTURA: sagas idénticas tras consultar', $same);
     }
 
     // ------------------------------------------------------------------ [SI4Q-EXISTING]

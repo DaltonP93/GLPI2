@@ -118,3 +118,793 @@ msgid "Cost policy version"
 msgid_plural "Cost policy versions"
 msgstr[0] "Cost policy version"
 msgstr[1] "Cost policy versions"
+
+# --- P2D-4: delivery, closure, UI, inboxes, native notifications and metrics ---
+
+msgid "A new workflow definition version was published"
+msgstr "A new workflow definition version was published"
+
+msgid "Action"
+msgstr "Action"
+
+msgid "Active workflow definition version"
+msgstr "Active workflow definition version"
+
+msgid "Add line"
+msgstr "Add line"
+
+msgid "All"
+msgstr "All"
+
+msgid "All my entities"
+msgstr "All my entities"
+
+msgid "All requests of my entities"
+msgstr "All requests of my entities"
+
+msgid "Amount"
+msgstr "Amount"
+
+msgid "Another user changed this request at the same time; reload and try again"
+msgstr "Another user changed this request at the same time; reload and try again"
+
+msgid "Approval"
+msgstr "Approval"
+
+msgid "Approval decision"
+msgstr "Approval decision"
+
+msgid "Approval evidence"
+msgstr "Approval evidence"
+
+msgid "Approval integrity"
+msgstr "Approval integrity"
+
+msgid "Approval integrity must be repaired first"
+msgstr "Approval integrity must be repaired first"
+
+msgid "Approval stages"
+msgstr "Approval stages"
+
+msgid "Approvals and history"
+msgstr "Approvals and history"
+
+msgid "Approvals inbox"
+msgstr "Approvals inbox"
+
+msgid "Approvals invalidated"
+msgstr "Approvals invalidated"
+
+msgid "Approve"
+msgstr "Approve"
+
+msgid "Approved"
+msgstr "Approved"
+
+msgid "Approved PDF"
+msgstr "Approved PDF"
+
+msgid "Approved PDF generation retried"
+msgstr "Approved PDF generation retried"
+
+msgid "Approved PDFs and evidence"
+msgstr "Approved PDFs and evidence"
+
+msgid "Approved amount"
+msgstr "Approved amount"
+
+msgid "Approver group"
+msgstr "Approver group"
+
+msgid "Attach document"
+msgstr "Attach document"
+
+msgid "Audit"
+msgstr "Audit"
+
+msgid "Average / maximum (count)"
+msgstr "Average / maximum (count)"
+
+msgid "Budget"
+msgstr "Budget"
+
+msgid "By category"
+msgstr "By category"
+
+msgid "By department"
+msgstr "By department"
+
+msgid "By entity"
+msgstr "By entity"
+
+msgid "By supplier"
+msgstr "By supplier"
+
+msgid "Cancel request"
+msgstr "Cancel request"
+
+msgid "Cancelled"
+msgstr "Cancelled"
+
+msgid "Category"
+msgstr "Category"
+
+msgid "Close request"
+msgstr "Close request"
+
+msgid "Closed"
+msgstr "Closed"
+
+msgid "Closure"
+msgstr "Closure"
+
+msgid "Comment"
+msgstr "Comment"
+
+msgid "Complete"
+msgstr "Complete"
+
+msgid "Configuration"
+msgstr "Configuration"
+
+msgid "Configuration saved"
+msgstr "Configuration saved"
+
+msgid "Create draft"
+msgstr "Create draft"
+
+msgid "Create quote"
+msgstr "Create quote"
+
+msgid "Currency"
+msgstr "Currency"
+
+msgid "Current stage approvers"
+msgstr "Current stage approvers"
+
+msgid "Current state"
+msgstr "Current state"
+
+msgid "Cycle time and stage duration (hours)"
+msgstr "Cycle time and stage duration (hours)"
+
+msgid "Date"
+msgstr "Date"
+
+msgid "Decision recorded"
+msgstr "Decision recorded"
+
+msgid "Default currency"
+msgstr "Default currency"
+
+msgid "Delivered"
+msgstr "Delivered"
+
+msgid "Delivered to"
+msgstr "Delivered to"
+
+msgid "Delivered units"
+msgstr "Delivered units"
+
+msgid "Deliveries"
+msgstr "Deliveries"
+
+msgid "Delivery"
+msgstr "Delivery"
+
+msgid "Delivery batch"
+msgid_plural "Delivery batches"
+msgstr[0] "Delivery batch"
+msgstr[1] "Delivery batches"
+
+msgid "Delivery recipient"
+msgstr "Delivery recipient"
+
+msgid "Delivery recorded"
+msgstr "Delivery recorded"
+
+msgid "Department"
+msgstr "Department"
+
+msgid "Description"
+msgstr "Description"
+
+msgid "Destination"
+msgstr "Destination"
+
+msgid "Discounts"
+msgstr "Discounts"
+
+msgid "Document attached"
+msgstr "Document attached"
+
+msgid "Draft"
+msgstr "Draft"
+
+msgid "Draft created"
+msgstr "Draft created"
+
+msgid "Edit draft"
+msgstr "Edit draft"
+
+msgid "Edit purchase request"
+msgstr "Edit purchase request"
+
+msgid "Entity"
+msgstr "Entity"
+
+msgid "Estimated amount"
+msgstr "Estimated amount"
+
+msgid "Estimated total"
+msgstr "Estimated total"
+
+msgid "Estimated unit price"
+msgstr "Estimated unit price"
+
+msgid "Event"
+msgstr "Event"
+
+msgid "Filter"
+msgstr "Filter"
+
+msgid "Finished"
+msgstr "Finished"
+
+msgid "Freight"
+msgstr "Freight"
+
+msgid "From"
+msgstr "From"
+
+msgid "GLPI asset"
+msgstr "GLPI asset"
+
+msgid "In purchase"
+msgstr "In purchase"
+
+msgid "In purchasing review"
+msgstr "In purchasing review"
+
+msgid "Inbox scan limit"
+msgstr "Inbox scan limit"
+
+msgid "Include discounts in unit cost"
+msgstr "Include discounts in unit cost"
+
+msgid "Include freight in unit cost"
+msgstr "Include freight in unit cost"
+
+msgid "Include taxes in unit cost"
+msgstr "Include taxes in unit cost"
+
+msgid "Incomplete quote"
+msgstr "Incomplete quote"
+
+msgid "Integration error"
+msgstr "Integration error"
+
+msgid "Integration in progress"
+msgstr "Integration in progress"
+
+msgid "Integration requires attention"
+msgstr "Integration requires attention"
+
+msgid "Inventoriable"
+msgstr "Inventoriable"
+
+msgid "Inventory code"
+msgstr "Inventory code"
+
+msgid "Inventory integration"
+msgstr "Inventory integration"
+
+msgid "Inventory pending"
+msgstr "Inventory pending"
+
+msgid "Inventory registration is not confirmed for every inventoriable unit"
+msgstr "Inventory registration is not confirmed for every inventoriable unit"
+
+msgid "Justification"
+msgstr "Justification"
+
+msgid "Last update"
+msgstr "Last update"
+
+msgid "Line"
+msgstr "Line"
+
+msgid "Line added"
+msgstr "Line added"
+
+msgid "Line removed"
+msgstr "Line removed"
+
+msgid "Line updated"
+msgstr "Line updated"
+
+msgid "Lines"
+msgstr "Lines"
+
+msgid "Link to the request"
+msgstr "Link to the request"
+
+msgid "Max inventory handoff attempts"
+msgstr "Max inventory handoff attempts"
+
+msgid "Max inventory handoff lease (seconds)"
+msgstr "Max inventory handoff lease (seconds)"
+
+msgid "Max units per delivery"
+msgstr "Max units per delivery"
+
+msgid "Max units per reception"
+msgstr "Max units per reception"
+
+msgid "Metrics"
+msgstr "Metrics"
+
+msgid "Metrics: max requests for stage durations"
+msgstr "Metrics: max requests for stage durations"
+
+msgid "My requests"
+msgstr "My requests"
+
+msgid "New purchase request"
+msgstr "New purchase request"
+
+msgid "New quote"
+msgstr "New quote"
+
+msgid "No"
+msgstr "No"
+
+msgid "No integration data"
+msgstr "No integration data"
+
+msgid "No physical units were received"
+msgstr "No physical units were received"
+
+msgid "No physical units yet"
+msgstr "No physical units yet"
+
+msgid "No quotes yet"
+msgstr "No quotes yet"
+
+msgid "No requests to show"
+msgstr "No requests to show"
+
+msgid "No workflow definition published yet"
+msgstr "No workflow definition published yet"
+
+msgid "Not deliverable"
+msgstr "Not deliverable"
+
+msgid "Not inventoriable"
+msgstr "Not inventoriable"
+
+msgid "Notes"
+msgstr "Notes"
+
+msgid "Nothing delivered yet"
+msgstr "Nothing delivered yet"
+
+msgid "Nothing received yet"
+msgstr "Nothing received yet"
+
+msgid "Notification"
+msgstr "Notification"
+
+msgid "Number"
+msgstr "Number"
+
+msgid "Observations"
+msgstr "Observations"
+
+msgid "One or more inventoriable units are not registered in inventory yet"
+msgstr "One or more inventoriable units are not registered in inventory yet"
+
+msgid "One or more units were already delivered or are not deliverable"
+msgstr "One or more units were already delivered or are not deliverable"
+
+msgid "Operational limits"
+msgstr "Operational limits"
+
+msgid "Ordered"
+msgstr "Ordered"
+
+msgid "Partial"
+msgstr "Partial"
+
+msgid "Partially received"
+msgstr "Partially received"
+
+msgid "Pending"
+msgstr "Pending"
+
+msgid "Pending actions"
+msgstr "Pending actions"
+
+msgid "Pending area head approval"
+msgstr "Pending area head approval"
+
+msgid "Pending deliveries"
+msgstr "Pending deliveries"
+
+msgid "Pending finance approval"
+msgstr "Pending finance approval"
+
+msgid "Pending my approval"
+msgstr "Pending my approval"
+
+msgid "Pending receptions"
+msgstr "Pending receptions"
+
+msgid "Physical state"
+msgstr "Physical state"
+
+msgid "Physical units and inventory integration"
+msgstr "Physical units and inventory integration"
+
+msgid "Project workflow state immediately"
+msgstr "Project workflow state immediately"
+
+msgid "Publish workflow definition"
+msgstr "Publish workflow definition"
+
+msgid "Publishing creates a NEW version; existing requests keep the version they started with."
+msgstr "Publishing creates a NEW version; existing requests keep the version they started with."
+
+msgid "Purchase"
+msgstr "Purchase"
+
+msgid "Purchase quote"
+msgstr "Purchase quote"
+
+msgid "Purchase request %s"
+msgstr "Purchase request %s"
+
+msgid "Purchase request approved"
+msgstr "Purchase request approved"
+
+msgid "Purchase request closed"
+msgstr "Purchase request closed"
+
+msgid "Purchase request delivered"
+msgstr "Purchase request delivered"
+
+msgid "Purchase request pending approval"
+msgstr "Purchase request pending approval"
+
+msgid "Purchase request rejected"
+msgstr "Purchase request rejected"
+
+msgid "Purchase request returned"
+msgstr "Purchase request returned"
+
+msgid "Purchase request submitted"
+msgstr "Purchase request submitted"
+
+msgid "Purchase request update"
+msgstr "Purchase request update"
+
+msgid "Purchase requests"
+msgstr "Purchase requests"
+
+msgid "Purchase started"
+msgstr "Purchase started"
+
+msgid "Purchase started: quantities, prices and selection are frozen"
+msgstr "Purchase started: quantities, prices and selection are frozen"
+
+msgid "Purchase unit price"
+msgstr "Purchase unit price"
+
+msgid "Purchased amount"
+msgstr "Purchased amount"
+
+msgid "Purchasing"
+msgstr "Purchasing"
+
+msgid "Purchasing and costs"
+msgstr "Purchasing and costs"
+
+msgid "Purchasing configuration"
+msgstr "Purchasing configuration"
+
+msgid "Purchasing management"
+msgstr "Purchasing management"
+
+msgid "Purchasing metrics"
+msgstr "Purchasing metrics"
+
+msgid "Quantity"
+msgstr "Quantity"
+
+msgid "Quantity to receive"
+msgstr "Quantity to receive"
+
+msgid "Quorum"
+msgstr "Quorum"
+
+msgid "Quorum reached"
+msgstr "Quorum reached"
+
+msgid "Quote created"
+msgstr "Quote created"
+
+msgid "Quote selected"
+msgstr "Quote selected"
+
+msgid "Quote updated"
+msgstr "Quote updated"
+
+msgid "Quotes"
+msgstr "Quotes"
+
+msgid "Ready for delivery"
+msgstr "Ready for delivery"
+
+msgid "Ready to deliver"
+msgstr "Ready to deliver"
+
+msgid "Received"
+msgstr "Received"
+
+msgid "Received units pending delivery"
+msgstr "Received units pending delivery"
+
+msgid "Reception"
+msgstr "Reception"
+
+msgid "Reception completed"
+msgstr "Reception completed"
+
+msgid "Reception recorded"
+msgstr "Reception recorded"
+
+msgid "Receptions"
+msgstr "Receptions"
+
+msgid "Recipient"
+msgstr "Recipient"
+
+msgid "Record delivery"
+msgstr "Record delivery"
+
+msgid "Record reception"
+msgstr "Record reception"
+
+msgid "Reference"
+msgstr "Reference"
+
+msgid "Registered in inventory"
+msgstr "Registered in inventory"
+
+msgid "Reject"
+msgstr "Reject"
+
+msgid "Rejected"
+msgstr "Rejected"
+
+msgid "Remove line"
+msgstr "Remove line"
+
+msgid "Request"
+msgstr "Request"
+
+msgid "Request closed"
+msgstr "Request closed"
+
+msgid "Request header"
+msgstr "Request header"
+
+msgid "Request number"
+msgstr "Request number"
+
+msgid "Request submitted"
+msgstr "Request submitted"
+
+msgid "Request updated"
+msgstr "Request updated"
+
+msgid "Requested / approved / closed"
+msgstr "Requested / approved / closed"
+
+msgid "Requested amount"
+msgstr "Requested amount"
+
+msgid "Requester"
+msgstr "Requester"
+
+msgid "Requests"
+msgstr "Requests"
+
+msgid "Requests by period"
+msgstr "Requests by period"
+
+msgid "Requests by state"
+msgstr "Requests by state"
+
+msgid "Retry approved PDF"
+msgstr "Retry approved PDF"
+
+msgid "Return"
+msgstr "Return"
+
+msgid "Returned"
+msgstr "Returned"
+
+msgid "SLA (hours, empty = none)"
+msgstr "SLA (hours, empty = none)"
+
+msgid "Save"
+msgstr "Save"
+
+msgid "Save quote"
+msgstr "Save quote"
+
+msgid "Scope"
+msgstr "Scope"
+
+msgid "Select this quote"
+msgstr "Select this quote"
+
+msgid "Selected quote"
+msgstr "Selected quote"
+
+msgid "Send native notifications"
+msgstr "Send native notifications"
+
+msgid "Serial"
+msgstr "Serial"
+
+msgid "Serials (one per line)"
+msgstr "Serials (one per line)"
+
+msgid "Some requests have inconsistent amounts and were excluded from the totals"
+msgstr "Some requests have inconsistent amounts and were excluded from the totals"
+
+msgid "Stage"
+msgstr "Stage"
+
+msgid "Start purchase"
+msgstr "Start purchase"
+
+msgid "State changed"
+msgstr "State changed"
+
+msgid "State reconciliation"
+msgstr "State reconciliation"
+
+msgid "Status"
+msgstr "Status"
+
+msgid "Submit"
+msgstr "Submit"
+
+msgid "Submit for approval"
+msgstr "Submit for approval"
+
+msgid "Submitted"
+msgstr "Submitted"
+
+msgid "Suggested supplier"
+msgstr "Suggested supplier"
+
+msgid "Supplier"
+msgstr "Supplier"
+
+msgid "Taxes"
+msgstr "Taxes"
+
+msgid "The action could not be completed"
+msgstr "The action could not be completed"
+
+msgid "The action could not be completed: %s"
+msgstr "The action could not be completed: %s"
+
+msgid "The physical facts are confirmed; the workflow state is being synchronized"
+msgstr "The physical facts are confirmed; the workflow state is being synchronized"
+
+msgid "The recipient is not valid for the entity of this request"
+msgstr "The recipient is not valid for the entity of this request"
+
+msgid "The request changed stage meanwhile; nothing was decided"
+msgstr "The request changed stage meanwhile; nothing was decided"
+
+msgid "The request has no lines yet"
+msgstr "The request has no lines yet"
+
+msgid "The request has not been fully delivered yet"
+msgstr "The request has not been fully delivered yet"
+
+msgid "The request is not in a state that allows this action"
+msgstr "The request is not in a state that allows this action"
+
+msgid "The request is not ready to be closed"
+msgstr "The request is not ready to be closed"
+
+msgid "The request uses a previous workflow version without delivery/close phase"
+msgstr "The request uses a previous workflow version without delivery/close phase"
+
+msgid "The request was already closed"
+msgstr "The request was already closed"
+
+msgid "The submitted data is invalid"
+msgstr "The submitted data is invalid"
+
+msgid "There are units pending delivery"
+msgstr "There are units pending delivery"
+
+msgid "There are units pending reception"
+msgstr "There are units pending reception"
+
+msgid "This delivery was already recorded"
+msgstr "This delivery was already recorded"
+
+msgid "This form was already submitted with different data; reload the page"
+msgstr "This form was already submitted with different data; reload the page"
+
+msgid "This reception was already recorded"
+msgstr "This reception was already recorded"
+
+msgid "To"
+msgstr "To"
+
+msgid "Total"
+msgstr "Total"
+
+msgid "Total cycle (submitted → closed)"
+msgstr "Total cycle (submitted → closed)"
+
+msgid "Unit"
+msgstr "Unit"
+
+msgid "Unknown state"
+msgstr "Unknown state"
+
+msgid "User"
+msgstr "User"
+
+msgid "User who performed the action"
+msgstr "User who performed the action"
+
+msgid "View request"
+msgstr "View request"
+
+msgid "Without category"
+msgstr "Without category"
+
+msgid "Without department"
+msgstr "Without department"
+
+msgid "Without supplier"
+msgstr "Without supplier"
+
+msgid "Workflow"
+msgstr "Workflow"
+
+msgid "Workflow event"
+msgstr "Workflow event"
+
+msgid "Workflow started"
+msgstr "Workflow started"
+
+msgid "Yes"
+msgstr "Yes"
+
+msgid "You do not have access to the entity of this request"
+msgstr "You do not have access to the entity of this request"
+
+msgid "You do not have the right to perform this action"
+msgstr "You do not have the right to perform this action"
+
+msgid "Your decision"
+msgstr "Your decision"
+
+msgid "units"
+msgstr "units"
+
+msgid "Delivery batches"
+msgstr "Delivery batches"
