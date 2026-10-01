@@ -640,15 +640,16 @@ $acks = 0;
 foreach (Si4World::$all as $world) {
     $acks += count($world->source->acks);
 }
-ok('🔒 ninguna de las ' . count(Si4World::$all) . ' corridas (SI4-1 + SI4-2) llamó acknowledgeProcessed()', $acks === 0 && count(Si4World::$all) >= 60);
+ok('🔒 ninguna de las ' . count(Si4World::$all) . ' corridas en modo SI4-1/SI4-2 (sin etapa QR) llamó acknowledgeProcessed()', $acks === 0 && count(Si4World::$all) >= 60);
 $src = '';
-$orchestrators = '';
+$glpiStage = '';
 foreach (glob(dirname(__DIR__, 2) . '/src/Si4/*.php') ?: [] as $f) {
     $code = (string) preg_replace('#/\*.*?\*/|//[^\n]*#s', '', (string) file_get_contents($f));
     $src .= $code;
-    if (in_array(basename($f), ['Si4Worker.php', 'Si4GlpiStage.php'], true)) {
-        $orchestrators .= $code; // los adaptadores del puerto HandoffSource implementan el método, pero nadie lo invoca
+    if (basename($f) === 'Si4GlpiStage.php') {
+        $glpiStage .= $code;
     }
 }
-ok('🔒 el worker y la etapa GLPI no llaman acknowledgeProcessed(); SI-4 no toca companyqr', !preg_match('/acknowledgeProcessed/', $orchestrators) && stripos($src, 'companyqr') === false);
+// SI4-3 (ADR-0022) agrega el ack (sólo en `Si4Worker::continueQr`) y companyqr (sólo por su API pública): ver si4q.php.
+ok('🔒 la etapa GLPI (SI4-2) no llama acknowledgeProcessed() ni toca companyqr', !preg_match('/acknowledgeProcessed/', $glpiStage) && stripos($glpiStage, 'companyqr') === false);
 ok('🔒 sin SQL contra tablas del core de GLPI (glpi_computers, glpi_infocoms, …) en SI-4', preg_match('/glpi_(computers|monitors|printers|networkequipments|peripherals|phones|infocoms|suppliers)\b/', $src) !== 1);

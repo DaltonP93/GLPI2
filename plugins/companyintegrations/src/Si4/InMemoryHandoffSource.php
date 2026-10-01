@@ -15,6 +15,11 @@ namespace GlpiPlugin\Companyintegrations\Si4;
 final class InMemoryHandoffSource implements HandoffSource
 {
     public int $maxAttempts = 10;
+    /** Acks que fallarán ANTES de aplicarse (emula un error transitorio de la BD de Compras). */
+    public int $failAcks = 0;
+    public int $failedAcks = 0;
+    /** @var array<int,array{uuid:string,token:string}> acks APLICADOS (no idempotentes): DONE exactamente una vez */
+    public array $acksApplied = [];
     /** @var array<int,array{uuid:string,token:string}> */
     public array $acks = [];
     /** @var array<int,array{uuid:string,error:string,next:int}> */
@@ -116,8 +121,16 @@ final class InMemoryHandoffSource implements HandoffSource
 
     public function acknowledgeProcessed(string $receiptUnitUuid, string $leaseToken): array
     {
+        if ($this->failAcks > 0) {
+            $this->failAcks--;
+            $this->failedAcks++;
+            throw new \RuntimeException('falla simulada de la BD de Compras (ack no aplicado)');
+        }
         $res = $this->settle($receiptUnitUuid, $leaseToken, 'DONE', null, null);
         $this->acks[] = ['uuid' => $receiptUnitUuid, 'token' => $leaseToken];
+        if (!$res['idempotent']) {
+            $this->acksApplied[] = ['uuid' => $receiptUnitUuid, 'token' => $leaseToken];
+        }
         return $res;
     }
 

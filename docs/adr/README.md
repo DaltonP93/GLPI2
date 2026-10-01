@@ -40,5 +40,6 @@ las cosas son como son.
 | [0019](ADR-0019-companypurchasing-receiving.md) | `companypurchasing` P2D-3 — recepción física, costo por unidad y handoff a SI-4 | Propuesto |
 | [0020](ADR-0020-si4-snipe-remote-identity-saga.md) | SI-4 (SI4-1) — identidad remota determinista en Snipe-IT y saga durable por unidad | Propuesto |
 | [0021](ADR-0021-si4-glpi-asset-infocom-bridge.md) | SI-4 (SI4-2) — resolver-o-crear el activo GLPI, Infocom y AssetBridge en la misma saga | Propuesto |
+| [0022](ADR-0022-si4-qr-label-ack-finalize.md) | SI-4 (SI4-3) — código companyqr, etiqueta, ack del outbox y cierre de la saga | Propuesto |
 
 > Plantilla para nuevos ADR: [`adr-template.md`](adr-template.md).

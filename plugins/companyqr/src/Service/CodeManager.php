@@ -44,26 +44,38 @@ final class CodeManager
 
     public function createForItem(CommonDBTM $item): Code
     {
-        // El índice UNIQUE (token, public_code) es la garantía final ante concurrencia;
-        // aquí manejamos la colisión reintentando con valores frescos y NUNCA devolvemos
-        // un Code inválido si add() falla.
+        // Los índices UNIQUE (token, public_code, (itemtype, items_id)) son la garantía final ante concurrencia;
+        // aquí manejamos la colisión reintentando con valores frescos y NUNCA devolvemos un Code inválido si add()
+        // falla. En GLPI 11 una clave duplicada LANZA (DBmysql::doQuery) en vez de devolver 0.
         $lastError = 'add() devolvió 0';
         for ($attempt = 0; $attempt < 5; $attempt++) {
             $code = new Code();
-            $id = (int) $code->add([
-                'itemtype'          => $item->getType(),
-                'items_id'          => $item->getID(),
-                'entities_id'       => (int) ($item->fields['entities_id'] ?? 0),
-                'is_recursive'      => (int) ($item->fields['is_recursive'] ?? 0),
-                'token'             => $this->uniqueToken(),
-                'public_code'       => $this->resolvePublicCode($item),
-                'status'            => Code::STATUS_ACTIVE,
-                'users_id_creation' => (int) (Session::getLoginUserID() ?: 0),
-            ]);
+            try {
+                $id = (int) $code->add([
+                    'itemtype'          => $item->getType(),
+                    'items_id'          => $item->getID(),
+                    'entities_id'       => (int) ($item->fields['entities_id'] ?? 0),
+                    'is_recursive'      => (int) ($item->fields['is_recursive'] ?? 0),
+                    'token'             => $this->uniqueToken(),
+                    'public_code'       => $this->resolvePublicCode($item),
+                    'status'            => Code::STATUS_ACTIVE,
+                    'users_id_creation' => (int) (Session::getLoginUserID() ?: 0),
+                ]);
+            } catch (\RuntimeException $e) {
+                $id = 0;
+                // Sin el mensaje de la BD: una clave duplicada lo cita textual (podría incluir un token).
+                $lastError = 'la BD rechazó el alta';
+            }
             if ($id > 0 && $code->getFromDB($id)) {
                 return $code;
             }
-            // Colisión (p. ej. dos procesos con la misma secuencia) -> reintentar.
+            // Carrera por el MISMO activo (UNIQUE item): otro proceso ya creó su código ⇒ se devuelve ése. Nunca
+            // existen dos códigos para un activo.
+            $raced = $this->findForItem($item);
+            if ($raced !== null) {
+                return $raced;
+            }
+            // Colisión de token/public_code (p. ej. dos procesos con la misma secuencia) -> reintentar.
         }
         throw new \RuntimeException(
             'companyqr: no se pudo crear el código tras varios reintentos (' . $lastError . ')'

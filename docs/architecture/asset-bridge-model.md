@@ -12,7 +12,7 @@ Tablas **propias** (nunca DB de Snipe ni SQL directo a core). Migraciones revers
 | `glpi_itemtype` | varchar(100) | clase del activo en GLPI (p. ej. `Computer`) |
 | `glpi_items_id` | int | id del activo en GLPI |
 | `glpi_entity_id` | int | entidad GLPI (aislamiento) |
-| `companyqr_code_id` | int null | vínculo al código `companyqr` (Fase 1) |
+| `companyqr_code_id` | int null | vínculo al código `companyqr` (Fase 1) — **no implementado**: el código se resuelve por activo con `CompanyQrApi::findForItem` y la saga SI-4 guarda `qr_code_id` (ADR-0022) |
 | `sync_status` | enum(`mapped`,`pending`,`conflict`,`error`,`orphan_snipe`,`orphan_glpi`) | estado de sincronización |
 | `source_version`/`etag` | varchar null | versión/etag de Snipe si está disponible (control de cambios) |
 | `idempotency_key` | varchar **unique** | clave de idempotencia de la operación de alta (ver abajo) |
@@ -98,7 +98,11 @@ PENDING → SNIPE_CREATED → GLPI_RESOLVED_OR_CREATED → BRIDGED → QR_READY 
 > `PENDING → SNIPE_CREATING → SNIPE_CREATED → GLPI_RESOLVED_OR_CREATED → INFOCOM_READY → BRIDGED`
 > (`INFOCOM_READY` hace explícito el paso de Infocom), más `BLOCKED_CONFIG` (con `resume_state`) y `MANUAL_REVIEW`.
 > `asset_bridge` gana `receipt_unit_uuid` (UNIQUE; NULL para puentes creados por la reconciliación SI-1).
-> `QR_READY`/`LABEL_READY` y el ack del outbox quedan para SI4-3.
+> **SI4-3 (ADR-0022):** `BRIDGED → QR_READY → COMPLETED`.
+> - `QR_READY`: código companyqr ACTIVO por su API pública + etiqueta renderizable. `LABEL_READY` es esa condición
+>   (`label_ready_at`), no un estado aparte.
+> - Revalidación y `acknowledgeProcessed()` como último efecto.
+> - `COMPLETED` sólo por el finalizador, con el outbox DONE.
 
 ## Estabilidad del QR ante cambio de `asset_tag` (una etiqueta impresa nunca se rompe)
 - La **identidad estable** del activo puenteado es técnica (`asset_bridge.id` / `receipt_unit_uuid`),
@@ -155,5 +159,5 @@ Baja/purge del activo GLPI ──► marcar bridge (no borrar historial); compan
 ## Reglas
 - **Nunca** usar nombres como clave permanente de correlación.
 - **Nunca** borrar filas del bridge silenciosamente; los cambios quedan en auditoría (append-only).
-- `companyqr_code_id` permite que el **gateway QR** resuelva `asset_tag → bridge → activo GLPI →
-  ficha `companyqr``.
+- El **gateway QR** resuelve `asset_tag → bridge → activo GLPI → ficha `companyqr``; el código companyqr del activo
+  se obtiene por activo (`CompanyQrApi::findForItem`), sin duplicar el vínculo en el puente (ADR-0022).

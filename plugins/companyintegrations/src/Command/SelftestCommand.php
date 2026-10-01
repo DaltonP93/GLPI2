@@ -18,6 +18,9 @@
  *               REAL (outbox ⇒ PurchasingIntegrationApi ⇒ Snipe fake ⇒ saga, sin ack), crash tras el POST + lease
  *               vencido + dos workers, mapeo ausente, secretos, ACL y ausencia de efectos laterales (ver
  *               Si4SelftestScenarios).
+ *   [SI4G-*]    SI4-2 (ADR-0021): activo GLPI + Infocom + asset_bridge (ver Si4GlpiSelftestScenarios).
+ *   [SI4Q-*]    SI4-3 (ADR-0022): código companyqr + etiqueta + ack + finalizador, crash points, upgrade 0.4.0→0.5.0
+ *               (ver Si4QrSelftestScenarios).
  *
  * @license GPL-3.0-or-later
  */
@@ -52,6 +55,7 @@ final class SelftestCommand extends Command
 {
     use Si4SelftestScenarios;
     use Si4GlpiSelftestScenarios;
+    use Si4QrSelftestScenarios;
 
     private int $failures = 0;
     private OutputInterface $out;
@@ -66,7 +70,7 @@ final class SelftestCommand extends Command
     protected function configure(): void
     {
         $this->setName('plugins:companyintegrations:selftest')
-            ->setDescription('Pruebas de integración + E2E de SI-1 (reconciliación read-only, bridge, gateway, multi-entidad), SI4-1 (saga + Snipe write) y SI4-2 (activo GLPI + Infocom + asset_bridge).');
+            ->setDescription('Pruebas de integración + E2E de SI-1 (reconciliación read-only, bridge, gateway, multi-entidad), SI4-1 (saga + Snipe write), SI4-2 (activo GLPI + Infocom + asset_bridge) y SI4-3 (código companyqr + etiqueta + ack + cierre).');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int

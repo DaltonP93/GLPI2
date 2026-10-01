@@ -11,8 +11,9 @@
  * Esquema SI4-1 (ADR-0020): si4_sagas · si4_saga_log · map_models
  * Esquema SI4-2 (ADR-0021): map_glpi_assettypes + columnas GLPI/Infocom/puente/pin del mapeo en si4_sagas (UNIQUE glpi_item) +
  *                           asset_bridge.receipt_unit_uuid (UNIQUE, NULL para puentes SI-1)
+ * Esquema SI4-3 (ADR-0022): si4_sagas.qr_code_id (UNIQUE) / qr_public_code / qr_outcome / label_ready_at / completed_at
  *
- * install() es SEGURO EN UPGRADE (GLPI lo vuelve a llamar al actualizar 0.2.0 → 0.3.0 → 0.4.0): tablas con IF-not-exists,
+ * install() es SEGURO EN UPGRADE (GLPI lo vuelve a llamar al actualizar 0.2.0 → 0.3.0 → 0.4.0 → 0.5.0): tablas con IF-not-exists,
  * columnas/índices nuevos sólo si faltan,
  * el derecho se agrega sólo si falta (re-agregarlo viola el UNIQUE de glpi_profilerights), los bits nuevos se SUMAN
  * al Super-Admin sin quitar nada y la configuración sólo siembra claves AUSENTES (no pisa lo ajustado).
@@ -242,6 +243,19 @@ function plugin_companyintegrations_install() {
     // Un activo GLPI nunca queda ligado a dos unidades.
     if (!isIndex("{$p}si4_sagas", 'glpi_item')) {
         $DB->doQuery("ALTER TABLE `{$p}si4_sagas` ADD UNIQUE KEY `glpi_item` (`glpi_itemtype`, `glpi_items_id`)");
+    }
+    // --- SI4-3 (ADR-0022): metadatos NO sensibles del código companyqr + hitos (sólo si faltan: 0.4.0 → 0.5.0). Nunca el
+    // token del QR ni el PDF de la etiqueta (no hay columna para ellos). ---
+    plugin_companyintegrations_add_missing_columns("{$p}si4_sagas", [
+        'qr_code_id'     => "INT UNSIGNED DEFAULT NULL",
+        'qr_public_code' => "VARCHAR(255) DEFAULT NULL",
+        'qr_outcome'     => "VARCHAR(20) DEFAULT NULL",
+        'label_ready_at' => "TIMESTAMP NULL DEFAULT NULL",
+        'completed_at'   => "TIMESTAMP NULL DEFAULT NULL",
+    ]);
+    // Un código companyqr nunca queda ligado a dos unidades.
+    if (!isIndex("{$p}si4_sagas", 'qr_code_id')) {
+        $DB->doQuery("ALTER TABLE `{$p}si4_sagas` ADD UNIQUE KEY `qr_code_id` (`qr_code_id`)");
     }
     // asset_bridge 1:1 por unidad: NULL para los puentes SI-1 (reconciliación), único cuando existe.
     plugin_companyintegrations_add_missing_columns("{$p}asset_bridge", [

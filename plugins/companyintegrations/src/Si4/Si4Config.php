@@ -21,6 +21,8 @@ final class Si4Config
     private const READ_BACKOFF_CAP_SEC = 16;
     /** Margen (s) para las etapas GLPI de SI4-2 (activo + Infocom + puente: operaciones locales de la BD). */
     public const GLPI_STAGES_SEC = 60;
+    /** Margen (s) para la etapa QR de SI4-3 (código companyqr + render de la etiqueta + ack: operaciones locales). */
+    public const QR_STAGE_SEC = 30;
 
     public bool $enabled;
     public string $prefix;
@@ -56,13 +58,14 @@ final class Si4Config
     }
 
     /**
-     * Lease mínimo (s) para el peor caso de una unidad: 2 lecturas con reintentos + 1 POST + margen + etapas GLPI. Al
-     * reanudar desde una etapa post-Snipe sólo hay 1 lectura (la re-verificación), así que la cota también la cubre.
+     * Lease mínimo (s) para el peor caso de una unidad: 2 lecturas con reintentos + 1 POST + margen + etapas GLPI + etapa
+     * QR (SI4-3). Al reanudar desde una etapa post-Snipe sólo hay 1 lectura (la re-verificación), así que la cota también
+     * la cubre.
      */
     public static function minLeaseSeconds(int $timeoutMs, int $maxRetries): int
     {
         $t = (int) ceil(max(1, $timeoutMs) / 1000);
-        return 2 * (max(0, $maxRetries) + 1) * ($t + self::READ_BACKOFF_CAP_SEC) + $t + 60 + self::GLPI_STAGES_SEC;
+        return 2 * (max(0, $maxRetries) + 1) * ($t + self::READ_BACKOFF_CAP_SEC) + $t + 60 + self::GLPI_STAGES_SEC + self::QR_STAGE_SEC;
     }
 
     /** Lease restante (s) exigido ANTES de un POST: el POST en vuelo + persistir su resultado. */
