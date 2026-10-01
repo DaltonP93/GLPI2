@@ -9,8 +9,11 @@
  * Esquema SI-1 (ver docs/architecture/asset-bridge-model.md):
  *   asset_bridge · asset_tag_aliases · map_companies · map_users · recon
  * Esquema SI4-1 (ADR-0020): si4_sagas · si4_saga_log · map_models
+ * Esquema SI4-2 (ADR-0021): map_glpi_assettypes + columnas GLPI/Infocom/puente/pin del mapeo en si4_sagas (UNIQUE glpi_item) +
+ *                           asset_bridge.receipt_unit_uuid (UNIQUE, NULL para puentes SI-1)
  *
- * install() es SEGURO EN UPGRADE (GLPI lo vuelve a llamar al actualizar 0.2.0 → 0.3.0): tablas con IF-not-exists,
+ * install() es SEGURO EN UPGRADE (GLPI lo vuelve a llamar al actualizar 0.2.0 → 0.3.0 → 0.4.0): tablas con IF-not-exists,
+ * columnas/índices nuevos sólo si faltan,
  * el derecho se agrega sólo si falta (re-agregarlo viola el UNIQUE de glpi_profilerights), los bits nuevos se SUMAN
  * al Super-Admin sin quitar nada y la configuración sólo siembra claves AUSENTES (no pisa lo ajustado).
  *
@@ -203,6 +206,51 @@ function plugin_companyintegrations_install() {
         ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
     }
 
+    // --- SI4-2: mapeo categoría de línea ↔ tipo de activo GLPI (+ modelo GLPI opcional; aprobado explícito) ---
+    if (!$DB->tableExists("{$p}map_glpi_assettypes")) {
+        $DB->doQuery("CREATE TABLE `{$p}map_glpi_assettypes` (
+            `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `category_key` VARCHAR(190) NOT NULL DEFAULT '',
+            `glpi_itemtype` VARCHAR(100) NOT NULL DEFAULT '',
+            `glpi_model_id` INT UNSIGNED NOT NULL DEFAULT 0,
+            `is_approved` TINYINT NOT NULL DEFAULT 0,
+            `notes` VARCHAR(255) DEFAULT NULL,
+            `date_creation` TIMESTAMP NULL DEFAULT NULL,
+            `date_mod` TIMESTAMP NULL DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `category_key` (`category_key`),
+            KEY `is_approved` (`is_approved`)
+        ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+    }
+
+    // --- SI4-2: columnas nuevas (sólo si faltan: el MISMO camino para instalación nueva y upgrade 0.3.0 → 0.4.0) ---
+    plugin_companyintegrations_add_missing_columns("{$p}si4_sagas", [
+        'glpi_itemtype'     => "VARCHAR(100) DEFAULT NULL",
+        'glpi_items_id'     => "INT UNSIGNED DEFAULT NULL",
+        'glpi_entity_id'    => "INT UNSIGNED DEFAULT NULL",
+        'glpi_outcome'      => "VARCHAR(20) DEFAULT NULL",
+        'glpi_create_calls' => "INT UNSIGNED NOT NULL DEFAULT 0",
+        'glpi_infocom_id'   => "INT UNSIGNED DEFAULT NULL",
+        'infocom_outcome'   => "VARCHAR(20) DEFAULT NULL",
+        'asset_bridge_id'   => "INT UNSIGNED DEFAULT NULL",
+        'resume_state'      => "VARCHAR(30) DEFAULT NULL",
+        // Destino GLPI PINNEADO al primer uso (ADR-0021 §2): mapeo + modelo + huella; glpi_itemtype completa el pin.
+        'glpi_mapping_id'   => "INT UNSIGNED DEFAULT NULL",
+        'glpi_model_id'     => "INT UNSIGNED DEFAULT NULL",
+        'glpi_mapping_hash' => "CHAR(64) DEFAULT NULL",
+    ]);
+    // Un activo GLPI nunca queda ligado a dos unidades.
+    if (!isIndex("{$p}si4_sagas", 'glpi_item')) {
+        $DB->doQuery("ALTER TABLE `{$p}si4_sagas` ADD UNIQUE KEY `glpi_item` (`glpi_itemtype`, `glpi_items_id`)");
+    }
+    // asset_bridge 1:1 por unidad: NULL para los puentes SI-1 (reconciliación), único cuando existe.
+    plugin_companyintegrations_add_missing_columns("{$p}asset_bridge", [
+        'receipt_unit_uuid' => "CHAR(36) DEFAULT NULL",
+    ]);
+    if (!isIndex("{$p}asset_bridge", 'receipt_unit_uuid')) {
+        $DB->doQuery("ALTER TABLE `{$p}asset_bridge` ADD UNIQUE KEY `receipt_unit_uuid` (`receipt_unit_uuid`)");
+    }
+
     // --- ACL (IDEMPOTENTE: re-agregar el derecho violaría el UNIQUE (profiles_id, name) y abortaría el upgrade) ---
     if (class_exists('ProfileRight')
         && countElementsInTable(ProfileRight::getTable(), ['name' => AssetBridge::$rightname]) === 0) {
@@ -234,6 +282,22 @@ function plugin_companyintegrations_install() {
 }
 
 /**
+ * Agrega a una tabla PROPIA las columnas que falten (upgrade seguro: nunca toca las existentes ni sus datos).
+ *
+ * @param array<string,string> $columns nombre => definición SQL
+ */
+function plugin_companyintegrations_add_missing_columns(string $table, array $columns): void {
+    /** @var DBmysql $DB */
+    global $DB;
+
+    foreach ($columns as $name => $definition) {
+        if (!$DB->fieldExists($table, $name, false)) {
+            $DB->doQuery("ALTER TABLE `{$table}` ADD COLUMN `{$name}` {$definition}");
+        }
+    }
+}
+
+/**
  * Desinstalación: revierte de forma reversible lo creado en install().
  * @return boolean
  */
@@ -245,7 +309,7 @@ function plugin_companyintegrations_uninstall() {
     foreach ([
         "{$p}recon", "{$p}asset_tag_aliases", "{$p}asset_bridge",
         "{$p}map_users", "{$p}map_companies",
-        "{$p}si4_saga_log", "{$p}si4_sagas", "{$p}map_models",
+        "{$p}si4_saga_log", "{$p}si4_sagas", "{$p}map_models", "{$p}map_glpi_assettypes",
     ] as $table) {
         if ($DB->tableExists($table)) {
             $DB->doQuery("DROP TABLE `{$table}`");

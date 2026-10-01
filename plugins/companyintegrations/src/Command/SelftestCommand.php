@@ -51,6 +51,7 @@ use Symfony\Component\Routing\Annotation\Route;
 final class SelftestCommand extends Command
 {
     use Si4SelftestScenarios;
+    use Si4GlpiSelftestScenarios;
 
     private int $failures = 0;
     private OutputInterface $out;
@@ -65,7 +66,7 @@ final class SelftestCommand extends Command
     protected function configure(): void
     {
         $this->setName('plugins:companyintegrations:selftest')
-            ->setDescription('Pruebas de integración + E2E de SI-1 (reconciliación read-only, bridge, gateway, multi-entidad) y SI4-1 (saga + Snipe write).');
+            ->setDescription('Pruebas de integración + E2E de SI-1 (reconciliación read-only, bridge, gateway, multi-entidad), SI4-1 (saga + Snipe write) y SI4-2 (activo GLPI + Infocom + asset_bridge).');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -86,6 +87,7 @@ final class SelftestCommand extends Command
         $this->scenarioGatewayMultiEntity();
         $this->scenarioLabelConfig();
         $this->runSi4Scenarios();
+        $this->runSi4gScenarios();
         $this->cleanup();
 
         if ($this->failures > 0) {
@@ -505,7 +507,8 @@ final class SelftestCommand extends Command
         /** @var \DBmysql $DB */
         global $DB;
         try {
-            foreach (['asset_bridge', 'asset_tag_aliases', 'map_companies', 'map_users', 'recon', 'si4_sagas', 'si4_saga_log', 'map_models'] as $t) {
+            foreach (['asset_bridge', 'asset_tag_aliases', 'map_companies', 'map_users', 'recon', 'si4_sagas', 'si4_saga_log', 'map_models',
+                'map_glpi_assettypes'] as $t) {
                 $DB->doQuery("DELETE FROM `glpi_plugin_companyintegrations_{$t}` WHERE 1=1");
             }
             foreach ($this->createdComputers as $id) {

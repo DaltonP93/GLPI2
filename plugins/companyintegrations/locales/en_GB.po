@@ -62,3 +62,8 @@ msgstr[1] "Model mappings"
 
 msgid "SI-4 worker is disabled (si4_enabled = 0): nothing to do."
 msgstr "SI-4 worker is disabled (si4_enabled = 0): nothing to do."
+
+msgid "GLPI asset type mapping"
+msgid_plural "GLPI asset type mappings"
+msgstr[0] "GLPI asset type mapping"
+msgstr[1] "GLPI asset type mappings"

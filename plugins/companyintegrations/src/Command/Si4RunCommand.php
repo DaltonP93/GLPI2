@@ -1,10 +1,11 @@
 <?php
 
 /**
- * `plugins:companyintegrations:si4-run` — ejecuta UNA corrida del worker SI-4 (incremento SI4-1, ADR-0020).
+ * `plugins:companyintegrations:si4-run` — ejecuta UNA corrida del worker SI-4 (SI4-1 ADR-0020 + SI4-2 ADR-0021): Snipe
+ * create-or-reconcile y, en la misma saga, activo GLPI + Infocom + asset_bridge hasta `BRIDGED`.
  *
- * DESHABILITADO por defecto (`si4_enabled = 0`) y SIN Acción automática: SI4-1 no completa SI-4 (no hay activo GLPI,
- * Infocom, companyqr ni etiqueta todavía), así que no debe programarse en producción. Uso previsto: staging.
+ * DESHABILITADO por defecto (`si4_enabled = 0`) y SIN Acción automática: SI-4 todavía no está completo (companyqr,
+ * etiqueta y el ack final son SI4-3), así que no debe programarse en producción. Uso previsto: staging.
  *
  *   php bin/console plugins:companyintegrations:si4-run --user=<id técnico> [--profile=<id>]
  *
@@ -23,11 +24,15 @@ use GlpiPlugin\Companyintegrations\Client\SnipeAssetWriter;
 use GlpiPlugin\Companyintegrations\Service\LogSanitizer;
 use GlpiPlugin\Companyintegrations\Service\PluginConfig;
 use GlpiPlugin\Companyintegrations\Service\SnipeConfigFactory;
+use GlpiPlugin\Companyintegrations\Si4\CoreGlpiAssetGateway;
+use GlpiPlugin\Companyintegrations\Si4\DbBridgeStore;
+use GlpiPlugin\Companyintegrations\Si4\DbGlpiMappingResolver;
 use GlpiPlugin\Companyintegrations\Si4\DbMappingResolver;
 use GlpiPlugin\Companyintegrations\Si4\DbSagaStore;
 use GlpiPlugin\Companyintegrations\Si4\PurchasingHandoffSource;
 use GlpiPlugin\Companyintegrations\Si4\Si4Config;
 use GlpiPlugin\Companyintegrations\Si4\Si4Errors;
+use GlpiPlugin\Companyintegrations\Si4\Si4GlpiStage;
 use GlpiPlugin\Companyintegrations\Si4\Si4Worker;
 use GlpiPlugin\Companyintegrations\Si4\WorkerSession;
 use Symfony\Component\Console\Command\Command;
@@ -40,8 +45,8 @@ final class Si4RunCommand extends Command
     protected function configure(): void
     {
         $this->setName('plugins:companyintegrations:si4-run')
-            ->setDescription('SI-4 (SI4-1): consume el handoff de Compras por lease y crea-o-reconcilia el activo en Snipe-IT. Deshabilitado por defecto.')
-            ->addOption('user', null, InputOption::VALUE_REQUIRED, 'ID del usuario técnico (RIGHT_SI4 + RIGHT_INTEGRATION)')
+            ->setDescription('SI-4 (SI4-1 + SI4-2): consume el handoff de Compras por lease; crea-o-reconcilia en Snipe-IT y resuelve-o-crea el activo GLPI, su Infocom y asset_bridge. Deshabilitado por defecto.')
+            ->addOption('user', null, InputOption::VALUE_REQUIRED, 'ID del usuario técnico (RIGHT_SI4 + RIGHT_INTEGRATION + alta de activos/Infocom)')
             ->addOption('profile', null, InputOption::VALUE_REQUIRED, 'ID de perfil del usuario técnico (opcional)', '0');
     }
 
@@ -68,16 +73,7 @@ final class Si4RunCommand extends Command
             if (!$client->hasToken()) {
                 throw new \RuntimeException('falta el token de Snipe en la variable de entorno ' . PluginConfig::TOKEN_ENV);
             }
-            $worker = new Si4Worker(
-                new PurchasingHandoffSource(),
-                new DbSagaStore(),
-                new DbMappingResolver($cfg->statusId),
-                new SnipeAssetWriter(new CurlTransport(), $client, $logger),
-                $cfg,
-                $client->timeoutMs,
-                $client->maxRetries,
-                $logger
-            );
+            $worker = self::buildWorker($cfg, new SnipeAssetWriter(new CurlTransport(), $client, $logger), $client->timeoutMs, $client->maxRetries, $logger);
             $m = $worker->run();
         } catch (\Throwable $e) {
             $output->writeln('<error>SI-4: ' . Si4Errors::sanitize($e->getMessage()) . '</error>');
@@ -91,5 +87,29 @@ final class Si4RunCommand extends Command
             return Command::FAILURE;
         }
         return Command::SUCCESS;
+    }
+
+    /**
+     * Cableado de PRODUCCIÓN del worker: saga en BD, handoff SÓLO por la API de Compras y etapas GLPI de SI4-2 con la API
+     * nativa de GLPI (público para que el selftest verifique que el comando real incluye la etapa GLPI).
+     *
+     * @param callable(string,string,array<string,mixed>):void $logger
+     */
+    public static function buildWorker(Si4Config $cfg, SnipeAssetWriter $writer, int $timeoutMs, int $maxRetries, callable $logger): Si4Worker
+    {
+        $sagas = new DbSagaStore();
+        return new Si4Worker(
+            new PurchasingHandoffSource(),
+            $sagas,
+            new DbMappingResolver($cfg->statusId),
+            $writer,
+            $cfg,
+            $timeoutMs,
+            $maxRetries,
+            $logger,
+            null,
+            null,
+            new Si4GlpiStage($sagas, new CoreGlpiAssetGateway(), new DbGlpiMappingResolver(), new DbBridgeStore(), $cfg->infocomCurrency)
+        );
     }
 }

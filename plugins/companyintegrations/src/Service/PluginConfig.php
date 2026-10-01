@@ -49,6 +49,9 @@ final class PluginConfig
         'si4_auth_retry_seconds'         => '900',
         'si4_uncertain_cooldown_seconds' => '300',
         'si4_worker_id'                  => '',
+        // --- SI4-2 (ADR-0021 §7). GLPI no guarda moneda por Infocom: moneda que representan sus importes. Una unidad en
+        // otra moneda queda en MANUAL_REVIEW (nunca se convierte ni se redondea). ---
+        'si4_glpi_infocom_currency'      => 'PYG',
     ];
 
     /** @return array<string,mixed> */

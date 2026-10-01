@@ -2,7 +2,8 @@
 
 /**
  * Tests UNITARIOS + de CONTRATO de companyintegrations (sin bootstrap de GLPI).
- * SI4-1: contrato WRITE, saga, crash/retry y consumo por lease en `si4.php` (incluido al final).
+ * SI4-1: contrato WRITE, saga, crash/retry y consumo por lease en `si4.php`; SI4-2 (activo GLPI, Infocom, asset_bridge,
+ * dedup con el GLPI Agent, crash points) en `si4g.php` (incluidos al final).
  *
  * Cubren la lógica pura (clasificador de errores, backoff, circuit breaker, saneado de logs,
  * clasificación de reconciliación, chequeo de etiquetas) y el CONTRATO del SnipeItClient contra
@@ -35,10 +36,15 @@ require $cli . 'SnipeItClient.php';
 require $cli . 'CreateResult.php';
 require $cli . 'SnipeAssetWriter.php';
 require $cli . 'FakeSnipeServer.php';
+// Regla autoritativa de aplicabilidad de entidad compartida con Compras (núcleo puro; ADR-0021 §7).
+require dirname(__DIR__, 3) . '/companypurchasing/src/Service/ReferenceValidator.php';
 $si4 = dirname(__DIR__, 2) . '/src/Si4/';
 foreach (['SagaState', 'AssetTagDeriver', 'Si4Errors', 'SimulatedCrash', 'Si4Config', 'RemoteAssetMatcher', 'HandoffSource',
           'InMemoryHandoffSource', 'SagaStore', 'InMemorySagaStore', 'MappingResolver', 'MappingRules', 'ArrayMappingResolver',
-          'Si4Worker'] as $f) {
+          // SI4-2 (ADR-0021)
+          'GlpiCandidateMatcher', 'InfocomPolicy', 'BridgeMatcher', 'BridgeStore', 'InMemoryBridgeStore', 'GlpiAssetGateway',
+          'CoreGlpiAssetGateway', 'InMemoryGlpiAssets', 'GlpiMappingResolver', 'GlpiMappingRules', 'ArrayGlpiMappingResolver',
+          'Si4GlpiStage', 'Si4Worker'] as $f) {
     require $si4 . $f . '.php';
 }
 
@@ -310,6 +316,8 @@ ok('sólo se hicieron GET (read-only)', (function () {
 
 // ---- SI4-1: contrato WRITE + saga + crash/retry (ADR-0020) ----
 require __DIR__ . '/si4.php';
+// ---- SI4-2: activo GLPI + Infocom + asset_bridge en la misma saga (ADR-0021) ----
+require __DIR__ . '/si4g.php';
 
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"

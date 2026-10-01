@@ -34,10 +34,21 @@ interface SagaStore
      *
      * @param array<string,scalar|null> $set  columnas: state, snipe_asset_id, snipe_asset_tag, snipe_outcome,
      *                                        snipe_company_id, snipe_model_id, snipe_status_id, remote_create_calls,
-     *                                        last_error, last_error_class
-     * @throws \RuntimeException violación de unicidad (p. ej. snipe_asset_id ya ligado a otra unidad)
+     *                                        last_error, last_error_class; SI4-2: glpi_itemtype, glpi_items_id,
+     *                                        glpi_entity_id, glpi_outcome, glpi_create_calls, glpi_infocom_id,
+     *                                        infocom_outcome, asset_bridge_id, resume_state; pin del destino GLPI
+     *                                        (`GlpiMappingRules::PIN_COLUMNS`): las cuatro juntas y SÓLO si la saga
+     *                                        aún no tiene pin (si ya lo tiene ⇒ false, nada escrito)
+     * @throws \RuntimeException violación de unicidad (snipe_asset_id o activo GLPI ya ligado a otra unidad)
+     * @throws \InvalidArgumentException pin incompleto
      */
     public function transition(string $uuid, string $tokenSha256, string $fromState, array $set, string $event, string $detail = '', int $minRemainingSeconds = 0): bool;
+
+    /**
+     * ¿Este worker SIGUE siendo el dueño con al menos `$minRemainingSeconds` de lease (reloj de la BD)? Sin escribir.
+     * Se consulta antes de cada escritura en GLPI que no persiste una intención propia (SI4-2, ADR-0021 §10).
+     */
+    public function holds(string $uuid, string $tokenSha256, int $minRemainingSeconds): bool;
 
     /** @return array<string,mixed>|null */
     public function get(string $uuid): ?array;
