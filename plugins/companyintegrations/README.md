@@ -6,8 +6,9 @@ Plugin propio de la **Plataforma GLPI Modular**.
 - **Propósito (SI-1, ADR-0015):** integración **READ-ONLY** con **Snipe-IT** por API — cliente HTTP
   resiliente, `asset_bridge`, mapeos, reconciliación con detección de conflictos y gateway estable.
 - **GLPI soportado:** `>=11.0` y `<12.0` (probado en 11.0.8).
-- **Estado:** Fase 2 — **SI-1** (read-only) + **SI4-1** (primer incremento de SI-4, ADR-0020; worker
-  **deshabilitado por defecto**).
+- **Estado:** Fase 2 — **SI-1** (read-only) + **SI-4 completo por unidad**: SI4-1 (Snipe, ADR-0020), SI4-2 (activo
+  GLPI + Infocom + `asset_bridge`, ADR-0021) y SI4-3 (código companyqr + etiqueta + ack + cierre, ADR-0022). Worker
+  **deshabilitado por defecto** y sin Acción automática.
 
 ## Regla 0 y licencia
 No modifica el core de GLPI **ni el de Snipe-IT**. **Snipe-IT es AGPL-3.0 → integración SÓLO por
@@ -60,8 +61,8 @@ SI-4 es dueño de la saga de integración, de la escritura por API en Snipe y de
   `PENDING → SNIPE_CREATING → SNIPE_CREATED`, más `BLOCKED_CONFIG` y `MANUAL_REVIEW`.
   - Fencing: época monótona del lease (`attempts` del claim) + `sha256(token)` + `lease_until >= NOW()` (reloj de la BD).
   - Antes de un POST se exige un lease restante ≥ presupuesto de escritura.
-- **Sin ack todavía:** en `SNIPE_CREATED` la unidad queda **estacionada**. `acknowledgeProcessed()` se llamará sólo
-  cuando SI-4 completo termine; mientras tanto la fila del outbox nunca llega a `DONE`.
+- **Sin ack en SI4-1:** en modo SI4-1 la unidad queda **estacionada** en `SNIPE_CREATED`. `acknowledgeProcessed()` lo
+  hace sólo SI4-3, como último efecto externo (ver más abajo).
 - **Mapeos validados, sin IDs literales:**
   - compañía = `map_companies` aprobado para la entidad (exactamente uno);
   - modelo = `map_models` (nueva) por `category` exacta, aprobado;
@@ -81,13 +82,13 @@ SI-4 es dueño de la saga de integración, de la escritura por API en Snipe y de
     `RIGHT_INTEGRATION` (bit 1024 de Compras).
   - Token sólo por `COMPANYINTEGRATIONS_SNIPEIT_TOKEN`. La cuenta de servicio de Snipe sólo necesita `assets.view`,
     `assets.create` y `statuslabels.view` (sin superuser).
-  - **Sin Acción automática:** no programar en producción hasta completar SI-4.
+  - **Sin Acción automática:** activarlo y programarlo es una decisión operativa posterior (staging primero).
 
 ## Alcance SI4-2 (ADR-0021) — la misma saga hasta el activo GLPI, su Infocom y `asset_bridge`
-Continúa cada unidad desde `SNIPE_CREATED`: `GLPI_RESOLVED_OR_CREATED → INFOCOM_READY → BRIDGED`. **Todavía NO**
-companyqr, etiqueta, `acknowledgeProcessed()` ni P2D-4: en `BRIDGED` la unidad queda **estacionada** y el outbox
-sigue abierto para SI4-3. Todo con la API nativa de GLPI 11.0.8 (`CommonDBTM::find/add/update/can`, `Infocom`);
-**sin SQL contra tablas del core**.
+Continúa cada unidad desde `SNIPE_CREATED`: `GLPI_RESOLVED_OR_CREATED → INFOCOM_READY → BRIDGED`. Sin la etapa QR
+(modo SI4-2) la unidad queda **estacionada** en `BRIDGED` y el outbox sigue abierto; con SI4-3 continúa (ver abajo).
+Todo con la API nativa de GLPI 11.0.8 (`CommonDBTM::find/add/update/can`, `Infocom`); **sin SQL contra tablas del
+core**.
 
 - **Mapeo aprobado categoría ⇒ tipo de activo GLPI** (tabla nueva `map_glpi_assettypes`, separada de `map_models`):
   `glpi_itemtype` + `glpi_model_id` opcional. Ausente, itemtype no soportado o modelo inexistente ⇒ `BLOCKED_CONFIG`.
@@ -119,13 +120,48 @@ sigue abierto para SI4-3. Todo con la API nativa de GLPI 11.0.8 (`CommonDBTM::fi
 - **Usuario técnico (mínimo privilegio):** además de `RIGHT_SI4` y `RIGHT_INTEGRATION`, READ/CREATE/UPDATE de los
   itemtypes mapeados en las entidades de las unidades e `infocom` READ/CREATE/UPDATE. Sin derecho ⇒ `BLOCKED_CONFIG`.
 
+## Alcance SI4-3 (ADR-0022) — código companyqr, etiqueta, ack y cierre
+Continúa cada unidad desde `BRIDGED`: `QR_READY → COMPLETED`. **Todavía NO** P2D-4 (entrega/UI).
+
+- **companyqr sólo por su API pública** (`GlpiPlugin\Companyqr\Api\CompanyQrApi`, vía `CoreQrGateway`):
+  - sin otro sistema de QR ni de PDF;
+  - sin SQL a las tablas de companyqr;
+  - sin conocer el token opaco ni armar la URL del QR.
+- **Código idempotente:** `ensureForItem()` reutiliza `CodeManager::getOrCreateForItem()`.
+  - Un solo código por activo, también si el proceso cae entre crear el código y registrarlo.
+  - Debe estar **ACTIVO**, ser del mismo activo y de la entidad de la unidad.
+  - Su `public_code` debe ser el número de inventario de la unidad (= `asset_tag` de Snipe).
+  - Revocado, suspendido, de otro activo o entidad, o con otro código visible ⇒ `MANUAL_REVIEW`. **Nunca** se rota ni
+    se reactiva.
+- **`public_code` identifica, no autoriza:** el QR sigue codificando la ruta autenticada
+  `/plugins/companyqr/scan/{token}`.
+- **Etiqueta:** el renderer existente de companyqr (`LabelRenderer::pdf`, medidas/config actuales).
+  - Se verifica que se renderiza un PDF y **no se guarda**.
+  - Sin IP, MAC, hostname, VLAN ni serial.
+- **Saga (sin token ni PDF):** `qr_code_id` (UNIQUE), `qr_public_code`, `qr_outcome` (created | existing),
+  `label_ready_at`, `completed_at`.
+- **Ack = último efecto externo.** Recién con `QR_READY` y una revalidación sólo de lecturas (puente y activo vigentes;
+  código ACTIVO, mismo activo y mismo `public_code`) se llama `acknowledgeProcessed()`.
+  - Divergencia ⇒ `MANUAL_REVIEW` sin ack.
+  - Ack fallido ⇒ la saga queda en `QR_READY` y el reintento sólo revalida y confirma, sin rehacer nada.
+- **Finalizador durable:** al inicio de cada corrida (y tras cada ack) cierra en `COMPLETED` las sagas `QR_READY` cuyo
+  outbox ya está **DONE** según `getHandoff()`.
+  - **Recorrido round-robin acotado:** un lote (200) por corrida desde el cursor durable de la tabla propia
+    `si4_runtime`.
+  - El cursor es la última saga **inspeccionada**, así que una pendiente nunca bloquea a las posteriores.
+  - Al llegar al final, vuelve a empezar (wrap-around).
+  - Usa `SagaStore::complete()`, con guarda `state = QR_READY` y sin lease.
+  - **Nunca** `COMPLETED` con el outbox en otro estado.
+- **Usuario técnico:** además de lo anterior, `plugin_companyqr` `RIGHT_GENERATE` + `RIGHT_PRINT`. Se verifican
+  **antes de reclamar** (la corrida no empieza) y por unidad ⇒ `BLOCKED_CONFIG` (`resume_state = BRIDGED`), sin bypass.
+
 ### Configuración SI-4 (contexto `plugin:companyintegrations`)
 | Clave | Por defecto | Uso |
 |---|---|---|
 | `si4_enabled` | `0` | habilita el worker |
 | `si4_asset_tag_prefix` | `GP2-` | prefijo del tag determinista (`^[A-Z0-9][A-Z0-9-]{0,15}$`) |
 | `si4_snipe_status_id` | `0` | status label de Snipe para activos nuevos (**obligatorio**, se valida contra Snipe) |
-| `si4_lease_seconds` | `900` | lease del outbox; debe cubrir el peor caso (se valida contra timeout/reintentos) |
+| `si4_lease_seconds` | `900` | lease del outbox; debe cubrir el peor caso, incluidas las etapas GLPI y QR (se valida contra timeout/reintentos) |
 | `si4_max_units_per_run` | `50` | tope de unidades por corrida |
 | `si4_retry_base_seconds` / `si4_retry_max_seconds` | `60` / `3600` | backoff de fallas transitorias |
 | `si4_config_retry_seconds` | `3600` | reintento de `BLOCKED_CONFIG` |
@@ -137,7 +173,7 @@ sigue abierto para SI4-3. Todo con la API nativa de GLPI 11.0.8 (`CommonDBTM::fi
 ## Estructura
 | Ruta | Rol |
 |------|-----|
-| `setup.php` / `hook.php` | metadatos, init, migraciones reversibles (9 tablas + columnas SI4-2; `install()` seguro en upgrade), ACL, config |
+| `setup.php` / `hook.php` | metadatos, init, migraciones reversibles (9 tablas + columnas SI4-2/SI4-3; `install()` seguro en upgrade), ACL, config |
 | `src/Model/` | `AssetBridge · MapCompany · MapUser · AssetTagAlias · ReconResult` |
 | `src/Client/` | `HttpTransport · HttpResponse · CurlTransport · ArrayTransport · SnipeClientConfig · SnipeException · SnipeItClient` |
 | `src/Service/` | `ErrorClassifier · BackoffPolicy · CircuitBreaker · LogSanitizer · CorrelationId · ReconciliationClassifier · LabelConfigChecker · PluginConfig · SnipeConfigFactory · Reconciler · AssetResolver` |
@@ -145,8 +181,9 @@ sigue abierto para SI4-3. Todo con la API nativa de GLPI 11.0.8 (`CommonDBTM::fi
 | `src/Client/` (SI4-1) | `SnipeAssetWriter` (contrato WRITE) · `SnipeEnvelope` · `CreateResult` · `FakeSnipeServer` (doble de prueba del contrato v8.7.2) |
 | `src/Si4/` (SI4-1) | `Si4Worker` · `HandoffSource` (+ `PurchasingHandoffSource`, `InMemoryHandoffSource`) · `SagaStore` (+ `DbSagaStore`, `InMemorySagaStore`) · `MappingResolver` (+ `DbMappingResolver`, `ArrayMappingResolver`, `MappingRules`) · `AssetTagDeriver` · `RemoteAssetMatcher` · `Si4Config` · `Si4Errors` · `WorkerSession` |
 | `src/Si4/` (SI4-2) | `Si4GlpiStage` · `GlpiAssetGateway` (+ `CoreGlpiAssetGateway`, `InMemoryGlpiAssets`) · `GlpiCandidateMatcher` · `InfocomPolicy` · `BridgeStore` (+ `DbBridgeStore`, `InMemoryBridgeStore`) · `BridgeMatcher` · `GlpiMappingResolver` (+ `DbGlpiMappingResolver`, `ArrayGlpiMappingResolver`, `GlpiMappingRules`) |
+| `src/Si4/` (SI4-3) | `Si4QrStage` · `Si4Finalizer` (+ `FinalizerCursor`: `DbFinalizerCursor`, `InMemoryFinalizerCursor`) · `QrGateway` (+ `CoreQrGateway` ⇒ `CompanyQrApi`, `InMemoryQrGateway`) · `QrGatewayException` · `QrCodeRules` |
 | `src/Command/Si4RunCommand.php` | `plugins:companyintegrations:si4-run` (deshabilitado por defecto) |
-| `src/Command/SelftestCommand.php` | `plugins:companyintegrations:selftest` (integración + E2E; SI4-1 en `Si4SelftestScenarios`, SI4-2 en `Si4GlpiSelftestScenarios`) |
+| `src/Command/SelftestCommand.php` | `plugins:companyintegrations:selftest` (integración + E2E; SI4-1 en `Si4SelftestScenarios`, SI4-2 en `Si4GlpiSelftestScenarios`, SI4-3 en `Si4QrSelftestScenarios`) |
 | `locales/` | i18n ES/EN |
 | `tests/unit/run.php` | unit + **contract tests** (sin GLPI) |
 
@@ -171,7 +208,19 @@ saneados. Secret scan del repo en verde.
     comando real hasta `BRIDGED`; GLPI Agent (vincular + Lockedfield), ambiguo, otra entidad; mapeo/itemtype/modelo;
     9 crash points con toma por época; los 6 itemtypes soportados; multi-entidad; ACL nativa; Infocom distinto o en
     otra moneda; mapeo pinneado (retry con el modelo pinneado, unidad nueva con el vigente, modelo eliminado);
-    carrera tras el reclamo del agente; proveedor movido de rama / ancestro recursivo; sin companyqr ni ack.
+    carrera tras el reclamo del agente; proveedor movido de rama / ancestro recursivo; sin companyqr ni ack en modo SI4-2.
+  - **SI4-3 (GLPI + companyqr + Compras reales):**
+    - upgrade 0.4.0 → 0.5.0 con sagas `BRIDGED` intactas que luego llegan a `COMPLETED`;
+    - E2E con el comando real hasta `COMPLETED` y una etiqueta PDF real;
+    - código preexistente: activo (se reutiliza), otro código visible, revocado o suspendido;
+    - 8 crash points con el outbox DONE una sola vez;
+    - dos workers ⇒ un código; fencing con el reloj de la BD;
+    - ack fallido y reintento sin rehacer nada; finalizador tras un crash post-ack;
+    - recorrido del finalizador con cursor durable: lote 2, reconstruido en cada corrida, wrap-around, propiedad con
+      más sagas que el lote y carrera sobre el cursor;
+    - revalidación previa al ack (código revocado, puente divergente);
+    - ACL de companyqr; multi-entidad;
+    - token ausente de saga/bitácora/outbox/logs; sin Acción automática.
 
 ## Limitaciones / deuda técnica (SI-1)
 - **Sin Snipe-IT real en CI:** la integración se valida con **tests de contrato** (transporte fake) —

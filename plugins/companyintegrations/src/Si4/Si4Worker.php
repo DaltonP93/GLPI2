@@ -23,8 +23,12 @@
  * Snipe se RELEE antes de escribir en GLPI (tag, compañía y modelo registrados, serial, marca y mismo id); si diverge ⇒
  * MANUAL_REVIEW. Sin la etapa GLPI (modo SI4-1) la unidad se estaciona en `SNIPE_CREATED` como antes.
  *
- * NUNCA llama `acknowledgeProcessed()` (ni en SI4-1 ni en SI4-2): la fila del outbox sólo llega a DONE cuando SI-4
- * COMPLETO termine (SI4-3: companyqr/etiqueta).
+ * SI4-3 (ADR-0022), con `Si4QrStage` inyectada: desde `BRIDGED` la MISMA saga obtiene el código companyqr ACTIVO del
+ * activo (API pública de companyqr) y verifica que la etiqueta se renderiza ⇒ `QR_READY`; revalida puente/activo/código
+ * y RECIÉN ENTONCES llama `acknowledgeProcessed()` — el ÚLTIMO efecto externo, el único punto del worker que lo hace —
+ * y cierra la saga en `COMPLETED` por el finalizador (`Si4Finalizer`: sólo con el outbox DONE). Un ack fallido deja la
+ * saga en QR_READY y el outbox sin DONE (reintento sin rehacer nada); un crash tras el ack lo cierra el finalizador,
+ * que corre al inicio de cada corrida. Sin la etapa QR (modos SI4-1/SI4-2) NUNCA hay ack: la unidad se estaciona.
  *
  * @license GPL-3.0-or-later
  */
@@ -52,6 +56,8 @@ final class Si4Worker
     public const R_LEASE_LOST     = 'lease_lost';
     public const R_ERROR          = 'error';
     public const R_BRIDGED        = 'bridged';
+    public const R_QR_READY       = 'qr_ready';
+    public const R_COMPLETED      = 'completed';
 
     private HandoffSource $source;
     private SagaStore $sagas;
@@ -69,6 +75,8 @@ final class Si4Worker
     private LogSanitizer $sanitizer;
     private ?string $abort = null;
     private ?Si4GlpiStage $glpi;
+    private ?Si4QrStage $qr;
+    private ?Si4Finalizer $finalizer = null;
     /** @var array{payload:array<string,mixed>, attempts:int, corr:string}|null contexto de la unidad en proceso */
     private ?array $unit = null;
     /** @var array<string,int> sub-resultados de la corrida (Snipe/GLPI) */
@@ -79,6 +87,8 @@ final class Si4Worker
      * @param callable(string,string):void|null $probe  punto de inyección de fallas SÓLO para tests (null en producción)
      * @param callable():int|null $clock
      * @param Si4GlpiStage|null $glpi etapas GLPI de SI4-2 (null = modo SI4-1: estacionar en SNIPE_CREATED)
+     * @param Si4QrStage|null $qr etapa QR + ack + finalización de SI4-3 (null = modo SI4-2: estacionar en BRIDGED, sin ack)
+     * @param FinalizerCursor|null $finalizerCursor cursor DURABLE del finalizador (obligatorio con la etapa QR)
      */
     public function __construct(
         HandoffSource $source,
@@ -91,7 +101,9 @@ final class Si4Worker
         ?callable $logger = null,
         ?callable $probe = null,
         ?callable $clock = null,
-        ?Si4GlpiStage $glpi = null
+        ?Si4GlpiStage $glpi = null,
+        ?Si4QrStage $qr = null,
+        ?FinalizerCursor $finalizerCursor = null
     ) {
         $this->source     = $source;
         $this->sagas      = $sagas;
@@ -105,6 +117,13 @@ final class Si4Worker
         $this->clock      = $clock ?? static fn (): int => time();
         $this->sanitizer  = new LogSanitizer();
         $this->glpi       = $glpi;
+        $this->qr         = $glpi !== null ? $qr : null; // la etapa QR sigue a la GLPI
+        if ($this->qr !== null) {
+            if ($finalizerCursor === null) {
+                throw new \InvalidArgumentException('la etapa QR exige el cursor durable del finalizador');
+            }
+            $this->finalizer = new Si4Finalizer($sagas, $source, $finalizerCursor, fn (string $l, string $msg, array $c) => $this->log($l, $msg, $c));
+        }
     }
 
     public function workerId(): string
@@ -120,20 +139,28 @@ final class Si4Worker
      * Una corrida: preflight (config + Snipe) ANTES de reclamar; luego claims de a una unidad hasta vaciar, agotar
      * `si4_max_units_per_run` o abortar (auth/circuit).
      *
-     * @return array<string,mixed> métricas: claimed, created, reconciled, bridged, parked, blocked_config, manual_review,
-     *                             retry, uncertain, lease_lost, error, aborted (motivo o null) y los sub-resultados
-     *                             snipe_created, snipe_reconciled, glpi_created, glpi_linked
+     * SI4-3: ANTES de todo (sin depender de Snipe) el finalizador cierra las sagas QR_READY cuyo outbox ya está DONE.
+     *
+     * @return array<string,mixed> métricas: claimed, created, reconciled, bridged, qr_ready, completed, parked,
+     *                             blocked_config, manual_review, retry, uncertain, lease_lost, error, finalized, aborted
+     *                             (motivo o null) y los sub-resultados snipe_created, snipe_reconciled, glpi_created,
+     *                             glpi_linked, qr_created, qr_existing
      */
     public function run(): array
     {
-        $m = ['claimed' => 0, self::R_CREATED => 0, self::R_RECONCILED => 0, self::R_BRIDGED => 0, self::R_PARKED => 0, self::R_BLOCKED_CONFIG => 0,
-              self::R_MANUAL_REVIEW => 0, self::R_RETRY => 0, self::R_UNCERTAIN => 0, self::R_LEASE_LOST => 0, self::R_ERROR => 0,
-              'aborted' => null, 'config_errors' => []];
+        $m = ['claimed' => 0, self::R_CREATED => 0, self::R_RECONCILED => 0, self::R_BRIDGED => 0, self::R_QR_READY => 0, self::R_COMPLETED => 0,
+              self::R_PARKED => 0, self::R_BLOCKED_CONFIG => 0, self::R_MANUAL_REVIEW => 0, self::R_RETRY => 0, self::R_UNCERTAIN => 0,
+              self::R_LEASE_LOST => 0, self::R_ERROR => 0, 'finalized' => 0, 'aborted' => null, 'config_errors' => []];
         $this->abort = null;
-        $this->stats = ['snipe_created' => 0, 'snipe_reconciled' => 0, 'glpi_created' => 0, 'glpi_linked' => 0];
+        $this->stats = ['snipe_created' => 0, 'snipe_reconciled' => 0, 'glpi_created' => 0, 'glpi_linked' => 0, 'qr_created' => 0, 'qr_existing' => 0];
         if (!$this->cfg->enabled) {
             $m['aborted'] = 'disabled';
             return $m;
+        }
+        if ($this->finalizer !== null) {
+            // Crash tras un ack: la saga quedó en QR_READY con el outbox ya DONE ⇒ COMPLETED (sin lease, sin Snipe). Pasada
+            // ACOTADA del recorrido round-robin con cursor durable: ninguna saga pendiente bloquea a las posteriores.
+            $m['finalized'] = $this->finalizer->run()[Si4Finalizer::F_COMPLETED];
         }
         $errors = $this->cfg->errors($this->timeoutMs, $this->maxRetries);
         if ($errors !== []) {
@@ -234,11 +261,20 @@ final class Si4Worker
             }
 
             // 3) Etapas ya cumplidas.
-            if ($state === SagaState::BRIDGED) {
-                $this->log('info', 'saga estacionada en BRIDGED (SI4-2): sin llamadas remotas, sin escrituras ni ack', $ctx);
+            $resume = (string) ($saga['resume_state'] ?? '');
+            if ($state === SagaState::COMPLETED) {
+                // No debería ocurrir (COMPLETED exige el outbox DONE): no se toca nada ni se confirma de nuevo.
+                $this->log('warning', 'saga COMPLETED con su handoff reclamado otra vez: no se toca', $ctx);
                 return self::R_PARKED;
             }
-            $resume = (string) ($saga['resume_state'] ?? '');
+            if (in_array($state, [SagaState::BRIDGED, SagaState::QR_READY], true)
+                || ($state === SagaState::BLOCKED_CONFIG && $resume === SagaState::BRIDGED)) {
+                if ($this->qr === null) {
+                    $this->log('info', 'saga estacionada en ' . $state . ' (modo SI4-2): sin llamadas remotas, sin escrituras ni ack', $ctx);
+                    return self::R_PARKED;
+                }
+                return $this->continueQr($uuid, $token, $tokenSha, $attempts, $ctx);
+            }
             if (in_array($state, SagaState::POST_SNIPE, true)
                 || ($state === SagaState::BLOCKED_CONFIG && in_array($resume, SagaState::POST_SNIPE, true))) {
                 if ($this->glpi === null) {
@@ -499,11 +535,15 @@ final class Si4Worker
                 if (isset($this->stats['glpi_' . $glpiOutcome])) {
                     $this->stats['glpi_' . $glpiOutcome]++;
                 }
-                $this->log('info', 'unidad en BRIDGED: activo GLPI, Infocom y asset_bridge listos; estacionada (sin ack: SI4-3 pendiente)', $ctx + [
+                $this->log('info', $this->qr !== null ? 'unidad en BRIDGED: activo GLPI, Infocom y asset_bridge listos; sigue la etapa QR'
+                    : 'unidad en BRIDGED: activo GLPI, Infocom y asset_bridge listos; estacionada (modo SI4-2, sin ack)', $ctx + [
                     'glpi_itemtype' => (string) ($final['glpi_itemtype'] ?? ''), 'glpi_items_id' => (int) ($final['glpi_items_id'] ?? 0),
                     'glpi_outcome' => $glpiOutcome, 'infocom_outcome' => (string) ($final['infocom_outcome'] ?? ''),
                     'asset_bridge_id' => (int) ($final['asset_bridge_id'] ?? 0),
                 ]);
+                if ($this->qr !== null) {
+                    return $this->continueQr($uuid, $token, $tokenSha, $attempts, $ctx);
+                }
                 return self::R_BRIDGED;
             case Si4GlpiStage::O_LEASE_LOST:
                 $this->log('warning', 'lease perdido o insuficiente en la etapa GLPI: el próximo dueño reanuda', $ctx);
@@ -518,6 +558,68 @@ final class Si4Worker
             default: // O_MANUAL
                 return $this->manualReview($uuid, $token, $tokenSha, $o['state'], $o['why'], $o['class'], $ctx);
         }
+    }
+
+    /**
+     * SI4-3 (ADR-0022): BRIDGED ⇒ QR_READY ⇒ revalidación ⇒ `acknowledgeProcessed()` (ÚLTIMO efecto externo) ⇒ COMPLETED
+     * por el finalizador. Desde QR_READY (ack fallido o crash antes del ack) no se rehace nada: revalida y confirma.
+     *
+     * @param array<string,mixed> $ctx
+     */
+    private function continueQr(string $uuid, string $token, string $tokenSha, int $attempts, array $ctx): string
+    {
+        if ($this->qr === null || $this->finalizer === null) {
+            return self::R_PARKED;
+        }
+        $o = $this->qr->advance($uuid, $tokenSha);
+        if ($o['kind'] === Si4QrStage::O_QR_READY) {
+            $o = $this->qr->revalidateForAck($uuid, $tokenSha);
+        }
+        switch ($o['kind']) {
+            case Si4QrStage::O_QR_READY:
+                break;
+            case Si4QrStage::O_LEASE_LOST:
+                $this->log('warning', 'lease perdido o insuficiente en la etapa QR: el próximo dueño reanuda (sin ack)', $ctx);
+                return self::R_LEASE_LOST;
+            case Si4QrStage::O_BLOCKED:
+                if (!$this->sagas->transition($uuid, $tokenSha, $o['state'], ['state' => SagaState::BLOCKED_CONFIG, 'resume_state' => $o['resume'],
+                    'last_error' => Si4Errors::sanitize($o['why']), 'last_error_class' => $o['class']], 'blocked_config', $o['why'])) {
+                    return self::R_LEASE_LOST;
+                }
+                $this->settleRetry($uuid, $token, $o['why'], $this->cfg->configRetrySec, $ctx);
+                return self::R_BLOCKED_CONFIG;
+            default: // O_MANUAL: sin ack
+                return $this->manualReview($uuid, $token, $tokenSha, $o['state'], $o['why'], $o['class'], $ctx);
+        }
+        $saga = $this->sagas->get($uuid) ?? [];
+        $qrOutcome = (string) ($saga['qr_outcome'] ?? '');
+        $this->probe('before_ack', $uuid);
+        try {
+            $ack = $this->source->acknowledgeProcessed($uuid, $token);
+            if (($ack['status'] ?? '') !== Si4Finalizer::OUTBOX_DONE) {
+                throw new \RuntimeException('el outbox no quedó DONE (' . (string) ($ack['status'] ?? '') . ')');
+            }
+        } catch (\Exception $e) {
+            // La saga QUEDA en QR_READY y el outbox sin DONE: el reintento sólo revalida y vuelve a confirmar.
+            $this->recordError($uuid, $tokenSha, SagaState::QR_READY, 'ack', 'acknowledgeProcessed falló: ' . $e->getMessage());
+            $this->log('warning', 'acknowledgeProcessed falló: la saga sigue en QR_READY', $ctx + ['error' => Si4Errors::sanitize($e->getMessage())]);
+            $this->settleRetry($uuid, $token, 'ack: ' . $e->getMessage(), $this->cfg->backoffSeconds($attempts), $ctx);
+            return self::R_QR_READY;
+        }
+        $this->probe('after_ack', $uuid);
+        if (isset($this->stats['qr_' . $qrOutcome])) {
+            $this->stats['qr_' . $qrOutcome]++;
+        }
+        if ($this->finalizer->finalizeOne($uuid) === Si4Finalizer::F_COMPLETED) {
+            $this->probe('after_completed', $uuid);
+            $this->log('info', 'unidad COMPLETED: código companyqr activo, etiqueta lista y outbox DONE', $ctx + [
+                'qr_code_id' => (int) ($saga['qr_code_id'] ?? 0), 'qr_outcome' => $qrOutcome,
+            ]);
+            return self::R_COMPLETED;
+        }
+        // Ack aplicado pero la saga no pudo cerrarse ahora: el finalizador la cierra en la próxima corrida.
+        $this->log('warning', 'ack aplicado; la saga queda en QR_READY hasta el finalizador', $ctx);
+        return self::R_QR_READY;
     }
 
     /** @param array<string,mixed> $ctx */

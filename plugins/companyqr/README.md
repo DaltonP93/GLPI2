@@ -8,7 +8,7 @@ Plugin propio de la **Plataforma GLPI Modular**.
 - **Principio rector:** *el QR identifica; GLPI autoriza* (el token identifica, no autoriza).
 - **GLPI soportado:** `>=11.0` y `<12.0` (`max=12.0` excluyente; probado en 11.0.8; GLPI 12
   no soportado hasta suite de regresión — ver `../../docs/architecture/glpi-version-compatibility.md`).
-- **Estado:** Fase 1 — implementación funcional (en revisión / PR).
+- **Estado:** Fase 1 — implementación funcional; 0.3.0 agrega la API pública `CompanyQrApi` (SI4-3, ADR-0022).
 
 ## Regla 0
 Este plugin **no modifica el core de GLPI**. Solo usa hooks/API/controladores oficiales.
@@ -29,6 +29,21 @@ Ver `../../CLAUDE.md` y `../../docs/adr/ADR-0002-glpi-core-immutable.md`.
 | POST | `/public/{token}/report` | NO_CHECK | Reporte anónimo (rate limit + Altcha), sólo si habilitado |
 | GET | `/label/{code_id}` | AUTHENTICATED | PDF de etiqueta (derecho `print`) |
 | POST | `/admin/{action}` | AUTHENTICATED | generate/rotate/revoke (derecho `generate`, CSRF) |
+
+## API pública para otros plugins (`CompanyQrApi`, ADR-0022)
+`GlpiPlugin\Companyqr\Api\CompanyQrApi` — agnóstica del dominio; la usa SI-4 (companyintegrations) para el código
+y la etiqueta de cada unidad recibida.
+
+| Método | Derecho (sesión) | Devuelve |
+|---|---|---|
+| `ensureForItem(itemtype, items_id)` | `generate` + activo visible (`canViewItem`) | metadatos + `outcome` (created/existing); get-or-create idempotente |
+| `findForItem(itemtype, items_id)` / `getCode(code_id)` | read, generate o print + activo visible | metadatos o `null` |
+| `renderLabelPdf(code_id)` | `print` + activo visible; código ACTIVO | PDF de la etiqueta (la misma de `GET /label/{code_id}`) |
+
+- Metadatos = `code_id`, `public_code`, `status`, `itemtype`, `items_id`, `entities_id`. **Nunca el token.**
+- La URL del QR (con el token) sólo la arma companyqr (`ScanUrl`, `LabelComposer`).
+- Errores tipados `CompanyQrException` (`acl`, `not_found`, `inactive`, `render`, `invalid`).
+- Nunca rota, revoca ni reactiva un código.
 
 ## Datos (tablas propias, migración reversible)
 - `glpi_plugin_companyqr_codes` — token único, `public_code` único, estado, entidad.

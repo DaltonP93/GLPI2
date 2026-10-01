@@ -55,6 +55,7 @@ use GlpiPlugin\Companypurchasing\Service\PluginConfig as PurchasingConfig;
 use GlpiPlugin\Companypurchasing\Service\ReceivingService;
 use GlpiPlugin\Companypurchasing\Service\RequestManager;
 use GlpiPlugin\Companypurchasing\Service\WorkflowGateway;
+use GlpiPlugin\Companyqr\Model\Code as QrCode;
 
 trait Si4SelftestScenarios
 {
@@ -281,13 +282,13 @@ trait Si4SelftestScenarios
         ]);
         (new ApprovalOrchestrator())->publishDefinition();
 
-        // Solicitud: 1 línea inventariable de 16 unidades (SI4-1 recibe en lotes 3 + 1 + 1 + 1 + 1 + 1; SI4-2 recibe
-        // otras 6 en [SI4G-E2E]/[SI4G-AGENT]/[SI4G-AMBIGUOUS]/[SI4G-OTHER-ENT]/[SI4G-MAPPING]).
+        // Solicitud: 1 línea inventariable de 90 unidades (SI4-1 recibe en lotes 3 + 1 + 1 + 1 + 1 + 1; SI4-2 recibe
+        // otras 6 en [SI4G-E2E]/[SI4G-AGENT]/[SI4G-AMBIGUOUS]/[SI4G-OTHER-ENT]/[SI4G-MAPPING]; SI4-3 ~38 en [SI4Q-*]).
         $this->si4Category = 'SI4-NB-' . $this->suffix;
         $this->si4AsPurchasing($this->si4Owner, READ | PurchaseRequest::RIGHT_CREATE_REQUEST | PurchaseRequest::RIGHT_VIEW_OWN | PurchaseRequest::RIGHT_EDIT_DRAFT, READ);
         $rm = new RequestManager();
         $this->si4Req = $rm->createDraft(['entities_id' => $this->si4E, 'reason' => 'si4-' . $this->suffix, 'category' => 'IT', 'currency_code' => 'PYG']);
-        $this->si4Line = (int) $rm->addLine($this->si4Req, ['description' => 'Notebook SI4', 'quantity' => '16', 'estimated_unit_price' => '1000',
+        $this->si4Line = (int) $rm->addLine($this->si4Req, ['description' => 'Notebook SI4', 'quantity' => '90', 'estimated_unit_price' => '1000',
             'is_inventoriable' => 1, 'category' => $this->si4Category]);
         $orch = new ApprovalOrchestrator();
         $orch->submit($this->si4Req, 'envío si4');
@@ -466,8 +467,12 @@ trait Si4SelftestScenarios
         $this->check('[SI4-ACL] sin RIGHT_INTEGRATION de Compras ⇒ la sesión del worker se rechaza', $this->si4Throws(fn () => WorkerSession::assertRights()));
         $m = $this->si4Worker('st-noacl')->run();
         $this->check('[SI4-ACL] sin RIGHT_INTEGRATION ⇒ claimPending denegado ⇒ corrida abortada', $m['aborted'] === 'source' && $m['claimed'] === 0);
+        $this->si4AsWorker([$this->si4E], null, null, QrCode::RIGHT_PRINT);
+        $this->check('[SI4-ACL] sin RIGHT_GENERATE de companyqr ⇒ la sesión del worker se rechaza (SI4-3)', $this->si4Throws(fn () => WorkerSession::assertRights()));
+        $this->si4AsWorker([$this->si4E], null, null, QrCode::RIGHT_GENERATE);
+        $this->check('[SI4-ACL] sin RIGHT_PRINT de companyqr ⇒ la sesión del worker se rechaza (SI4-3)', $this->si4Throws(fn () => WorkerSession::assertRights()));
         $this->si4AsWorker([$this->si4E]);
-        $this->check('[SI4-ACL] con ambos bits (y sin Super-Admin) la sesión es válida', !$this->si4Throws(fn () => WorkerSession::assertRights()));
+        $this->check('[SI4-ACL] con los bits de mínimo privilegio (y sin Super-Admin) la sesión es válida', !$this->si4Throws(fn () => WorkerSession::assertRights()));
     }
 
     // ------------------------------------------------------------------ [SI4-CMD]
@@ -485,6 +490,7 @@ trait Si4SelftestScenarios
         \ProfileRight::updateProfileRights($profile, [
             AssetBridge::$rightname => AssetBridge::RIGHT_SI4,
             'plugin_companypurchasing' => PurchaseRequest::RIGHT_INTEGRATION,
+            QrCode::$rightname => QrCode::RIGHT_GENERATE | QrCode::RIGHT_PRINT,
         ]);
         (new \Profile_User())->add(['users_id' => $user, 'profiles_id' => $profile, 'entities_id' => $this->si4E, 'is_recursive' => 0]);
         [$u] = $this->si4Receive(1);
@@ -514,8 +520,12 @@ trait Si4SelftestScenarios
             putenv(IntegrationsConfig::TOKEN_ENV);
             [$rc, $out] = $run();
             $this->check('[SI4-CMD] sin token en el entorno ⇒ exit 1 (fail-closed)', $rc === 1 && str_contains($out, IntegrationsConfig::TOKEN_ENV));
-            \ProfileRight::updateProfileRights($profile, [AssetBridge::$rightname => 0]);
+            \ProfileRight::updateProfileRights($profile, [QrCode::$rightname => QrCode::RIGHT_GENERATE]);
             putenv(IntegrationsConfig::TOKEN_ENV . '=' . self::SI4_TOKEN);
+            [$rc, $out] = $run();
+            $this->check('[SI4-CMD] usuario técnico sin RIGHT_PRINT de companyqr ⇒ exit 1 ANTES de reclamar (SI4-3)', $rc === 1 && str_contains($out, 'RIGHT_PRINT')
+                && ((new PurchasingIntegrationApi())->getHandoff($u)['status'] ?? '') === 'PENDING');
+            \ProfileRight::updateProfileRights($profile, [AssetBridge::$rightname => 0, QrCode::$rightname => QrCode::RIGHT_GENERATE | QrCode::RIGHT_PRINT]);
             [$rc, $out] = $run();
             $this->check('[SI4-CMD] usuario técnico sin RIGHT_SI4 ⇒ exit 1 (permiso denegado)', $rc === 1 && str_contains($out, 'RIGHT_SI4'));
         } finally {
@@ -618,15 +628,18 @@ trait Si4SelftestScenarios
     }
 
     /**
-     * Sesión del worker: por defecto SÓLO los dos bits de mínimo privilegio (sin Super-Admin, sin ver solicitudes).
+     * Sesión del worker: por defecto SÓLO los bits de mínimo privilegio (sin Super-Admin, sin ver solicitudes):
+     * RIGHT_SI4, RIGHT_INTEGRATION de Compras y (SI4-3) companyqr generate + print.
      *
      * @param array<int> $entities
      */
-    private function si4AsWorker(array $entities, ?int $integrationsBits = null, ?int $purchasingBits = null): void
+    private function si4AsWorker(array $entities, ?int $integrationsBits = null, ?int $purchasingBits = null, ?int $qrBits = null): void
     {
         $this->applySession(2, $entities, [
             'plugin_companyintegrations' => $integrationsBits ?? AssetBridge::RIGHT_SI4,
             'plugin_companypurchasing'   => $purchasingBits ?? PurchaseRequest::RIGHT_INTEGRATION,
+            // SI4-3 (ADR-0022): companyqr RIGHT_GENERATE | RIGHT_PRINT (bits del contrato público de companyqr)
+            QrCode::$rightname           => $qrBits ?? (QrCode::RIGHT_GENERATE | QrCode::RIGHT_PRINT),
         ]);
         unset($_SESSION['glpicronuserrunning']);
     }

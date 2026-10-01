@@ -17,8 +17,8 @@ use Glpi\Controller\AbstractController;
 use Glpi\Http\Firewall;
 use Glpi\Security\Attribute\SecurityStrategy;
 use GlpiPlugin\Companyqr\Model\Code;
+use GlpiPlugin\Companyqr\Service\LabelComposer;
 use GlpiPlugin\Companyqr\Service\LabelRenderer;
-use GlpiPlugin\Companyqr\Service\PluginConfig;
 use Session;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
@@ -47,26 +47,12 @@ final class LabelController extends AbstractController
             throw new AccessDeniedHttpException();
         }
 
-        $pdf = (new LabelRenderer())->pdf([
-            'public_code' => (string) $code->fields['public_code'],
-            'type'        => $item->getTypeName(1),
-            'qr_data'     => $this->scanUrl((string) $code->fields['token']),
-            'header'      => (string) PluginConfig::get('label_header', 'TI • ACTIVOS'),
-            'org'         => (int) PluginConfig::get('label_show_org', '0') === 1
-                ? \Dropdown::getDropdownName('glpi_entities', (int) $code->fields['entities_id'])
-                : null,
-        ]);
+        // Misma etiqueta que `CompanyQrApi::renderLabelPdf()`: el contenido (y la URL del QR) lo arma `LabelComposer`.
+        $pdf = (new LabelRenderer())->pdf(LabelComposer::spec($code, $item));
 
         return new Response($pdf, 200, [
             'Content-Type'        => 'application/pdf',
             'Content-Disposition' => 'inline; filename="companyqr-' . $code->fields['public_code'] . '.pdf"',
         ]);
-    }
-
-    private function scanUrl(string $token): string
-    {
-        global $CFG_GLPI;
-        $base = (string) ($CFG_GLPI['url_base'] ?? '');
-        return $base . '/plugins/companyqr/scan/' . rawurlencode($token);
     }
 }

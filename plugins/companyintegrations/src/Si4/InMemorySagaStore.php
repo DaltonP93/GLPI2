@@ -19,6 +19,8 @@ final class InMemorySagaStore implements SagaStore
     public array $log = [];
     /** @var callable():int */
     private $clock;
+    /** Autoincremental como `si4_sagas.id` (orden del recorrido del finalizador). */
+    private int $seq = 0;
 
     /** @param callable():int $clock */
     public function __construct(callable $clock)
@@ -31,7 +33,7 @@ final class InMemorySagaStore implements SagaStore
         $until = (int) strtotime($leaseUntil . ' UTC');
         if (!isset($this->rows[$uuid])) {
             $this->rows[$uuid] = [
-                'receipt_unit_uuid' => $uuid, 'entities_id' => $meta['entities_id'], 'requests_id' => $meta['requests_id'],
+                'id' => ++$this->seq, 'receipt_unit_uuid' => $uuid, 'entities_id' => $meta['entities_id'], 'requests_id' => $meta['requests_id'],
                 'items_id' => $meta['items_id'], 'payload_sha256' => $meta['payload_sha256'], 'correlation_id' => $meta['correlation_id'],
                 'state' => SagaState::PENDING, 'snipe_asset_id' => null, 'snipe_asset_tag' => null, 'snipe_outcome' => null,
                 'snipe_company_id' => null, 'snipe_model_id' => null, 'snipe_status_id' => null,
@@ -40,6 +42,7 @@ final class InMemorySagaStore implements SagaStore
                 'glpi_itemtype' => null, 'glpi_items_id' => null, 'glpi_entity_id' => null, 'glpi_outcome' => null,
                 'glpi_create_calls' => 0, 'glpi_infocom_id' => null, 'infocom_outcome' => null, 'asset_bridge_id' => null,
                 'resume_state' => null, 'glpi_mapping_id' => null, 'glpi_model_id' => null, 'glpi_mapping_hash' => null,
+                'qr_code_id' => null, 'qr_public_code' => null, 'qr_outcome' => null, 'label_ready_at' => null, 'completed_at' => null,
             ];
             $this->log[] = ['uuid' => $uuid, 'event' => 'acquire', 'to' => SagaState::PENDING];
             return $this->rows[$uuid];
@@ -87,11 +90,26 @@ final class InMemorySagaStore implements SagaStore
                 }
             }
         }
-        if (array_key_exists('resume_state', $set) && $set['resume_state'] !== null && !in_array($set['resume_state'], SagaState::POST_SNIPE, true)) {
+        if (array_key_exists('resume_state', $set) && $set['resume_state'] !== null && !in_array($set['resume_state'], SagaState::RESUMABLE, true)) {
             throw new \InvalidArgumentException('resume_state inválido');
         }
+        if (array_key_exists('state', $set) && (!in_array($set['state'], SagaState::ALL, true) || $set['state'] === SagaState::COMPLETED)) {
+            throw new \InvalidArgumentException('estado de saga inválido (COMPLETED sólo por complete())');
+        }
         foreach ($set as $k => $v) {
-            $this->rows[$uuid][$k] = $v;
+            if (!array_key_exists($k, $this->rows[$uuid]) || in_array($k, ['id', 'completed_at', 'lease_token_sha256', 'lease_until', 'lease_epoch'], true)) {
+                throw new \InvalidArgumentException('columna de saga no permitida: ' . $k); // misma whitelist que DbSagaStore
+            }
+        }
+        if (isset($set['qr_code_id']) && $set['qr_code_id'] !== null) {
+            foreach ($this->rows as $u => $o) {
+                if ($u !== $uuid && (int) $o['qr_code_id'] === (int) $set['qr_code_id']) {
+                    throw new \RuntimeException('código QR ya ligado a otra unidad (UNIQUE qr_code_id)');
+                }
+            }
+        }
+        foreach ($set as $k => $v) {
+            $this->rows[$uuid][$k] = $k === 'label_ready_at' && $v === self::NOW ? $now : $v;
         }
         $this->log[] = ['uuid' => $uuid, 'event' => $event, 'from' => $fromState, 'to' => $this->rows[$uuid]['state'], 'detail' => $detail];
         return true;
@@ -107,5 +125,29 @@ final class InMemorySagaStore implements SagaStore
     public function get(string $uuid): ?array
     {
         return $this->rows[$uuid] ?? null;
+    }
+
+    public function complete(string $uuid, string $detail): bool
+    {
+        if (($this->rows[$uuid]['state'] ?? null) !== SagaState::QR_READY) {
+            return false;
+        }
+        $this->rows[$uuid]['state'] = SagaState::COMPLETED;
+        $this->rows[$uuid]['completed_at'] = (int) ($this->clock)();
+        $this->rows[$uuid]['last_error'] = null;
+        $this->rows[$uuid]['last_error_class'] = null;
+        $this->log[] = ['uuid' => $uuid, 'event' => 'completed', 'from' => SagaState::QR_READY, 'to' => SagaState::COMPLETED, 'detail' => $detail];
+        return true;
+    }
+
+    public function listByStateAfter(string $state, int $afterId, int $limit): array
+    {
+        $rows = array_filter($this->rows, static fn (array $r): bool => $r['state'] === $state && $r['id'] > $afterId);
+        usort($rows, static fn (array $a, array $b): int => $a['id'] <=> $b['id']);
+        $out = [];
+        foreach (array_slice($rows, 0, max(1, $limit)) as $r) {
+            $out[] = ['id' => (int) $r['id'], 'receipt_unit_uuid' => (string) $r['receipt_unit_uuid']];
+        }
+        return $out;
     }
 }

@@ -13,6 +13,9 @@
  *   [ANON-OFF]    modo anónimo apagado → login_required (sin fuga).
  *   [LIFECYCLE]   rotar invalida el token viejo; revocar → "no disponible".
  *   [LABEL]       genera un PDF real 70,75×24 (evidencia; CI lo sube como artefacto).
+ *   [API-*]       API pública `CompanyQrApi` (SI4-3, ADR-0022): get-or-create idempotente, carrera por el mismo
+ *                 activo, ACL generate/print + entidad, etiqueta real sin datos técnicos ni token, sin rotar/reactivar,
+ *                 install() seguro en upgrade (ver ApiSelftestScenarios).
  * Probe NO fatal:
  *   [FORMS-GATE]  ¿existe una vía soportada de prefill/lock del activo en Forms nativo?
  *
@@ -51,6 +54,8 @@ use Symfony\Component\Routing\Annotation\Route;
 
 final class SelftestCommand extends Command
 {
+    use ApiSelftestScenarios;
+
     private int $failures = 0;
     private OutputInterface $out;
     private int $createdTicketId = 0;
@@ -58,7 +63,7 @@ final class SelftestCommand extends Command
     protected function configure(): void
     {
         $this->setName('plugins:companyqr:selftest')
-            ->setDescription('Pruebas de integración de companyqr (ACL, no-fuga, ciclo de vida, etiqueta).')
+            ->setDescription('Pruebas de integración de companyqr (ACL, no-fuga, ciclo de vida, etiqueta, API pública).')
             ->addOption('out', null, InputOption::VALUE_REQUIRED, 'Ruta del PDF de etiqueta', sys_get_temp_dir() . '/companyqr-label.pdf');
     }
 
@@ -176,6 +181,9 @@ final class SelftestCommand extends Command
 
         // --- [FORMS-GATE] probe no fatal ---
         $this->formsGateProbe();
+
+        // --- [API-*] API pública CompanyQrApi (SI4-3, ADR-0022) ---
+        $this->runApiScenarios($entityA, $entityB, $suffix);
 
         // --- Limpieza best-effort ---
         $this->cleanup($code, $computer, $entityA, $entityB);

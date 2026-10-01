@@ -3,6 +3,67 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.5.0] — SI4-3 (código companyqr + etiqueta + ack del outbox + cierre de la saga, ADR-0022)
+### Added
+- **Etapa QR de la saga** (`Si4QrStage`): `BRIDGED → QR_READY → COMPLETED`. `BLOCKED_CONFIG` admite
+  `resume_state = BRIDGED`.
+- **Código companyqr por la API pública** (`QrGateway` ⇒ `CoreQrGateway` ⇒ `GlpiPlugin\Companyqr\Api\CompanyQrApi`):
+  - get-or-create idempotente por activo (un crash entre crear y registrar encuentra el MISMO código);
+  - sin otro sistema de QR, sin SQL a tablas de companyqr y sin conocer el token;
+  - `QrCodeRules` exige: código ACTIVO, del mismo activo y entidad, con `public_code` = número de inventario de la
+    unidad y metadatos sin claves extra (fail-closed si llegara el token);
+  - revocado, suspendido, de otro activo/entidad o con otro código visible ⇒ `MANUAL_REVIEW`, sin rotar ni reactivar.
+- **Etiqueta renderizable** con el renderer de companyqr: se valida el PDF (`%PDF-` … `%%EOF`) y **no se guarda**. Si
+  no se puede renderizar ⇒ `BLOCKED_CONFIG` (`qr_label`).
+- **`acknowledgeProcessed()` como ÚLTIMO efecto externo** (único punto: `Si4Worker::continueQr`):
+  - antes, revalidación sólo de lecturas (saga `QR_READY` y dueño del lease, puente 1:1, activo GLPI, código ACTIVO
+    del mismo activo y mismo `public_code`); divergencia ⇒ `MANUAL_REVIEW` sin ack;
+  - ack fallido ⇒ la saga queda en `QR_READY` y el reintento no rehace nada.
+- **Finalizador durable** (`Si4Finalizer`): cierra en `COMPLETED` las sagas `QR_READY` cuyo outbox está DONE según
+  `getHandoff()`.
+  - **Recorrido round-robin acotado y durable:**
+    - lote por corrida (`DEFAULT_BATCH` = 200);
+    - cursor persistente (`FinalizerCursor` ⇒ tabla propia `si4_runtime`);
+    - el cursor es la última saga INSPECCIONADA, así que una saga pendiente nunca bloquea a las posteriores;
+    - wrap-around al final;
+    - compare-and-set ante corridas concurrentes.
+  - Usa `SagaStore::complete()`, con guarda `state = QR_READY` y sin lease; `completed_at` con el reloj de la BD.
+  - Corre al inicio de cada corrida y tras cada ack. **Nunca** `COMPLETED` con el outbox ≠ DONE.
+  - `transition()` rechaza `COMPLETED`.
+- Columnas de `si4_sagas`: `qr_code_id` (UNIQUE), `qr_public_code`, `qr_outcome`, `label_ready_at`, `completed_at`.
+  Sin columnas para el token ni el PDF.
+- `SagaStore::NOW` (fecha escrita con el reloj de la BD) y `SagaStore::listByStateAfter()`, que alimenta el recorrido
+  con cursor.
+- Tabla propia `si4_runtime`: estado operativo del worker, con la fila `si4_finalizer_cursor`.
+- Métricas de la corrida: `qr_ready`, `completed`, `finalized`, `qr_created`, `qr_existing`.
+- Tests:
+  - unit/contract `si4q.php` (424 en total);
+  - recorrido del finalizador `[SI4Q-FINALIZER-CURSOR]`:
+    - lote 2 con objetos reconstruidos (otro proceso CLI);
+    - wrap-around;
+    - propiedad con más sagas que el lote;
+    - compare-and-set ante una carrera;
+    - mutantes "cursor no persistido", "avanza sólo al completar" y "sin wrap-around": muertos en unit y en BD;
+  - selftest `[SI4Q-*]`: upgrade, resume, E2E con PDF real, códigos preexistentes, 8 crash points, dos workers,
+    fencing, ack fallido, finalizador, revalidación, ACL, multi-entidad, token, sin efectos laterales;
+  - mutation testing: 13 mutantes unitarios + 20 de BD, todos muertos.
+
+### Changed
+- **Usuario técnico:** `WorkerSession::assertRights()` exige además `plugin_companyqr` `RIGHT_GENERATE` +
+  `RIGHT_PRINT`, antes de reclamar (fail-closed).
+- `Si4Config::minLeaseSeconds` suma 30 s para la etapa QR. Una configuración existente por debajo del nuevo mínimo
+  queda fail-closed: el worker no reclama.
+- `Si4RunCommand::buildWorker()` cablea la etapa QR. Parámetros opcionales sólo para tests: modo SI4-2 sin QR, fuente y
+  sonda.
+- Los selftests `[SI4G-*]` usan el worker en modo SI4-2 (sin la etapa QR) para seguir probando ese incremento.
+
+### Upgrade 0.4.0 → 0.5.0
+- `install()` idempotente: columnas, índice y tabla `si4_runtime` sólo si faltan.
+- Las sagas `BRIDGED` y anteriores, los mapeos, `asset_bridge`, la configuración y los derechos quedan intactos.
+  Verificado con huellas en el selftest y con un upgrade real 0.4.0/0.2.0 → 0.5.0/0.3.0: 4 sagas `BRIDGED` de main
+  llegaron a `COMPLETED`.
+- `si4_enabled` sigue en `0`; sin Acción automática.
+
 ## [0.4.0] — SI4-2 (activo GLPI + Infocom + asset_bridge en la misma saga, ADR-0021)
 ### Added
 - **Etapas GLPI de la saga** (`Si4GlpiStage`): `SNIPE_CREATED → GLPI_RESOLVED_OR_CREATED → INFOCOM_READY → BRIDGED`,

@@ -52,6 +52,7 @@ use GlpiPlugin\Companyintegrations\Si4\Si4Worker;
 use GlpiPlugin\Companyintegrations\Si4\SimulatedCrash;
 use GlpiPlugin\Companypurchasing\Api\PurchasingIntegrationApi;
 use GlpiPlugin\Companypurchasing\Model\Request as PurchaseRequest;
+use GlpiPlugin\Companyqr\Model\Code as QrCode;
 
 trait Si4GlpiSelftestScenarios
 {
@@ -111,6 +112,8 @@ trait Si4GlpiSelftestScenarios
             $this->si4gClaimRace();
             $this->si4gSupplier();
             $this->si4gNoSideEffects();
+            // SI4-3 (ADR-0022) reutiliza las fixtures de SI4-1/SI4-2 (Compras, Snipe fake, modelo y mapeo GLPI).
+            $this->runSi4qScenarios();
         } catch (\Throwable $e) {
             $this->check('[SI4G-E2E] sin excepciones: ' . $e->getMessage() . ' @' . basename($e->getFile()) . ':' . $e->getLine(), false);
         } finally {
@@ -790,7 +793,11 @@ trait Si4GlpiSelftestScenarios
 
     // ------------------------------------------------------------------ helpers
 
-    /** Worker SI4-2 cableado EXACTAMENTE como el comando real (`Si4RunCommand::buildWorker`). */
+    /**
+     * Worker SI4-2 cableado como el comando real (`Si4RunCommand::buildWorker`) SIN la etapa QR de SI4-3 (`$withQr` =
+     * false): estos escenarios prueban la etapa GLPI y que, sin la etapa QR, la unidad se estaciona en BRIDGED sin ack.
+     * El comando real completo (con QR, ack y finalizador) lo prueban los escenarios [SI4Q-*].
+     */
     private function si4gWorker(string $workerId): Si4Worker
     {
         $cfg = Si4Config::fromArray([
@@ -803,7 +810,7 @@ trait Si4GlpiSelftestScenarios
         $logger = static function (string $l, string $m, array $c) use (&$logs): void {
             $logs[] = $l . ' ' . $m . ' ' . json_encode($c);
         };
-        return Si4RunCommand::buildWorker($cfg, $this->si4Writer($logger), 5000, 1, $logger);
+        return Si4RunCommand::buildWorker($cfg, $this->si4Writer($logger), 5000, 1, $logger, false);
     }
 
     /** @param callable(string,string):void|null $probe */
@@ -823,6 +830,7 @@ trait Si4GlpiSelftestScenarios
         $rights = [
             'plugin_companyintegrations' => AssetBridge::RIGHT_SI4,
             'plugin_companypurchasing'   => PurchaseRequest::RIGHT_INTEGRATION,
+            QrCode::$rightname           => QrCode::RIGHT_GENERATE | QrCode::RIGHT_PRINT, // SI4-3 (ADR-0022)
             \Infocom::$rightname         => READ | CREATE | UPDATE,
         ];
         foreach (CoreGlpiAssetGateway::SUPPORTED_ITEMTYPES as $type) {

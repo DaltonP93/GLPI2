@@ -3,7 +3,8 @@
 /**
  * Tests UNITARIOS + de CONTRATO de companyintegrations (sin bootstrap de GLPI).
  * SI4-1: contrato WRITE, saga, crash/retry y consumo por lease en `si4.php`; SI4-2 (activo GLPI, Infocom, asset_bridge,
- * dedup con el GLPI Agent, crash points) en `si4g.php` (incluidos al final).
+ * dedup con el GLPI Agent, crash points) en `si4g.php`; SI4-3 (código companyqr, etiqueta, ack y finalizador) en
+ * `si4q.php` (incluidos al final).
  *
  * Cubren la lógica pura (clasificador de errores, backoff, circuit breaker, saneado de logs,
  * clasificación de reconciliación, chequeo de etiquetas) y el CONTRATO del SnipeItClient contra
@@ -44,7 +45,11 @@ foreach (['SagaState', 'AssetTagDeriver', 'Si4Errors', 'SimulatedCrash', 'Si4Con
           // SI4-2 (ADR-0021)
           'GlpiCandidateMatcher', 'InfocomPolicy', 'BridgeMatcher', 'BridgeStore', 'InMemoryBridgeStore', 'GlpiAssetGateway',
           'CoreGlpiAssetGateway', 'InMemoryGlpiAssets', 'GlpiMappingResolver', 'GlpiMappingRules', 'ArrayGlpiMappingResolver',
-          'Si4GlpiStage', 'Si4Worker'] as $f) {
+          'Si4GlpiStage',
+          // SI4-3 (ADR-0022)
+          'QrGateway', 'QrGatewayException', 'QrCodeRules', 'InMemoryQrGateway', 'Si4QrStage', 'FinalizerCursor',
+          'InMemoryFinalizerCursor', 'Si4Finalizer',
+          'Si4Worker'] as $f) {
     require $si4 . $f . '.php';
 }
 
@@ -318,6 +323,8 @@ ok('sólo se hicieron GET (read-only)', (function () {
 require __DIR__ . '/si4.php';
 // ---- SI4-2: activo GLPI + Infocom + asset_bridge en la misma saga (ADR-0021) ----
 require __DIR__ . '/si4g.php';
+// ---- SI4-3: código companyqr + etiqueta + ack + finalizador (ADR-0022) ----
+require __DIR__ . '/si4q.php';
 
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"

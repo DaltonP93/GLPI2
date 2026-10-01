@@ -22,6 +22,9 @@ use GlpiPlugin\Companyintegrations\Si4\ArrayGlpiMappingResolver;
 use GlpiPlugin\Companyintegrations\Si4\ArrayMappingResolver;
 use GlpiPlugin\Companyintegrations\Si4\InMemoryBridgeStore;
 use GlpiPlugin\Companyintegrations\Si4\InMemoryGlpiAssets;
+use GlpiPlugin\Companyintegrations\Si4\InMemoryFinalizerCursor;
+use GlpiPlugin\Companyintegrations\Si4\InMemoryQrGateway;
+use GlpiPlugin\Companyintegrations\Si4\Si4QrStage;
 use GlpiPlugin\Companyintegrations\Si4\Si4GlpiStage;
 use GlpiPlugin\Companyintegrations\Si4\AssetTagDeriver;
 use GlpiPlugin\Companyintegrations\Si4\HandoffSource;
@@ -52,6 +55,10 @@ final class Si4World
     public InMemoryGlpiAssets $glpi;
     public InMemoryBridgeStore $bridges;
     public ArrayGlpiMappingResolver $glpiMap;
+    // SI4-3 (ADR-0022): companyqr en memoria (API pública emulada).
+    public InMemoryQrGateway $qr;
+    /** Cursor "durable" del finalizador: compartido por todos los workers del mundo (= tabla propia entre procesos). */
+    public InMemoryFinalizerCursor $finCursor;
     /** @var array<string,string> */
     public array $cfg;
     /** @var array<int,string> */
@@ -71,6 +78,8 @@ final class Si4World
         $this->bridges = new InMemoryBridgeStore();
         $this->glpiMap = new ArrayGlpiMappingResolver(['NB' => ['glpi_itemtype' => 'Computer', 'glpi_model_id' => 41],
             'MON' => ['glpi_itemtype' => 'Monitor', 'glpi_model_id' => 0]]);
+        $this->qr = new InMemoryQrGateway($this->glpi);
+        $this->finCursor = new InMemoryFinalizerCursor();
         $this->cfg = [
             'si4_enabled' => '1', 'si4_asset_tag_prefix' => 'GP2-', 'si4_snipe_status_id' => '5', 'si4_lease_seconds' => '900',
             'si4_max_units_per_run' => '50', 'si4_retry_base_seconds' => '60', 'si4_retry_max_seconds' => '3600',
@@ -127,6 +136,25 @@ final class Si4World
         $cfg = Si4Config::fromArray($cfgOver + $this->cfg);
         $stage = new Si4GlpiStage($this->sagas, $this->glpi, $this->glpiMap, $this->bridges, $cfg->infocomCurrency, $probe);
         return new Si4Worker($this->source, $this->sagas, $this->mapping, $writer, $cfg, 5000, 2, $logger, $probe, fn (): int => $this->now, $stage);
+    }
+
+    /**
+     * Worker SI4-3: el de SI4-2 + `Si4QrStage` (código companyqr, etiqueta, ack y finalizador).
+     *
+     * @param callable(string,string):void|null $probe @param array<string,string> $cfgOver
+     */
+    public function worker3(?callable $probe = null, array $cfgOver = []): Si4Worker
+    {
+        $logs = &$this->logs;
+        $logger = function (string $l, string $m, array $c) use (&$logs): void {
+            $logs[] = $l . ' ' . $m . ' ' . json_encode($c);
+        };
+        $conf = new SnipeClientConfig('https://snipe.test', SI4_TOKEN, 5000, 2, 1, 50, 60);
+        $writer = new SnipeAssetWriter($this->snipe, $conf, $logger, false);
+        $cfg = Si4Config::fromArray($cfgOver + $this->cfg);
+        $stage = new Si4GlpiStage($this->sagas, $this->glpi, $this->glpiMap, $this->bridges, $cfg->infocomCurrency, $probe);
+        $qr = new Si4QrStage($this->sagas, $this->bridges, $this->glpi, $this->qr, $probe);
+        return new Si4Worker($this->source, $this->sagas, $this->mapping, $writer, $cfg, 5000, 2, $logger, $probe, fn (): int => $this->now, $stage, $qr, $this->finCursor);
     }
 
     public function tag(string $uuid): string

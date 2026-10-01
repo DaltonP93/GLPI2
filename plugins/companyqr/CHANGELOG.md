@@ -3,6 +3,32 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.3.0] — API pública para SI4-3 (ADR-0022)
+### Added
+- **`GlpiPlugin\Companyqr\Api\CompanyQrApi`**: API mínima y agnóstica del dominio para otros plugins.
+  - `ensureForItem()`: get-or-create idempotente que reutiliza `CodeManager::getOrCreateForItem()`.
+  - `findForItem()` y `getCode()`.
+  - `renderLabelPdf()`: reutiliza `LabelRenderer::pdf()` con la configuración existente; sólo códigos ACTIVOS.
+  - Devuelve metadatos **sin token** (`META_KEYS`).
+  - ACL con la sesión real: `RIGHT_GENERATE` / `RIGHT_PRINT` / READ + `canViewItem()` del activo.
+  - Errores tipados (`CompanyQrException`).
+  - Nunca rota, revoca ni reactiva.
+- `ScanUrl` (único lugar que arma `/plugins/companyqr/scan/{token}`) y `LabelComposer` (contenido de la etiqueta).
+  Ambos se comparten con `LabelController`: la etiqueta es la misma venga de donde venga.
+- Selftest `[API-*]`: get-or-create, carrera, ACL, etiqueta real (con `public_code`, sin serial/nombre/token; QR =
+  ruta autenticada con el token), sin rotar/reactivar, upgrade.
+- Unit: URL del QR, whitelist de la etiqueta y de los metadatos, reutilización de las piezas existentes.
+
+### Fixed
+- **`CodeManager::createForItem()` en carrera por el MISMO activo:** en GLPI 11 una clave duplicada lanza. Antes, el
+  bucle abortaba; ahora devuelve el código que creó el otro proceso (nunca dos por activo). El mensaje de error ya no
+  incluye el texto de la BD.
+- **`install()` seguro en upgrade.** Antes re-agregaba el derecho (`Duplicate entry … unicity`: el upgrade abortaba) y
+  pisaba la configuración. Ahora:
+  - el derecho se agrega sólo si falta, y los bits del Super-Admin sólo en esa primera alta;
+  - la configuración sólo siembra claves ausentes.
+  Sin cambio de esquema.
+
 ## [Unreleased]
 ### Security / Hardening (revisión de PR #3)
 - **URL del formulario de reporte ahora absoluta** (generada por el controlador), no

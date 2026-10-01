@@ -19,6 +19,9 @@ namespace GlpiPlugin\Companyintegrations\Si4;
 
 interface SagaStore
 {
+    /** Valor de `transition()` para las columnas de fecha (`label_ready_at`): la escribe el reloj de la BD (NOW()). */
+    public const NOW = '@db-now';
+
     /**
      * Crea la saga (PENDING) o la TOMA para este lease si su época es MAYOR que la del dueño registrado.
      * Devuelve la fila vigente, o null si la época no es más nueva (claim viejo/concurrente: fail-closed).
@@ -38,9 +41,12 @@ interface SagaStore
      *                                        glpi_entity_id, glpi_outcome, glpi_create_calls, glpi_infocom_id,
      *                                        infocom_outcome, asset_bridge_id, resume_state; pin del destino GLPI
      *                                        (`GlpiMappingRules::PIN_COLUMNS`): las cuatro juntas y SÓLO si la saga
-     *                                        aún no tiene pin (si ya lo tiene ⇒ false, nada escrito)
-     * @throws \RuntimeException violación de unicidad (snipe_asset_id o activo GLPI ya ligado a otra unidad)
-     * @throws \InvalidArgumentException pin incompleto
+     *                                        aún no tiene pin (si ya lo tiene ⇒ false, nada escrito); SI4-3:
+     *                                        qr_code_id, qr_public_code, qr_outcome, label_ready_at (`self::NOW`).
+     *                                        NUNCA state = COMPLETED (sólo `complete()`) ni el token del QR (no hay
+     *                                        columna para él)
+     * @throws \RuntimeException violación de unicidad (snipe_asset_id, activo GLPI o código QR ya ligado a otra unidad)
+     * @throws \InvalidArgumentException pin incompleto, columna no permitida o COMPLETED por esta vía
      */
     public function transition(string $uuid, string $tokenSha256, string $fromState, array $set, string $event, string $detail = '', int $minRemainingSeconds = 0): bool;
 
@@ -52,4 +58,19 @@ interface SagaStore
 
     /** @return array<string,mixed>|null */
     public function get(string $uuid): ?array;
+
+    /**
+     * FINALIZADOR de SI4-3 (ADR-0022 §7): QR_READY → COMPLETED (+ `completed_at` con el reloj de la BD) y evento en la
+     * bitácora. Guarda `state = QR_READY` SIN lease: el outbox ya está DONE (lo verifica el llamador por
+     * `getHandoff()`), así que ningún lease vigente existe ni hace falta. Idempotente: false = ya no estaba en QR_READY.
+     */
+    public function complete(string $uuid, string $detail): bool;
+
+    /**
+     * Lote ACOTADO de sagas en un estado con `id > $afterId`, en orden de `id` (recorrido round-robin del finalizador
+     * durable de SI4-3, ADR-0022 §6: el cursor persistente es el último `id` INSPECCIONADO).
+     *
+     * @return array<int,array{id:int, receipt_unit_uuid:string}>
+     */
+    public function listByStateAfter(string $state, int $afterId, int $limit): array;
 }

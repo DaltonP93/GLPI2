@@ -14,7 +14,10 @@
  * activos GLPI, ni Infocom, ni invoca companyqr; el worker está deshabilitado por defecto.
  * SI4-2 (ADR-0021): la MISMA saga continúa SNIPE_CREATED → GLPI_RESOLVED_OR_CREATED → INFOCOM_READY → BRIDGED:
  * resolver-o-crear el activo GLPI (dedup con el GLPI Agent, identidad determinista `otherserial`), Infocom con el costo
- * exacto de la unidad y `asset_bridge` 1:1. Sin companyqr, sin etiqueta y sin ack al outbox (SI4-3 pendiente).
+ * exacto de la unidad y `asset_bridge` 1:1.
+ * SI4-3 (ADR-0022): BRIDGED → QR_READY → COMPLETED: código companyqr ACTIVO por su API pública (`CompanyQrApi`, sin
+ * otro sistema de QR ni tablas de companyqr), etiqueta renderizable, `acknowledgeProcessed()` como ÚLTIMO efecto
+ * externo y finalizador durable (COMPLETED sólo con el outbox DONE). Worker deshabilitado por defecto.
  *
  * -------------------------------------------------------------------------
  *  REGLA 0: este plugin NO modifica el core de GLPI (ni el de Snipe-IT). Solo API/hooks
@@ -25,7 +28,7 @@
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYINTEGRATIONS_VERSION', '0.4.0');
+define('PLUGIN_COMPANYINTEGRATIONS_VERSION', '0.5.0');
 
 define('PLUGIN_COMPANYINTEGRATIONS_GLPI_MIN_VERSION', '11.0');
 define('PLUGIN_COMPANYINTEGRATIONS_GLPI_MAX_VERSION', '12.0');

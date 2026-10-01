@@ -6,6 +6,9 @@
  * cada escritura, igual que el lease del outbox de Compras (ADR-0019 §6 / ADR-0020 §6).
  * Sólo toca tablas de este plugin: nunca tablas de Compras ni del core.
  *
+ * SI4-3 (ADR-0022): `complete()` es la ÚNICA vía a COMPLETED (guarda `state = QR_READY`, sin lease: el outbox ya está
+ * DONE); `transition()` la rechaza.
+ *
  * Cada transición incrementa `row_version` (el UPDATE siempre modifica la fila, así `affectedRows() === 1` distingue
  * "escrito" de "lease perdido" aunque los valores coincidan).
  *
@@ -27,7 +30,11 @@ final class DbSagaStore implements SagaStore
         // SI4-2 (ADR-0021)
         'glpi_itemtype', 'glpi_items_id', 'glpi_entity_id', 'glpi_outcome', 'glpi_create_calls', 'glpi_infocom_id',
         'infocom_outcome', 'asset_bridge_id', 'resume_state', 'glpi_mapping_id', 'glpi_model_id', 'glpi_mapping_hash',
+        // SI4-3 (ADR-0022): metadatos NO sensibles del código companyqr (nunca el token ni el PDF)
+        'qr_code_id', 'qr_public_code', 'qr_outcome', 'label_ready_at',
     ];
+    /** Columnas de fecha que sólo aceptan `SagaStore::NOW` (reloj de la BD). */
+    private const NOW_COLUMNS = ['label_ready_at'];
     private const DATETIME = '/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/';
 
     public function acquire(string $uuid, array $meta, string $tokenSha256, string $leaseUntil, int $epoch, string $workerId): ?array
@@ -95,11 +102,18 @@ final class DbSagaStore implements SagaStore
             if (!in_array($col, self::SETTABLE, true)) {
                 throw new \InvalidArgumentException('columna de saga no permitida: ' . $col);
             }
-            if ($col === 'state' && !in_array($val, SagaState::ALL, true)) {
-                throw new \InvalidArgumentException('estado de saga inválido');
+            if ($col === 'state' && (!in_array($val, SagaState::ALL, true) || $val === SagaState::COMPLETED)) {
+                throw new \InvalidArgumentException('estado de saga inválido (COMPLETED sólo por complete())');
             }
-            if ($col === 'resume_state' && $val !== null && !in_array($val, SagaState::POST_SNIPE, true)) {
+            if ($col === 'resume_state' && $val !== null && !in_array($val, SagaState::RESUMABLE, true)) {
                 throw new \InvalidArgumentException('resume_state inválido');
+            }
+            if (in_array($col, self::NOW_COLUMNS, true)) {
+                if ($val !== self::NOW && $val !== null) {
+                    throw new \InvalidArgumentException($col . ' sólo admite el reloj de la BD');
+                }
+                $parts[] = '`' . $col . '` = ' . ($val === null ? 'NULL' : 'NOW()');
+                continue;
             }
             $parts[] = '`' . $col . '` = ' . ($val === null ? 'NULL' : (is_int($val) ? (string) $val : "'" . $DB->escape((string) $val) . "'"));
         }
@@ -145,6 +159,46 @@ final class DbSagaStore implements SagaStore
             return $row;
         }
         return null;
+    }
+
+    public function complete(string $uuid, string $detail): bool
+    {
+        if (preg_match(AssetTagDeriver::UUID_PATTERN, $uuid) !== 1) {
+            throw new \InvalidArgumentException('receipt_unit_uuid inválido');
+        }
+        /** @var \DBmysql $DB */
+        global $DB;
+        $DB->beginTransaction();
+        try {
+            $DB->doQuery('UPDATE `' . Si4Saga::getTable() . "` SET `state` = '" . SagaState::COMPLETED . "', `completed_at` = NOW(),"
+                . ' `last_error` = NULL, `last_error_class` = NULL, `row_version` = `row_version` + 1, `date_mod` = NOW()'
+                . " WHERE `receipt_unit_uuid` = '" . $uuid . "' AND `state` = '" . SagaState::QR_READY . "'");
+            if ($DB->affectedRows() !== 1) {
+                $DB->rollBack();
+                return false;
+            }
+            $this->log($uuid, 'completed', SagaState::QR_READY, SagaState::COMPLETED, $detail, '');
+            $DB->commit();
+            return true;
+        } catch (\RuntimeException $e) {
+            $this->rollback($DB);
+            throw new \RuntimeException('saga: finalización rechazada (' . Si4Errors::sanitize($e->getMessage()) . ')', 0, $e);
+        }
+    }
+
+    public function listByStateAfter(string $state, int $afterId, int $limit): array
+    {
+        if (!in_array($state, SagaState::ALL, true)) {
+            throw new \InvalidArgumentException('estado de saga inválido');
+        }
+        /** @var \DBmysql $DB */
+        global $DB;
+        $out = [];
+        foreach ($DB->request(['SELECT' => ['id', 'receipt_unit_uuid'], 'FROM' => Si4Saga::getTable(),
+            'WHERE' => ['state' => $state, 'id' => ['>', max(0, $afterId)]], 'ORDER' => 'id ASC', 'LIMIT' => max(1, min(1000, $limit))]) as $row) {
+            $out[] = ['id' => (int) $row['id'], 'receipt_unit_uuid' => (string) $row['receipt_unit_uuid']];
+        }
+        return $out;
     }
 
     private function log(string $uuid, string $event, ?string $from, string $to, string $detail, string $workerId): void

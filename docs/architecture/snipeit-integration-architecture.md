@@ -79,7 +79,7 @@ companypurchasing: purchase.received  (ítem is_inventoriable = 1) — llega rec
        ▼  buscar-o-crear la receipt_unit por receipt_unit_uuid (NO por correlation_key)
        │  SAGA (estado persistente en receipt_units.saga_state / last_confirmed_step):
        │  reintento RESUME desde last_confirmed_step; cada paso PERSISTE su resultado antes de avanzar
-       ├─ ya BRIDGED/QR_READY/LABEL_READY → no-op (idempotente)
+       ├─ ya COMPLETED → no-op (idempotente; QR_READY sólo revalida y confirma)
        └─ PENDING → avanzar:
             0) resolver **entidad** por company/entity mapping (si no mapeada → CONFLICT, NO inferir)
             1) SNIPE_CREATED: crear activo en Snipe-IT — **idempotencia saliente** (su API no tiene
@@ -98,9 +98,14 @@ companypurchasing: purchase.received  (ítem is_inventoriable = 1) — llega rec
                [implementado en SI4-2 como INFOCOM_READY: decimal(20,4) exacto, sin redondeo; proveedor
                aplicable a la entidad de la unidad]
             5) BRIDGED: insertar/actualizar fila asset_bridge (sync_status=mapped) + alias de asset_tag
-               [implementado en SI4-2: `asset_bridge.receipt_unit_uuid` UNIQUE; sin ack hasta SI4-3]
-            6) QR_READY: generar companyqr (Fase 1) + registrar companyqr_code_id
-            7) LABEL_READY: etiqueta imprimible por el motor de Snipe (QR → gateway GLPI2)
+               [implementado en SI4-2: `asset_bridge.receipt_unit_uuid` UNIQUE]
+            6) QR_READY: código companyqr + etiqueta renderizable
+               [implementado en SI4-3, ADR-0022: `CompanyQrApi::ensureForItem` (get-or-create por activo,
+               ACTIVO, public_code = asset_tag) + `renderLabelPdf` (renderer de companyqr; LABEL_READY =
+               código ACTIVO + etiqueta renderizable, registrado en `label_ready_at`); la saga guarda
+               `qr_code_id`, nunca el token ni el PDF]
+            7) COMPLETED: revalidación + `acknowledgeProcessed()` (ÚLTIMO efecto externo) y cierre por el
+               finalizador sólo con el outbox DONE [implementado en SI4-3]
 ```
 - **Saga (item detallado en `asset-bridge-model.md` §Saga):** Snipe/GLPI/companyqr **no comparten
   transacción**; si el proceso falla tras `SNIPE_CREATED` pero antes de `BRIDGED`, la unidad queda

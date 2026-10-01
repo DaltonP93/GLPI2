@@ -8,6 +8,10 @@
  * tabla core es otorgar el propio derecho del plugin al perfil Super-Admin en la
  * instalación (patrón estándar de plugins), vía la API ProfileRight cuando aplica.
  *
+ * install() es idempotente y SEGURO EN UPGRADE (tablas IF-not-exists, derecho sólo si falta,
+ * configuración sólo para claves ausentes). 0.3.0 no cambia el esquema: sólo agrega la API
+ * pública `CompanyQrApi` (ADR-0022).
+ *
  * @license GPL-3.0-or-later
  */
 
@@ -70,21 +74,28 @@ function plugin_companyqr_install() {
         $DB->doQuery($sql);
     }
 
-    // Derecho propio del plugin en todos los perfiles (valor 0 por defecto).
-    if (class_exists('ProfileRight')) {
-        ProfileRight::addProfileRights(['plugin_companyqr']);
+    // Derecho propio del plugin en todos los perfiles (valor 0 por defecto). install() es SEGURO EN UPGRADE (GLPI lo
+    // vuelve a llamar al actualizar 0.2.0 → 0.3.0): el derecho se agrega sólo si FALTA (re-agregarlo viola el UNIQUE
+    // (profiles_id, name) de glpi_profilerights y abortaría el upgrade) y, en ese primer alta, se otorgan todos los bits
+    // al perfil Super-Admin (id 4 por defecto). En un upgrade los derechos ajustados por un administrador NO se tocan.
+    if (class_exists('ProfileRight')
+        && countElementsInTable(ProfileRight::getTable(), ['name' => Code::$rightname]) === 0) {
+        ProfileRight::addProfileRights([Code::$rightname]);
+        $full = READ | Code::RIGHT_GENERATE | Code::RIGHT_PRINT | Code::RIGHT_CONFIG;
+        $DB->update(
+            'glpi_profilerights',
+            ['rights' => $full],
+            ['profiles_id' => 4, 'name' => Code::$rightname]
+        );
     }
 
-    // Otorgar todos los bits al perfil Super-Admin (id 4 por defecto en GLPI).
-    $full = READ | Code::RIGHT_GENERATE | Code::RIGHT_PRINT | Code::RIGHT_CONFIG;
-    $DB->update(
-        'glpi_profilerights',
-        ['rights' => $full],
-        ['profiles_id' => 4, 'name' => 'plugin_companyqr']
-    );
-
-    // Configuración por defecto (contexto plugin:companyqr). Sin secretos.
-    Config::setConfigurationValues(PluginConfig::CONTEXT, PluginConfig::DEFAULTS);
+    // Configuración por defecto (contexto plugin:companyqr). Sin secretos. Sólo se siembran las claves AUSENTES: un
+    // upgrade no pisa lo que ajustó un administrador (medidas/colores de etiqueta, modo anónimo, prefijos…).
+    $current = Config::getConfigurationValues(PluginConfig::CONTEXT);
+    $missing = array_diff_key(PluginConfig::DEFAULTS, is_array($current) ? $current : []);
+    if ($missing !== []) {
+        Config::setConfigurationValues(PluginConfig::CONTEXT, $missing);
+    }
 
     return true;
 }
