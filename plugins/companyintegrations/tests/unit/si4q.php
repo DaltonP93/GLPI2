@@ -251,7 +251,7 @@ $posts = $W->posts();
 $adds = $W->glpi->addCalls;
 ok('ack fallido ⇒ QR_READY + last_error_class ack + outbox RETRY (no DONE)', $m['qr_ready'] === 1 && $s['state'] === SagaState::QR_READY
     && $s['last_error_class'] === 'ack' && $W->source->row($u)['status'] === 'RETRY' && $W->source->acksApplied === []);
-$f = (new Si4Finalizer($W->sagas, $W->source))->run();
+$f = (new Si4Finalizer($W->sagas, $W->source, $W->finCursor))->run();
 ok('🔒 finalizador con el outbox ≠ DONE ⇒ NO marca COMPLETED', $f['pending'] === 1 && $f['completed'] === 0 && $W->sagas->get($u)['state'] === SagaState::QR_READY);
 $W->now += 4000;
 $m = $W->worker3()->run();
@@ -272,7 +272,7 @@ echo "== SI4-3 · Finalizador durable ==\n";
 $W = new Si4World();
 $u = $W->unit(['serial' => 'SN-Q-FIN']);
 si4qRunCrash($W, 'after_ack');
-$fin = new Si4Finalizer($W->sagas, $W->source);
+$fin = new Si4Finalizer($W->sagas, $W->source, $W->finCursor);
 ok('crash tras el ack: QR_READY con el outbox DONE', $W->sagas->get($u)['state'] === SagaState::QR_READY && $W->source->row($u)['status'] === 'DONE');
 $f = $fin->run();
 ok('finalizador ⇒ COMPLETED (sin lease, guarda state = QR_READY)', $f['completed'] === 1 && $W->sagas->get($u)['state'] === SagaState::COMPLETED
@@ -282,12 +282,134 @@ $W = new Si4World();
 $u = $W->unit(['serial' => 'SN-Q-FIN2']);
 si4qRunCrash($W, 'after_ack');
 $W->source->setActiveEntities([2]);
-ok('handoff no visible para la sesión ⇒ no se completa (skipped)', (new Si4Finalizer($W->sagas, $W->source))->run()['skipped'] === 1
+ok('handoff no visible para la sesión ⇒ no se completa (skipped)', (new Si4Finalizer($W->sagas, $W->source, $W->finCursor))->run()['skipped'] === 1
     && $W->sagas->get($u)['state'] === SagaState::QR_READY);
 $W->source->setActiveEntities([1, 2]);
 $W->sagas->rows[$u]['payload_sha256'] = str_repeat('0', 64);
-ok('🔒 payload distinto del procesado ⇒ no se completa', (new Si4Finalizer($W->sagas, $W->source))->finalizeOne($u) === Si4Finalizer::F_SKIPPED
+ok('🔒 payload distinto del procesado ⇒ no se completa', (new Si4Finalizer($W->sagas, $W->source, $W->finCursor))->finalizeOne($u) === Si4Finalizer::F_SKIPPED
     && $W->sagas->get($u)['state'] === SagaState::QR_READY);
+
+// =====================================================================================================================
+echo "== SI4-3 · Finalizador: recorrido round-robin acotado con cursor DURABLE y wrap-around ==\n";
+
+/**
+ * Saga en QR_READY con su outbox en el estado pedido (DONE = ack aplicado y crash antes de COMPLETED; RETRY; LEASED),
+ * armada directamente con los dobles (sólo importa al finalizador).
+ *
+ * @return array{0:string,1:string} [uuid, lease token]
+ */
+function si4qQrReady(Si4World $W, string $outbox): array
+{
+    $u = $W->unit(['serial' => 'SN-FC-' . bin2hex(random_bytes(3))]);
+    $c = $W->source->claimPending('w-fc', 1, 900)[0];
+    $sha = hash('sha256', $c['lease_token']);
+    $W->sagas->acquire($u, ['entities_id' => 1, 'requests_id' => 11, 'items_id' => 21, 'payload_sha256' => $c['payload_sha256'], 'correlation_id' => 'fc'],
+        $sha, $c['leased_until'], (int) $c['attempts'], 'w-fc');
+    $W->sagas->transition($u, $sha, SagaState::PENDING, ['state' => SagaState::QR_READY], 'qr_ready');
+    if ($outbox === 'DONE') {
+        $W->source->acknowledgeProcessed($u, $c['lease_token']);
+    } elseif ($outbox === 'RETRY') {
+        $W->source->markRetry($u, $c['lease_token'], 'pendiente', new \DateTimeImmutable('@' . ($W->now + 3600)));
+    }
+    return [$u, $c['lease_token']];
+}
+
+/** Estado de la saga. */
+function si4qState(Si4World $W, string $u): string
+{
+    return (string) $W->sagas->get($u)['state'];
+}
+
+$W = new Si4World();
+[$u1] = si4qQrReady($W, 'RETRY');
+[$u2] = si4qQrReady($W, 'LEASED');
+[$u3] = si4qQrReady($W, 'DONE');
+[$u4] = si4qQrReady($W, 'DONE');
+[$u5] = si4qQrReady($W, 'LEASED');
+$id = static fn (string $u): int => (int) $W->sagas->get($u)['id'];
+$cursor = $W->finCursor; // "tabla propia": sobrevive a cada Si4Finalizer (otro proceso CLI)
+$fin = static fn (): Si4Finalizer => new Si4Finalizer($W->sagas, $W->source, $cursor, null, 2);
+$r1 = $fin()->run();
+ok('corrida 1 (batch 2): inspecciona 1 y 2 (pendientes), completa 0; el cursor queda en la saga 2 (última INSPECCIONADA)', $r1['scanned'] === 2
+    && $r1['completed'] === 0 && $r1['pending'] === 2 && $cursor->get() === $id($u2));
+$r2 = $fin()->run();
+ok('🔒 corrida 2 (Si4Finalizer RECONSTRUIDO): llega a 3 y 4 ⇒ ambas COMPLETED (1 y 2 no las bloquean)', $r2['scanned'] === 2 && $r2['completed'] === 2
+    && si4qState($W, $u3) === SagaState::COMPLETED && si4qState($W, $u4) === SagaState::COMPLETED && $cursor->get() === $id($u4));
+$r3 = $fin()->run();
+ok('corrida 3: alcanza el fin (saga 5, lote incompleto) ⇒ wrap-around (cursor = 0)', $r3['scanned'] === 1 && $r3['pending'] === 1 && $r3['cursor_to'] === 0
+    && $cursor->get() === 0);
+$W->now += 4000;
+$claim = $W->source->claimPending('w-fc2', 1, 900);
+$W->source->acknowledgeProcessed($u1, $claim[0]['lease_token']);
+$done1 = false;
+for ($i = 0; $i < 3 && !$done1; $i++) {
+    $fin()->run();
+    $done1 = si4qState($W, $u1) === SagaState::COMPLETED;
+}
+ok('🔒 la saga 1 pasa a outbox DONE ⇒ la ronda siguiente la completa (nunca abandonada)', ($claim[0]['receipt_unit_uuid'] ?? '') === $u1 && $done1);
+ok('🔒 nunca COMPLETED con el outbox ≠ DONE: 2 y 5 siguen QR_READY', si4qState($W, $u2) === SagaState::QR_READY && si4qState($W, $u5) === SagaState::QR_READY);
+$cursor->value = 99999;
+$rw = $fin()->run();
+ok('cursor más allá de la última saga ⇒ wrap-around en la MISMA corrida', $rw['wrapped'] && $rw['scanned'] === 2 && $rw['cursor_from'] === 99999);
+
+// Propiedad: más sagas que el lote, con las DONE al final y en posiciones aleatorias (semilla fija).
+foreach (['DONE al final' => static fn (int $i): bool => $i >= 25, 'DONE aleatorias' => static fn (int $i): bool => (($i * 7919) % 5) === 0] as $label => $isDone) {
+    $W = new Si4World();
+    $cursor = $W->finCursor;
+    $done = $pending = [];
+    for ($i = 1; $i <= 32; $i++) {
+        [$u] = si4qQrReady($W, $isDone($i) ? 'DONE' : ($i % 2 === 0 ? 'RETRY' : 'LEASED'));
+        if ($isDone($i)) {
+            $done[] = $u;
+        } else {
+            $pending[] = $u;
+        }
+    }
+    $runs = 0;
+    $all = static fn (): bool => array_filter($done, static fn (string $u): bool => si4qState($W, $u) !== SagaState::COMPLETED) === [];
+    while (!$all() && $runs < 40) {
+        (new Si4Finalizer($W->sagas, $W->source, $cursor, null, 2))->run(); // un proceso CLI nuevo en cada corrida
+        $runs++;
+    }
+    ok("🔒 propiedad ({$label}, 32 sagas, lote 2): TODAS las DONE (" . count($done) . ') terminan COMPLETED en ' . $runs . ' corridas; ninguna pendiente se completa',
+        $done !== [] && $all() && $runs <= 17 && array_filter($pending, static fn (string $u): bool => si4qState($W, $u) !== SagaState::QR_READY) === []);
+}
+
+// Concurrencia: otra corrida mueve el cursor entre get() y advance() ⇒ compare-and-set no lo pisa (nunca retrocede).
+$W = new Si4World();
+for ($i = 1; $i <= 6; $i++) {
+    si4qQrReady($W, 'LEASED');
+}
+$inner = $W->finCursor;
+$racy = new class ($inner) implements GlpiPlugin\Companyintegrations\Si4\FinalizerCursor {
+    /** @var callable|null */
+    public $race = null;
+
+    public function __construct(private GlpiPlugin\Companyintegrations\Si4\FinalizerCursor $inner)
+    {
+    }
+
+    public function get(): int
+    {
+        return $this->inner->get();
+    }
+
+    public function advance(int $expected, int $next): bool
+    {
+        if ($this->race !== null) {
+            ($this->race)();
+            $this->race = null;
+        }
+        return $this->inner->advance($expected, $next);
+    }
+};
+$racy->race = static function () use ($inner): void {
+    $inner->advance($inner->get(), 4); // otra corrida inspeccionó hasta la saga 4
+};
+(new Si4Finalizer($W->sagas, $W->source, $racy, null, 2))->run();
+ok('🔒 carrera: el avance obsoleto (0→2) no pisa al concurrente (0→4): el cursor no retrocede ni se corrompe', $inner->get() === 4);
+$r = (new Si4Finalizer($W->sagas, $W->source, $inner, null, 2))->run();
+ok('tras la carrera el recorrido sigue desde 4 (cobertura futura intacta)', $r['cursor_from'] === 4 && $r['scanned'] === 2 && $inner->get() === 6);
 
 // =====================================================================================================================
 echo "== SI4-3 · Revalidación previa al ack: divergencia ⇒ MANUAL_REVIEW sin ack ==\n";

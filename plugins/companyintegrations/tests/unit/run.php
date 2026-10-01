@@ -47,7 +47,8 @@ foreach (['SagaState', 'AssetTagDeriver', 'Si4Errors', 'SimulatedCrash', 'Si4Con
           'CoreGlpiAssetGateway', 'InMemoryGlpiAssets', 'GlpiMappingResolver', 'GlpiMappingRules', 'ArrayGlpiMappingResolver',
           'Si4GlpiStage',
           // SI4-3 (ADR-0022)
-          'QrGateway', 'QrGatewayException', 'QrCodeRules', 'InMemoryQrGateway', 'Si4QrStage', 'Si4Finalizer',
+          'QrGateway', 'QrGatewayException', 'QrCodeRules', 'InMemoryQrGateway', 'Si4QrStage', 'FinalizerCursor',
+          'InMemoryFinalizerCursor', 'Si4Finalizer',
           'Si4Worker'] as $f) {
     require $si4 . $f . '.php';
 }

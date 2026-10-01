@@ -282,13 +282,13 @@ trait Si4SelftestScenarios
         ]);
         (new ApprovalOrchestrator())->publishDefinition();
 
-        // Solicitud: 1 línea inventariable de 60 unidades (SI4-1 recibe en lotes 3 + 1 + 1 + 1 + 1 + 1; SI4-2 recibe
-        // otras 6 en [SI4G-E2E]/[SI4G-AGENT]/[SI4G-AMBIGUOUS]/[SI4G-OTHER-ENT]/[SI4G-MAPPING]; SI4-3 ~23 en [SI4Q-*]).
+        // Solicitud: 1 línea inventariable de 90 unidades (SI4-1 recibe en lotes 3 + 1 + 1 + 1 + 1 + 1; SI4-2 recibe
+        // otras 6 en [SI4G-E2E]/[SI4G-AGENT]/[SI4G-AMBIGUOUS]/[SI4G-OTHER-ENT]/[SI4G-MAPPING]; SI4-3 ~38 en [SI4Q-*]).
         $this->si4Category = 'SI4-NB-' . $this->suffix;
         $this->si4AsPurchasing($this->si4Owner, READ | PurchaseRequest::RIGHT_CREATE_REQUEST | PurchaseRequest::RIGHT_VIEW_OWN | PurchaseRequest::RIGHT_EDIT_DRAFT, READ);
         $rm = new RequestManager();
         $this->si4Req = $rm->createDraft(['entities_id' => $this->si4E, 'reason' => 'si4-' . $this->suffix, 'category' => 'IT', 'currency_code' => 'PYG']);
-        $this->si4Line = (int) $rm->addLine($this->si4Req, ['description' => 'Notebook SI4', 'quantity' => '60', 'estimated_unit_price' => '1000',
+        $this->si4Line = (int) $rm->addLine($this->si4Req, ['description' => 'Notebook SI4', 'quantity' => '90', 'estimated_unit_price' => '1000',
             'is_inventoriable' => 1, 'category' => $this->si4Category]);
         $orch = new ApprovalOrchestrator();
         $orch->submit($this->si4Req, 'envío si4');

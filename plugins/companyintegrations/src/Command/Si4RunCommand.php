@@ -28,6 +28,7 @@ use GlpiPlugin\Companyintegrations\Service\SnipeConfigFactory;
 use GlpiPlugin\Companyintegrations\Si4\CoreGlpiAssetGateway;
 use GlpiPlugin\Companyintegrations\Si4\CoreQrGateway;
 use GlpiPlugin\Companyintegrations\Si4\DbBridgeStore;
+use GlpiPlugin\Companyintegrations\Si4\DbFinalizerCursor;
 use GlpiPlugin\Companyintegrations\Si4\DbGlpiMappingResolver;
 use GlpiPlugin\Companyintegrations\Si4\DbMappingResolver;
 use GlpiPlugin\Companyintegrations\Si4\DbSagaStore;
@@ -121,7 +122,8 @@ final class Si4RunCommand extends Command
             $probe,
             null,
             new Si4GlpiStage($sagas, $glpi, new DbGlpiMappingResolver(), $bridges, $cfg->infocomCurrency, $probe),
-            $withQr ? new Si4QrStage($sagas, $bridges, $glpi, new CoreQrGateway(), $probe) : null
+            $withQr ? new Si4QrStage($sagas, $bridges, $glpi, new CoreQrGateway(), $probe) : null,
+            $withQr ? new DbFinalizerCursor() : null
         );
     }
 }

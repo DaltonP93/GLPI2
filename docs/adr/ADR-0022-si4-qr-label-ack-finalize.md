@@ -69,6 +69,7 @@ crea otro sistema de QR**:
      - la configuración sólo siembra claves ausentes.
 2. **Estados (continúan la saga).** `BRIDGED → QR_READY → COMPLETED`.
    - `BLOCKED_CONFIG` admite `resume_state = BRIDGED`, que significa "reanudar desde la etapa QR".
+   - Tabla propia nueva `si4_runtime`: estado operativo del worker (el cursor del finalizador, §6).
    - Columnas nuevas en `si4_sagas`: `qr_code_id` (UNIQUE), `qr_public_code`, `qr_outcome`, `label_ready_at`,
      `completed_at`.
    - **No hay columna para el token ni para el PDF.** El store sólo acepta columnas en lista blanca y `label_ready_at`
@@ -108,15 +109,31 @@ crea otro sistema de QR**:
      = ack`, `markRetry` con backoff si todavía se puede, y el outbox no queda DONE.
    - **El reintento desde `QR_READY` no rehace nada**: ni Snipe, ni GLPI, ni código, ni etiqueta. Sólo revalida y
      confirma con su propio lease.
-6. **Finalizador durable (`Si4Finalizer`).** Recorre las sagas en `QR_READY` y consulta `getHandoff()`. Sólo con el
-   outbox **DONE** (y el mismo `payload_sha256`) pasa la saga a `COMPLETED` con `SagaStore::complete()`:
-   - `UPDATE … WHERE state = 'QR_READY'`, **sin depender del lease viejo** (el outbox ya cerró);
-   - `completed_at` con el reloj de la BD;
-   - evento en la bitácora;
-   - idempotente.
+6. **Finalizador durable (`Si4Finalizer`): recorrido round-robin ACOTADO y DURABLE, con cursor persistente y
+   wrap-around.**
+   - **Cada corrida** inspecciona a lo sumo `batch` sagas (por defecto 200): `state = QR_READY AND id > cursor ORDER BY
+     id LIMIT batch`.
+   - **El cursor** (`FinalizerCursor`) vive en la tabla PROPIA `si4_runtime` (fila `si4_finalizer_cursor`), no en
+     memoria: cada corrida CLI termina y la siguiente sigue donde quedó.
+   - **El cursor es la ÚLTIMA saga INSPECCIONADA, no la última completada.** Avanza aunque la saga no se complete
+     (outbox ≠ DONE, handoff ilegible o no visible, hash distinto). **Una saga pendiente no bloquea a las
+     posteriores**: con lote 2 y `A, B` pendientes, `C` DONE, la corrida 1 ve `A, B` y la corrida 2 ve `C`.
+   - **Wrap-around:** un lote incompleto (o nada después del cursor) es el fin de la ronda y la siguiente empieza en 0.
+     Las sagas antiguas (RETRY/LEASED) se reconsideran en cada ronda hasta que su outbox pase a DONE; nunca se dan
+     por abandonadas.
+   - **Concurrencia:** el cursor avanza por compare-and-set sobre el valor leído; un avance obsoleto no pisa al
+     concurrente ni lo hace retroceder. Dos corridas pueden inspeccionar la misma saga: inspección **al menos una
+     vez, eventual** + transición **exactamente una vez** por la guarda SQL de `complete()`.
+   - **Por cada saga** consulta `getHandoff()` (nunca las tablas de Compras). Sólo con el outbox **DONE** (y el mismo
+     `payload_sha256`) pasa la saga a `COMPLETED` con `SagaStore::complete()`:
+     - `UPDATE … WHERE state = 'QR_READY'`, **sin depender del lease viejo** (el outbox ya cerró);
+     - `completed_at` con el reloj de la BD;
+     - evento en la bitácora;
+     - idempotente.
    **Nunca `COMPLETED` con el outbox ≠ DONE.** `transition()` rechaza `COMPLETED`: la única vía es `complete()`.
-   El worker lo ejecuta al inicio de cada corrida (antes de Snipe y de reclamar) y justo después de cada ack. Así un
-   crash tras el ack se cierra en la próxima corrida.
+   El worker ejecuta una pasada al inicio de cada corrida (antes de Snipe y de reclamar) y `finalizeOne()` justo
+   después de cada ack. Así un crash tras el ack **siempre** se cierra en una ronda posterior, por más sagas
+   pendientes que haya antes.
 7. **ACL del usuario técnico (mínimo privilegio).** Necesita:
    - `RIGHT_SI4` (companyintegrations);
    - `RIGHT_INTEGRATION` (Compras);
@@ -128,7 +145,8 @@ crea otro sistema de QR**:
    local). Una configuración existente por debajo del nuevo mínimo queda fail-closed: el worker no reclama.
 9. **Operación.** `si4_enabled = 0` por defecto, **sin Acción automática**. `si4-run` ejecuta el finalizador y las
    etapas SI4-1/2/3 en una corrida. Activarlo y programarlo es una decisión operativa posterior (staging primero).
-10. **Upgrade 0.4.0 → 0.5.0** con el mismo `install()` idempotente: columnas e índice sólo si faltan. Las sagas
+10. **Upgrade 0.4.0 → 0.5.0** con el mismo `install()` idempotente: columnas, índice y tabla `si4_runtime` sólo si
+    faltan (el cursor arranca en 0). Las sagas
     `BRIDGED` (y anteriores), los mapeos, `asset_bridge` y los códigos companyqr existentes quedan intactos. Una saga
     `BRIDGED` de SI4-2 continúa con el worker SI4-3 hasta `COMPLETED`.
 
@@ -150,6 +168,12 @@ Verificado en tests unitarios (dobles con la misma semántica) y en el selftest 
 - ack fallido;
 - revalidación;
 - ACL y multi-entidad;
+- recorrido del finalizador con cursor durable (`[SI4Q-FINALIZER-CURSOR]`):
+  - lote 2;
+  - finalizador reconstruido en cada corrida;
+  - wrap-around;
+  - propiedad con más sagas que el lote;
+  - carrera sobre el cursor;
 - upgrade simulado y upgrade real 0.4.0/0.2.0 → 0.5.0/0.3.0.
 
 ## Alternativas descartadas
@@ -168,6 +192,11 @@ Verificado en tests unitarios (dobles con la misma semántica) y en el selftest 
   DONE sin código, o la saga abierta para siempre. El finalizador por `getHandoff()` cierra ese hueco sin depender del
   lease.
 - **Finalizador con lease:** tras el ack la fila DONE ya no es reclamable; exigir lease dejaría la saga atascada.
+- **Finalizador con `LIMIT` fijo sin cursor:** si las primeras N sagas `QR_READY` quedan pendientes, las posteriores
+  con el outbox DONE quedarían fuera del lote para siempre (y ya no son reclamables). Por eso el recorrido es
+  round-robin con cursor durable.
+- **Cursor en memoria o en la configuración:** cada corrida CLI termina (perdería la posición). Además, el cursor es
+  estado operativo, no configuración. Va en una tabla propia.
 
 ## Consecuencias
 - (+) SI-4 completo por unidad, idempotente y a prueba de caídas en cada paso; el outbox sólo llega a DONE con todo

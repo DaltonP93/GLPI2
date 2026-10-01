@@ -11,7 +11,8 @@
  * Esquema SI4-1 (ADR-0020): si4_sagas · si4_saga_log · map_models
  * Esquema SI4-2 (ADR-0021): map_glpi_assettypes + columnas GLPI/Infocom/puente/pin del mapeo en si4_sagas (UNIQUE glpi_item) +
  *                           asset_bridge.receipt_unit_uuid (UNIQUE, NULL para puentes SI-1)
- * Esquema SI4-3 (ADR-0022): si4_sagas.qr_code_id (UNIQUE) / qr_public_code / qr_outcome / label_ready_at / completed_at
+ * Esquema SI4-3 (ADR-0022): si4_sagas.qr_code_id (UNIQUE) / qr_public_code / qr_outcome / label_ready_at / completed_at +
+ *                           si4_runtime (estado operativo: cursor durable del finalizador)
  *
  * install() es SEGURO EN UPGRADE (GLPI lo vuelve a llamar al actualizar 0.2.0 → 0.3.0 → 0.4.0 → 0.5.0): tablas con IF-not-exists,
  * columnas/índices nuevos sólo si faltan,
@@ -257,6 +258,20 @@ function plugin_companyintegrations_install() {
     if (!isIndex("{$p}si4_sagas", 'qr_code_id')) {
         $DB->doQuery("ALTER TABLE `{$p}si4_sagas` ADD UNIQUE KEY `qr_code_id` (`qr_code_id`)");
     }
+    // --- SI4-3: estado operativo durable del worker (p. ej. cursor round-robin del finalizador; NO configuración) ---
+    if (!$DB->tableExists("{$p}si4_runtime")) {
+        $DB->doQuery("CREATE TABLE `{$p}si4_runtime` (
+            `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `name` VARCHAR(64) NOT NULL DEFAULT '',
+            `int_value` INT UNSIGNED NOT NULL DEFAULT 0,
+            `date_mod` TIMESTAMP NULL DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `name` (`name`)
+        ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+    }
+    if (countElementsInTable("{$p}si4_runtime", ['name' => 'si4_finalizer_cursor']) === 0) {
+        $DB->insert("{$p}si4_runtime", ['name' => 'si4_finalizer_cursor', 'int_value' => 0]);
+    }
     // asset_bridge 1:1 por unidad: NULL para los puentes SI-1 (reconciliación), único cuando existe.
     plugin_companyintegrations_add_missing_columns("{$p}asset_bridge", [
         'receipt_unit_uuid' => "CHAR(36) DEFAULT NULL",
@@ -323,7 +338,7 @@ function plugin_companyintegrations_uninstall() {
     foreach ([
         "{$p}recon", "{$p}asset_tag_aliases", "{$p}asset_bridge",
         "{$p}map_users", "{$p}map_companies",
-        "{$p}si4_saga_log", "{$p}si4_sagas", "{$p}map_models", "{$p}map_glpi_assettypes",
+        "{$p}si4_saga_log", "{$p}si4_sagas", "{$p}map_models", "{$p}map_glpi_assettypes", "{$p}si4_runtime",
     ] as $table) {
         if ($DB->tableExists($table)) {
             $DB->doQuery("DROP TABLE `{$table}`");

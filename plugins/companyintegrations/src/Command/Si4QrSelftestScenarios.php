@@ -20,6 +20,9 @@
  *   [SI4Q-FENCE]     `holds()` con el reloj de la BD antes de escribir en companyqr: lease corto o re-tomado ⇒ sin código
  *   [SI4Q-ACK]       ack fallido ⇒ QR_READY y outbox sin DONE; el finalizador no cierra; el reintento confirma sin rehacer
  *   [SI4Q-FINALIZER] crash tras el ack ⇒ el finalizador (sin lease) cierra en COMPLETED; idempotente
+ *   [SI4Q-FINALIZER-CURSOR] recorrido round-robin con cursor DURABLE (tabla propia) y wrap-around: sagas pendientes no
+ *                    bloquean a las posteriores (lote 2, objetos reconstruidos = otro proceso CLI); propiedad con más
+ *                    sagas que el lote; compare-and-set ante una carrera
  *   [SI4Q-MISMATCH]  código revocado / puente divergente entre QR_READY y el ack ⇒ MANUAL_REVIEW sin ack
  *   [SI4Q-ACL]       sin RIGHT_GENERATE / RIGHT_PRINT de companyqr ⇒ BLOCKED_CONFIG sin código (sin bypass); reanuda
  *   [SI4Q-MULTI-ENT] activo de una entidad que el usuario técnico no ve ⇒ BLOCKED_CONFIG; con acceso ⇒ código de esa entidad
@@ -45,6 +48,7 @@ use GlpiPlugin\Companyintegrations\Si4\AssetTagDeriver;
 use GlpiPlugin\Companyintegrations\Si4\CoreGlpiAssetGateway;
 use GlpiPlugin\Companyintegrations\Si4\CoreQrGateway;
 use GlpiPlugin\Companyintegrations\Si4\DbBridgeStore;
+use GlpiPlugin\Companyintegrations\Si4\DbFinalizerCursor;
 use GlpiPlugin\Companyintegrations\Si4\DbSagaStore;
 use GlpiPlugin\Companyintegrations\Si4\HandoffSource;
 use GlpiPlugin\Companyintegrations\Si4\PurchasingHandoffSource;
@@ -101,6 +105,8 @@ trait Si4QrSelftestScenarios
             $this->si4qMismatch();
             $this->si4qAcl();
             $this->si4qMultiEntity();
+            $this->si4qFinalizerCursor();
+            $this->si4qFinalizerProperty();
             $this->si4qToken();
             $this->si4qNoSideEffects();
         } catch (\Throwable $e) {
@@ -143,6 +149,7 @@ trait Si4QrSelftestScenarios
                 $DB->doQuery("ALTER TABLE `{$p}si4_sagas` DROP COLUMN `{$c}`");
             }
         }
+        $DB->doQuery("DROP TABLE IF EXISTS `{$p}si4_runtime`");
         $DB->clearSchemaCache();
         $bridged = countElementsInTable(Si4Saga::getTable(), ['state' => SagaState::BRIDGED]);
         $fpSagas = $this->si4gFp('si4_sagas', self::SI4Q_SAGA_COLS_040);
@@ -166,6 +173,8 @@ trait Si4QrSelftestScenarios
         $this->check('[SI4Q-UPGRADE] install() ×2 sobre 0.4.0 no falla', $ok);
         $this->check('[SI4Q-UPGRADE] columnas qr_code_id / qr_public_code / qr_outcome / label_ready_at / completed_at + UNIQUE(qr_code_id)',
             $cols && isIndex("{$p}si4_sagas", 'qr_code_id'));
+        $this->check('[SI4Q-UPGRADE] tabla propia si4_runtime con el cursor del finalizador (una fila, en 0)', $DB->tableExists("{$p}si4_runtime", false)
+            && countElementsInTable("{$p}si4_runtime", ['name' => DbFinalizerCursor::NAME]) === 1 && (new DbFinalizerCursor())->get() === 0);
         $this->check('[SI4Q-UPGRADE] 🔒 sagas SI4-2 INTACTAS (huella de las columnas 0.4.0 + bitácora) y siguen en BRIDGED', $bridged >= 3
             && $fpSagas === $this->si4gFp('si4_sagas', self::SI4Q_SAGA_COLS_040) && $fpLog === $this->si4gFp('si4_saga_log', ['id', 'receipt_unit_uuid', 'event', 'from_state', 'to_state', 'detail'])
             && countElementsInTable(Si4Saga::getTable(), ['state' => SagaState::BRIDGED]) === $bridged);
@@ -383,7 +392,7 @@ trait Si4QrSelftestScenarios
         $this->si4gTrack('Computer', $id);
         $this->check('[SI4Q-ACK] ack fallido ⇒ saga QR_READY (last_error_class ack), outbox RETRY (no DONE)', $m['qr_ready'] === 1 && ($s['state'] ?? '') === SagaState::QR_READY
             && ($s['last_error_class'] ?? '') === 'ack' && $this->si4qStatus($u) === 'RETRY' && $this->si4qDoneEvents($u) === 0);
-        $f = (new Si4Finalizer(new DbSagaStore(), new PurchasingHandoffSource()))->finalizeOne($u);
+        $f = (new Si4Finalizer(new DbSagaStore(), new PurchasingHandoffSource(), new DbFinalizerCursor()))->finalizeOne($u);
         $this->check('[SI4Q-ACK] 🔒 finalizador con el outbox ≠ DONE ⇒ NO marca COMPLETED', $f === Si4Finalizer::F_PENDING
             && (((new DbSagaStore())->get($u) ?? [])['state'] ?? '') === SagaState::QR_READY);
         $posts = $this->si4Posts();
@@ -418,12 +427,145 @@ trait Si4QrSelftestScenarios
         $this->check('[SI4Q-FINALIZER] tras el crash: saga QR_READY con el outbox DONE', ($s['state'] ?? '') === SagaState::QR_READY && $this->si4qStatus($u) === 'DONE');
         $this->check('[SI4Q-FINALIZER] 🔒 una transición común NO puede escribir COMPLETED (sólo complete())', $this->si4Throws(fn () => $store->transition($u,
             (string) $s['lease_token_sha256'], SagaState::QR_READY, ['state' => SagaState::COMPLETED], 'x')));
-        $f = (new Si4Finalizer($store, new PurchasingHandoffSource()))->run();
+        $completed = 0;
+        for ($i = 0; $i < 10 && ($store->get($u)['state'] ?? '') !== SagaState::COMPLETED; $i++) {
+            $completed += (new Si4Finalizer($store, new PurchasingHandoffSource(), new DbFinalizerCursor()))->run()['completed'];
+        }
         $s = $store->get($u) ?? [];
-        $this->check('[SI4Q-FINALIZER] finalizador ⇒ COMPLETED con completed_at (reloj de la BD), sin depender del lease viejo', $f['completed'] >= 1
-            && ($s['state'] ?? '') === SagaState::COMPLETED && ($s['completed_at'] ?? null) !== null && $this->si4qDoneEvents($u) === 1);
-        $this->check('[SI4Q-FINALIZER] idempotente: complete() repetido = false; no quedan QR_READY con DONE', !$store->complete($u, 'x')
-            && (new Si4Finalizer($store, new PurchasingHandoffSource()))->run()['completed'] === 0);
+        $this->check('[SI4Q-FINALIZER] finalizador (recorrido con cursor durable) ⇒ COMPLETED con completed_at (reloj de la BD), sin depender del lease viejo',
+            $completed >= 1 && ($s['state'] ?? '') === SagaState::COMPLETED && ($s['completed_at'] ?? null) !== null && $this->si4qDoneEvents($u) === 1);
+        $this->check('[SI4Q-FINALIZER] idempotente: complete() repetido = false; finalizeOne() sobre la saga cerrada no la toca', !$store->complete($u, 'x')
+            && (new Si4Finalizer($store, new PurchasingHandoffSource(), new DbFinalizerCursor()))->finalizeOne($u) === Si4Finalizer::F_COMPLETED
+            && $this->si4qDoneEvents($u) === 1);
+    }
+
+    // ------------------------------------------------------------------ [SI4Q-FINALIZER-CURSOR]
+
+    /**
+     * Unidades REALES en QR_READY con el outbox LEASED (crash justo después de QR_READY). Se crean TODAS antes de tocar
+     * su outbox, así ninguna corrida del worker las confirma ni las cierra por su cuenta.
+     *
+     * @return array<int,string>
+     */
+    private function si4qQrReadyUnits(int $n, string $tag): array
+    {
+        $out = [];
+        for ($i = 0; $i < $n; $i++) {
+            [$u] = $this->si4Receive(1);
+            $this->si4qUuids[] = $u;
+            $this->si4gAsWorker([$this->si4E]);
+            try {
+                $this->si4qWorker('st-q-' . $tag, true, $this->si4qCrashAt('after_qr_ready'))->run();
+            } catch (SimulatedCrash) {
+            }
+            $this->si4gTrack('Computer', (int) (((new DbSagaStore())->get($u) ?? [])['glpi_items_id'] ?? 0));
+            $out[] = $u;
+        }
+        return $out;
+    }
+
+    /** Lleva el outbox de una unidad QR_READY a DONE (ack aplicado + crash antes de COMPLETED) o a RETRY, por la API pública. */
+    private function si4qSetOutbox(string $u, string $to, string $retryAt = '+1 hour'): void
+    {
+        $this->si4gAsWorker([$this->si4E]);
+        $t = (string) ($this->si4qSrc->tokens[$u] ?? '');
+        if ($to === 'DONE') {
+            $this->si4qSrc->acknowledgeProcessed($u, $t);
+        } elseif ($to === 'RETRY') {
+            $this->si4qSrc->markRetry($u, $t, 'selftest: pendiente', new \DateTimeImmutable($retryAt));
+        }
+    }
+
+    /** Un finalizador NUEVO (objetos nuevos = otro proceso CLI); el cursor sólo vive en la tabla propia. */
+    private function si4qNewFinalizer(int $batch): Si4Finalizer
+    {
+        return new Si4Finalizer(new DbSagaStore(), new PurchasingHandoffSource(), new DbFinalizerCursor(), null, $batch);
+    }
+
+    private function si4qSagaId(string $u): int
+    {
+        return (int) (((new DbSagaStore())->get($u) ?? [])['id'] ?? 0);
+    }
+
+    private function si4qSagaState(string $u): string
+    {
+        return (string) (((new DbSagaStore())->get($u) ?? [])['state'] ?? '');
+    }
+
+    private function si4qFinalizerCursor(): void
+    {
+        $this->out->writeln('== [SI4Q-FINALIZER-CURSOR] round-robin con cursor durable y wrap-around (lote 2) ==');
+        [$u1, $u2, $u3, $u4, $u5] = $this->si4qQrReadyUnits(5, 'cur');
+        $this->si4qSetOutbox($u1, 'RETRY', '-5 seconds'); // reclamable más tarde (para pasarla a DONE)
+        $this->si4qSetOutbox($u3, 'DONE');
+        $this->si4qSetOutbox($u4, 'DONE');
+        $this->check('[SI4Q-FINALIZER-CURSOR] fixture: 5 sagas QR_READY consecutivas; outbox RETRY, LEASED, DONE, DONE, LEASED',
+            array_map(fn (string $u): string => $this->si4qSagaState($u), [$u1, $u2, $u3, $u4, $u5]) === array_fill(0, 5, SagaState::QR_READY)
+            && array_map(fn (string $u): string => $this->si4qStatus($u), [$u1, $u2, $u3, $u4, $u5]) === ['RETRY', 'LEASED', 'DONE', 'DONE', 'LEASED']
+            && $this->si4qSagaId($u5) - $this->si4qSagaId($u1) === 4);
+        // El recorrido arranca justo antes de la saga 1 (las sagas QR_READY de escenarios anteriores quedan antes).
+        $c = new DbFinalizerCursor();
+        $this->check('[SI4Q-FINALIZER-CURSOR] cursor posicionado antes de la saga 1 (compare-and-set)', $c->advance($c->get(), $this->si4qSagaId($u1) - 1)
+            && (new DbFinalizerCursor())->get() === $this->si4qSagaId($u1) - 1);
+        $r1 = $this->si4qNewFinalizer(2)->run();
+        $this->check('[SI4Q-FINALIZER-CURSOR] corrida 1: inspecciona 1 y 2, completa 0; el cursor durable queda en la saga 2', $r1['scanned'] === 2
+            && $r1['completed'] === 0 && (new DbFinalizerCursor())->get() === $this->si4qSagaId($u2));
+        $r2 = $this->si4qNewFinalizer(2)->run();
+        $this->check('[SI4Q-FINALIZER-CURSOR] 🔒 corrida 2 (finalizador RECONSTRUIDO): llega a 3 y 4 ⇒ ambas COMPLETED', $r2['scanned'] === 2 && $r2['completed'] === 2
+            && $this->si4qSagaState($u3) === SagaState::COMPLETED && $this->si4qSagaState($u4) === SagaState::COMPLETED
+            && (new DbFinalizerCursor())->get() === $this->si4qSagaId($u4) && $this->si4qDoneEvents($u3) === 1 && $this->si4qDoneEvents($u4) === 1);
+        $r3 = $this->si4qNewFinalizer(2)->run();
+        $this->check('[SI4Q-FINALIZER-CURSOR] corrida 3: alcanza el fin (saga 5) ⇒ wrap-around (cursor = 0)', $r3['scanned'] === 1 && $r3['completed'] === 0
+            && $r3['cursor_to'] === 0 && (new DbFinalizerCursor())->get() === 0);
+        // La saga 1 pasa a outbox DONE (re-tomada y confirmada por la API pública).
+        $this->si4gAsWorker([$this->si4E]);
+        $claimed = $this->si4qSrc->claimPending('st-q-cur-claim', 100, 900);
+        $this->si4qSrc->acknowledgeProcessed($u1, (string) ($this->si4qSrc->tokens[$u1] ?? ''));
+        $runs = 0;
+        while ($this->si4qSagaState($u1) !== SagaState::COMPLETED && $runs < 15) {
+            $this->si4qNewFinalizer(2)->run();
+            $runs++;
+        }
+        $this->check('[SI4Q-FINALIZER-CURSOR] 🔒 la saga 1 pasa a DONE ⇒ una ronda siguiente la completa (' . $runs . ' corridas; nunca abandonada)',
+            in_array($u1, array_column($claimed, 'receipt_unit_uuid'), true) && $this->si4qSagaState($u1) === SagaState::COMPLETED && $this->si4qDoneEvents($u1) === 1);
+        $this->check('[SI4Q-FINALIZER-CURSOR] 🔒 nunca COMPLETED con el outbox ≠ DONE (2 y 5 siguen QR_READY)', $this->si4qSagaState($u2) === SagaState::QR_READY
+            && $this->si4qSagaState($u5) === SagaState::QR_READY && $this->si4qStatus($u2) === 'LEASED' && $this->si4qStatus($u5) === 'LEASED');
+        // Carrera: un avance obsoleto no pisa al concurrente (el cursor no retrocede ni se corrompe).
+        $v = (new DbFinalizerCursor())->get();
+        $a = new DbFinalizerCursor();
+        $b = new DbFinalizerCursor();
+        $okA = $a->advance($v, $v + 7);
+        $okB = $b->advance($v, $v + 2);
+        $this->check('[SI4Q-FINALIZER-CURSOR] 🔒 compare-and-set: el avance obsoleto falla y el cursor no retrocede', $okA && !$okB && (new DbFinalizerCursor())->get() === $v + 7);
+        $a->advance($v + 7, 0);
+    }
+
+    private function si4qFinalizerProperty(): void
+    {
+        $this->out->writeln('== [SI4Q-FINALIZER-CURSOR] propiedad: más sagas que el lote; las DONE al final siempre se completan ==');
+        $units = $this->si4qQrReadyUnits(10, 'prop');
+        $pending = array_slice($units, 0, 6);
+        $done = array_slice($units, 6);
+        foreach ($pending as $i => $u) {
+            if ($i % 2 === 0) {
+                $this->si4qSetOutbox($u, 'RETRY');
+            }
+        }
+        foreach ($done as $u) {
+            $this->si4qSetOutbox($u, 'DONE');
+        }
+        $total = countElementsInTable(Si4Saga::getTable(), ['state' => SagaState::QR_READY]);
+        $limit = (int) ceil($total / 2) + 2; // una ronda completa (lote 2) + holgura por el punto de partida del cursor
+        $runs = 0;
+        $all = fn (): bool => array_filter($done, fn (string $u): bool => $this->si4qSagaState($u) !== SagaState::COMPLETED) === [];
+        while (!$all() && $runs < $limit) {
+            $this->si4qNewFinalizer(2)->run();
+            $runs++;
+        }
+        $this->check('[SI4Q-FINALIZER-CURSOR] 🔒 ' . $total . ' sagas QR_READY, lote 2: las 4 DONE (al final) ⇒ COMPLETED en ' . $runs . ' corridas (≤ ' . $limit . '), DONE una vez',
+            $all() && array_sum(array_map(fn (string $u): int => $this->si4qDoneEvents($u), $done)) === 4);
+        $this->check('[SI4Q-FINALIZER-CURSOR] 🔒 las 6 pendientes (primeras) siguen QR_READY: no bloquearon ni se completaron', array_filter($pending,
+            fn (string $u): bool => $this->si4qSagaState($u) !== SagaState::QR_READY) === []);
     }
 
     // ------------------------------------------------------------------ [SI4Q-MISMATCH]

@@ -146,6 +146,10 @@ Continúa cada unidad desde `BRIDGED`: `QR_READY → COMPLETED`. **Todavía NO**
   - Ack fallido ⇒ la saga queda en `QR_READY` y el reintento sólo revalida y confirma, sin rehacer nada.
 - **Finalizador durable:** al inicio de cada corrida (y tras cada ack) cierra en `COMPLETED` las sagas `QR_READY` cuyo
   outbox ya está **DONE** según `getHandoff()`.
+  - **Recorrido round-robin acotado:** un lote (200) por corrida desde el cursor durable de la tabla propia
+    `si4_runtime`.
+  - El cursor es la última saga **inspeccionada**, así que una pendiente nunca bloquea a las posteriores.
+  - Al llegar al final, vuelve a empezar (wrap-around).
   - Usa `SagaStore::complete()`, con guarda `state = QR_READY` y sin lease.
   - **Nunca** `COMPLETED` con el outbox en otro estado.
 - **Usuario técnico:** además de lo anterior, `plugin_companyqr` `RIGHT_GENERATE` + `RIGHT_PRINT`. Se verifican
@@ -177,7 +181,7 @@ Continúa cada unidad desde `BRIDGED`: `QR_READY → COMPLETED`. **Todavía NO**
 | `src/Client/` (SI4-1) | `SnipeAssetWriter` (contrato WRITE) · `SnipeEnvelope` · `CreateResult` · `FakeSnipeServer` (doble de prueba del contrato v8.7.2) |
 | `src/Si4/` (SI4-1) | `Si4Worker` · `HandoffSource` (+ `PurchasingHandoffSource`, `InMemoryHandoffSource`) · `SagaStore` (+ `DbSagaStore`, `InMemorySagaStore`) · `MappingResolver` (+ `DbMappingResolver`, `ArrayMappingResolver`, `MappingRules`) · `AssetTagDeriver` · `RemoteAssetMatcher` · `Si4Config` · `Si4Errors` · `WorkerSession` |
 | `src/Si4/` (SI4-2) | `Si4GlpiStage` · `GlpiAssetGateway` (+ `CoreGlpiAssetGateway`, `InMemoryGlpiAssets`) · `GlpiCandidateMatcher` · `InfocomPolicy` · `BridgeStore` (+ `DbBridgeStore`, `InMemoryBridgeStore`) · `BridgeMatcher` · `GlpiMappingResolver` (+ `DbGlpiMappingResolver`, `ArrayGlpiMappingResolver`, `GlpiMappingRules`) |
-| `src/Si4/` (SI4-3) | `Si4QrStage` · `Si4Finalizer` · `QrGateway` (+ `CoreQrGateway` ⇒ `CompanyQrApi`, `InMemoryQrGateway`) · `QrGatewayException` · `QrCodeRules` |
+| `src/Si4/` (SI4-3) | `Si4QrStage` · `Si4Finalizer` (+ `FinalizerCursor`: `DbFinalizerCursor`, `InMemoryFinalizerCursor`) · `QrGateway` (+ `CoreQrGateway` ⇒ `CompanyQrApi`, `InMemoryQrGateway`) · `QrGatewayException` · `QrCodeRules` |
 | `src/Command/Si4RunCommand.php` | `plugins:companyintegrations:si4-run` (deshabilitado por defecto) |
 | `src/Command/SelftestCommand.php` | `plugins:companyintegrations:selftest` (integración + E2E; SI4-1 en `Si4SelftestScenarios`, SI4-2 en `Si4GlpiSelftestScenarios`, SI4-3 en `Si4QrSelftestScenarios`) |
 | `locales/` | i18n ES/EN |
@@ -212,6 +216,8 @@ saneados. Secret scan del repo en verde.
     - 8 crash points con el outbox DONE una sola vez;
     - dos workers ⇒ un código; fencing con el reloj de la BD;
     - ack fallido y reintento sin rehacer nada; finalizador tras un crash post-ack;
+    - recorrido del finalizador con cursor durable: lote 2, reconstruido en cada corrida, wrap-around, propiedad con
+      más sagas que el lote y carrera sobre el cursor;
     - revalidación previa al ack (código revocado, puente divergente);
     - ACL de companyqr; multi-entidad;
     - token ausente de saga/bitácora/outbox/logs; sin Acción automática.

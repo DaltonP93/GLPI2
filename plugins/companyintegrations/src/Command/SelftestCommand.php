@@ -515,6 +515,7 @@ final class SelftestCommand extends Command
                 'map_glpi_assettypes'] as $t) {
                 $DB->doQuery("DELETE FROM `glpi_plugin_companyintegrations_{$t}` WHERE 1=1");
             }
+            $DB->doQuery("UPDATE `glpi_plugin_companyintegrations_si4_runtime` SET `int_value` = 0 WHERE 1=1");
             foreach ($this->createdComputers as $id) {
                 (new Computer())->delete(['id' => $id], true);
             }

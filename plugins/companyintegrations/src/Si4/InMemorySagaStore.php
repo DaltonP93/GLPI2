@@ -19,6 +19,8 @@ final class InMemorySagaStore implements SagaStore
     public array $log = [];
     /** @var callable():int */
     private $clock;
+    /** Autoincremental como `si4_sagas.id` (orden del recorrido del finalizador). */
+    private int $seq = 0;
 
     /** @param callable():int $clock */
     public function __construct(callable $clock)
@@ -31,7 +33,7 @@ final class InMemorySagaStore implements SagaStore
         $until = (int) strtotime($leaseUntil . ' UTC');
         if (!isset($this->rows[$uuid])) {
             $this->rows[$uuid] = [
-                'receipt_unit_uuid' => $uuid, 'entities_id' => $meta['entities_id'], 'requests_id' => $meta['requests_id'],
+                'id' => ++$this->seq, 'receipt_unit_uuid' => $uuid, 'entities_id' => $meta['entities_id'], 'requests_id' => $meta['requests_id'],
                 'items_id' => $meta['items_id'], 'payload_sha256' => $meta['payload_sha256'], 'correlation_id' => $meta['correlation_id'],
                 'state' => SagaState::PENDING, 'snipe_asset_id' => null, 'snipe_asset_tag' => null, 'snipe_outcome' => null,
                 'snipe_company_id' => null, 'snipe_model_id' => null, 'snipe_status_id' => null,
@@ -95,7 +97,7 @@ final class InMemorySagaStore implements SagaStore
             throw new \InvalidArgumentException('estado de saga inválido (COMPLETED sólo por complete())');
         }
         foreach ($set as $k => $v) {
-            if (!array_key_exists($k, $this->rows[$uuid]) || in_array($k, ['completed_at', 'lease_token_sha256', 'lease_until', 'lease_epoch'], true)) {
+            if (!array_key_exists($k, $this->rows[$uuid]) || in_array($k, ['id', 'completed_at', 'lease_token_sha256', 'lease_until', 'lease_epoch'], true)) {
                 throw new \InvalidArgumentException('columna de saga no permitida: ' . $k); // misma whitelist que DbSagaStore
             }
         }
@@ -138,13 +140,13 @@ final class InMemorySagaStore implements SagaStore
         return true;
     }
 
-    public function listByState(string $state, int $limit): array
+    public function listByStateAfter(string $state, int $afterId, int $limit): array
     {
+        $rows = array_filter($this->rows, static fn (array $r): bool => $r['state'] === $state && $r['id'] > $afterId);
+        usort($rows, static fn (array $a, array $b): int => $a['id'] <=> $b['id']);
         $out = [];
-        foreach ($this->rows as $uuid => $r) {
-            if ($r['state'] === $state && count($out) < $limit) {
-                $out[] = (string) $uuid;
-            }
+        foreach (array_slice($rows, 0, max(1, $limit)) as $r) {
+            $out[] = ['id' => (int) $r['id'], 'receipt_unit_uuid' => (string) $r['receipt_unit_uuid']];
         }
         return $out;
     }

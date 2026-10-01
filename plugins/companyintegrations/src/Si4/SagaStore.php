@@ -67,9 +67,10 @@ interface SagaStore
     public function complete(string $uuid, string $detail): bool;
 
     /**
-     * Sagas en un estado (más antiguas primero), para el finalizador durable.
+     * Lote ACOTADO de sagas en un estado con `id > $afterId`, en orden de `id` (recorrido round-robin del finalizador
+     * durable de SI4-3, ADR-0022 §6: el cursor persistente es el último `id` INSPECCIONADO).
      *
-     * @return array<int,string> receipt_unit_uuid
+     * @return array<int,array{id:int, receipt_unit_uuid:string}>
      */
-    public function listByState(string $state, int $limit): array;
+    public function listByStateAfter(string $state, int $afterId, int $limit): array;
 }

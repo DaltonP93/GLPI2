@@ -186,7 +186,7 @@ final class DbSagaStore implements SagaStore
         }
     }
 
-    public function listByState(string $state, int $limit): array
+    public function listByStateAfter(string $state, int $afterId, int $limit): array
     {
         if (!in_array($state, SagaState::ALL, true)) {
             throw new \InvalidArgumentException('estado de saga inválido');
@@ -194,9 +194,9 @@ final class DbSagaStore implements SagaStore
         /** @var \DBmysql $DB */
         global $DB;
         $out = [];
-        foreach ($DB->request(['SELECT' => ['receipt_unit_uuid'], 'FROM' => Si4Saga::getTable(), 'WHERE' => ['state' => $state],
-            'ORDER' => 'id ASC', 'LIMIT' => max(1, min(1000, $limit))]) as $row) {
-            $out[] = (string) $row['receipt_unit_uuid'];
+        foreach ($DB->request(['SELECT' => ['id', 'receipt_unit_uuid'], 'FROM' => Si4Saga::getTable(),
+            'WHERE' => ['state' => $state, 'id' => ['>', max(0, $afterId)]], 'ORDER' => 'id ASC', 'LIMIT' => max(1, min(1000, $limit))]) as $row) {
+            $out[] = ['id' => (int) $row['id'], 'receipt_unit_uuid' => (string) $row['receipt_unit_uuid']];
         }
         return $out;
     }

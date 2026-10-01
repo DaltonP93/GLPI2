@@ -88,6 +88,7 @@ final class Si4Worker
      * @param callable():int|null $clock
      * @param Si4GlpiStage|null $glpi etapas GLPI de SI4-2 (null = modo SI4-1: estacionar en SNIPE_CREATED)
      * @param Si4QrStage|null $qr etapa QR + ack + finalización de SI4-3 (null = modo SI4-2: estacionar en BRIDGED, sin ack)
+     * @param FinalizerCursor|null $finalizerCursor cursor DURABLE del finalizador (obligatorio con la etapa QR)
      */
     public function __construct(
         HandoffSource $source,
@@ -101,7 +102,8 @@ final class Si4Worker
         ?callable $probe = null,
         ?callable $clock = null,
         ?Si4GlpiStage $glpi = null,
-        ?Si4QrStage $qr = null
+        ?Si4QrStage $qr = null,
+        ?FinalizerCursor $finalizerCursor = null
     ) {
         $this->source     = $source;
         $this->sagas      = $sagas;
@@ -117,7 +119,10 @@ final class Si4Worker
         $this->glpi       = $glpi;
         $this->qr         = $glpi !== null ? $qr : null; // la etapa QR sigue a la GLPI
         if ($this->qr !== null) {
-            $this->finalizer = new Si4Finalizer($sagas, $source, fn (string $l, string $msg, array $c) => $this->log($l, $msg, $c));
+            if ($finalizerCursor === null) {
+                throw new \InvalidArgumentException('la etapa QR exige el cursor durable del finalizador');
+            }
+            $this->finalizer = new Si4Finalizer($sagas, $source, $finalizerCursor, fn (string $l, string $msg, array $c) => $this->log($l, $msg, $c));
         }
     }
 
@@ -153,7 +158,8 @@ final class Si4Worker
             return $m;
         }
         if ($this->finalizer !== null) {
-            // Crash tras un ack: la saga quedó en QR_READY con el outbox ya DONE ⇒ COMPLETED (sin lease, sin Snipe).
+            // Crash tras un ack: la saga quedó en QR_READY con el outbox ya DONE ⇒ COMPLETED (sin lease, sin Snipe). Pasada
+            // ACOTADA del recorrido round-robin con cursor durable: ninguna saga pendiente bloquea a las posteriores.
             $m['finalized'] = $this->finalizer->run()[Si4Finalizer::F_COMPLETED];
         }
         $errors = $this->cfg->errors($this->timeoutMs, $this->maxRetries);
