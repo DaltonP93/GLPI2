@@ -117,6 +117,7 @@ final class SelftestCommand extends Command
         $this->scenarioStartInstanceValidation();
         $this->scenarioSla();
         $this->scenarioVersioning();
+        $this->scenarioInbox();
 
         // Upgrade al final (con definiciones/instancias/historial/delegaciones de esta corrida presentes).
         // Una excepción se reporta como comprobación FALLIDA (fail-closed) en vez de abortar sin resumen.
@@ -535,6 +536,91 @@ final class SelftestCommand extends Command
         $this->applySession($userInB, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
         $r = $api->transition($inst2, 'approve', ['comment' => 'x']);
         $this->check('[MULTI-ENT] 🔒 usuario de B NO puede aprobar en A', !$r->success && $r->code === TransitionResult::DENIED_ENTITY);
+    }
+
+    // ------------------------------------------------------------------ [INBOX] (0.6.0, sólo lectura)
+
+    /**
+     * API de LECTURA para bandejas de los plugins de dominio: acciones del usuario actual, decisiones pendientes
+     * (aprobador EFECTIVO por grupo + delegación, voto ya emitido, entidad, derecho) y aprobadores vigentes. Nada
+     * de esto muta la instancia (lock_version e historial idénticos).
+     */
+    private function scenarioInbox(): void
+    {
+        $this->out->writeln('== [INBOX] bandeja derivada del motor (actionsForCurrentUser / pendingDecisionsForCurrentUser / currentApprovers) ==');
+        $api = new WorkflowApi();
+        $comp = $this->makeComputer();
+        $this->applySession($this->requester, [$this->entityB], ['plugin_companyworkflow' => READ]);
+        $inst = $api->startInstance($this->def, 'Computer', $comp, $this->entityB, 0);
+        if ($inst === null) {
+            $this->check('[INBOX] fixture: instancia creada', false);
+            return;
+        }
+        $this->check('[INBOX] DRAFT: el solicitante (READ) puede "submit"; ninguna decisión', $api->actionsForCurrentUser($inst) === ['submit']);
+        $api->transition($inst, 'submit', ['requester_users_id' => $this->requester]);
+        $inst->getFromDB($inst->getID());
+        $this->check('[INBOX] PENDING_L1: el solicitante (sólo READ) no ve decisiones ni la tiene pendiente',
+            array_intersect($api->actionsForCurrentUser($inst), ['approve', 'reject', 'return']) === []
+            && $this->pendingIds($api) === []);
+
+        $approvers = $api->currentApprovers($inst);
+        sort($approvers);
+        $expected = [$this->uA1, $this->uA2, $this->uA3];
+        sort($expected);
+        $this->check('[INBOX] currentApprovers = grupo G1 + delegado (efectivos en la entidad)', $approvers === $expected);
+
+        $lock = (int) $inst->fields['lock_version'];
+        $hist = count($api->history(['instances_id' => (int) $inst->getID()]));
+        $this->applySession($this->uA1, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $acts = $api->actionsForCurrentUser($inst);
+        $this->check('[INBOX] aprobador de G1 (RIGHT_ACT): approve/reject/return disponibles', count(array_intersect($acts, ['approve', 'reject', 'return'])) === 3);
+        $this->check('[INBOX] la instancia aparece en SU bandeja', in_array((int) $inst->getID(), $this->pendingIds($api), true));
+
+        $this->applySession($this->uA3, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $this->check('[INBOX] delegado vigente (uA2→uA3) también la tiene pendiente', in_array((int) $inst->getID(), $this->pendingIds($api), true));
+
+        $this->applySession($this->uB1, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $this->check('[INBOX] 🔒 aprobador de OTRA etapa (G2) no la ve ni puede decidir',
+            !in_array((int) $inst->getID(), $this->pendingIds($api), true)
+            && array_intersect($api->actionsForCurrentUser($inst), ['approve', 'reject', 'return']) === []);
+
+        $this->applySession($this->uA1, [$this->entityA], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $this->check('[INBOX] 🔒 sin la entidad de la instancia activa ⇒ sin acciones ni bandeja',
+            $api->actionsForCurrentUser($inst) === [] && !in_array((int) $inst->getID(), $this->pendingIds($api), true));
+
+        $this->applySession($this->uA1, [$this->entityB], ['plugin_companyworkflow' => READ]);
+        $this->check('[INBOX] 🔒 aprobador sin RIGHT_ACT ⇒ sin decisiones (mismo chequeo que transition())',
+            array_intersect($api->actionsForCurrentUser($inst), ['approve', 'reject', 'return']) === []);
+
+        $inst->getFromDB($inst->getID());
+        $this->check('[INBOX] SÓLO LECTURA: lock_version e historial intactos tras consultar',
+            (int) $inst->fields['lock_version'] === $lock && count($api->history(['instances_id' => (int) $inst->getID()])) === $hist);
+
+        // Quórum 2: uA1 vota ⇒ ya no la tiene pendiente (voto emitido) y no puede volver a aprobar; uA2 sí.
+        $this->applySession($this->uA1, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $r = $api->transition($inst, 'approve', ['comment' => 'inbox a1']);
+        $inst->getFromDB($inst->getID());
+        $this->check('[INBOX] tras votar (quórum aún no alcanzado): sale de SU bandeja y "approve" deja de ofrecérsele',
+            $r->code === TransitionResult::RECORDED && !in_array((int) $inst->getID(), $this->pendingIds($api), true)
+            && !in_array('approve', $api->actionsForCurrentUser($inst), true));
+        $this->applySession($this->uA2, [$this->entityB], ['plugin_companyworkflow' => WorkflowDef::RIGHT_ACT]);
+        $this->check('[INBOX] el otro aprobador del grupo la sigue teniendo pendiente', in_array((int) $inst->getID(), $this->pendingIds($api), true));
+        $api->transition($inst, 'approve', ['comment' => 'inbox a2']);
+        $inst->getFromDB($inst->getID());
+        $this->check('[INBOX] quórum alcanzado ⇒ PENDING_L2: aprobadores de G2 = nuevos aprobadores vigentes',
+            $this->stateCodeOf($inst) === 'PENDING_L2' && $api->currentApprovers($inst) === [$this->uB1]);
+
+        // history(): filtro por varias instancias + id máximo.
+        $ids = array_map(static fn (array $h): int => (int) $h['id'], $api->history(['instances_ids' => [(int) $inst->getID()]]));
+        $this->check('[INBOX] history(instances_ids) = history(instances_id) y lastHistoryId() ≥ todos',
+            $ids !== [] && $ids === array_map(static fn (array $h): int => (int) $h['id'], $api->history(['instances_id' => (int) $inst->getID()]))
+            && $api->lastHistoryId() >= max($ids));
+    }
+
+    /** @return array<int,int> instancias pendientes de decisión del usuario de la sesión (definición demo). */
+    private function pendingIds(WorkflowApi $api): array
+    {
+        return array_map(static fn (array $p): int => $p['instances_id'], $api->pendingDecisionsForCurrentUser('Computer', 500, 5000));
     }
 
     // ------------------------------------------------------------------ [RECOVERY]

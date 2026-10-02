@@ -72,10 +72,10 @@ final class ReconcileCommand extends Command
             $output->writeln('<error>anomalías de recepción NO convergibles (no se muta nada): ' . implode(',', $pairs) . '</error>');
         }
         if ($r['legacy'] !== []) {
-            $output->writeln('<comment>instancias con una versión ANTERIOR de la definición (sin fase de compra; conservan su versión, no se migran): ' . implode(',', $r['legacy']) . '</comment>');
+            $output->writeln('<comment>instancias con una versión ANTERIOR de la definición (sin la fase de compra o de entrega; conservan su versión, no se migran): ' . implode(',', $r['legacy']) . '</comment>');
         }
         if ($r['legacy_blocked'] !== []) {
-            $output->writeln('<error>…de ellas, APROBADAS sin poder iniciar la compra (requieren decisión humana): ' . implode(',', $r['legacy_blocked']) . '</error>');
+            $output->writeln('<error>…de ellas, BLOQUEADAS por su versión (APROBADAS sin fase de compra o RECIBIDAS sin fase de entrega; requieren decisión humana): ' . implode(',', $r['legacy_blocked']) . '</error>');
         }
         return ($r['errors'] > 0 || $r['orphans'] !== [] || $r['dirty'] !== [] || $r['receiving_pending'] !== []
             || $r['receiving_anomalies'] !== [] || $r['legacy_blocked'] !== []) ? Command::FAILURE : Command::SUCCESS;

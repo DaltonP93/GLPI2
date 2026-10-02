@@ -139,6 +139,34 @@ final class WorkflowApi
         return $this->engine->availableActions($instance);
     }
 
+    /**
+     * Acciones que la sesión ACTUAL puede ejecutar ahora (SÓLO LECTURA): derecho de la transición, entidad,
+     * aprobador efectivo de la etapa y voto ya emitido, con la misma lógica del motor. Las bandejas y barras de
+     * acción de los plugins de dominio se derivan de aquí (nunca de un estado hardcodeado).
+     *
+     * @return array<int,string>
+     */
+    public function actionsForCurrentUser(Instance $instance): array
+    {
+        return $this->engine->actionsForCurrentUser($instance);
+    }
+
+    /**
+     * Bandeja "pendiente de MI decisión" del `itemtype` (SÓLO LECTURA; entidades activas de la sesión).
+     *
+     * @return array<int,array{instances_id:int, items_id:int, entities_id:int, state_code:string, actions:array<int,string>}>
+     */
+    public function pendingDecisionsForCurrentUser(string $itemtype, int $limit = 200, int $scanCap = 2000): array
+    {
+        return $this->engine->pendingDecisionsForCurrentUser($itemtype, $limit, $scanCap);
+    }
+
+    /** Aprobadores EFECTIVOS de la etapa actual (SÓLO LECTURA; p. ej. destinatarios de notificaciones). @return array<int,int> */
+    public function currentApprovers(Instance $instance): array
+    {
+        return $this->engine->currentApprovers($instance);
+    }
+
     /** @param array<string,mixed> $ctx */
     public function transition(Instance $instance, string $action, array $ctx = []): TransitionResult
     {
@@ -169,7 +197,7 @@ final class WorkflowApi
      * Lectura del LEDGER de historial (append-only) para RECONCILIACIÓN externa idempotente.
      * Expone el historial como API (sin acoplar a la tabla) para consumidores como companysignature.
      *
-     * @param array{events?:array<int,string>, since_id?:int, instances_id?:int, limit?:int} $filter
+     * @param array{events?:array<int,string>, since_id?:int, instances_id?:int, instances_ids?:array<int,int>, limit?:int} $filter
      * @return array<int,array<string,mixed>>  filas ordenadas por id ascendente (orden causal)
      */
     public function history(array $filter = []): array
@@ -182,6 +210,9 @@ final class WorkflowApi
         }
         if (!empty($filter['instances_id'])) {
             $where['instances_id'] = (int) $filter['instances_id'];
+        }
+        if (!empty($filter['instances_ids']) && is_array($filter['instances_ids'])) {
+            $where['instances_id'] = array_values(array_map('intval', $filter['instances_ids']));
         }
         if (!empty($filter['since_id'])) {
             $where[] = ['id' => ['>', (int) $filter['since_id']]];
@@ -198,6 +229,17 @@ final class WorkflowApi
             $out[] = $row;
         }
         return $out;
+    }
+
+    /** Id de la última fila del ledger (0 si está vacío). Permite a un consumidor arrancar su cursor "desde ahora". */
+    public function lastHistoryId(): int
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        foreach ($DB->request(['SELECT' => 'id', 'FROM' => HistoryEvent::getTable(), 'ORDER' => 'id DESC', 'LIMIT' => 1]) as $row) {
+            return (int) $row['id'];
+        }
+        return 0;
     }
 
     /** Una fila del ledger por id (o null). @return array<string,mixed>|null */

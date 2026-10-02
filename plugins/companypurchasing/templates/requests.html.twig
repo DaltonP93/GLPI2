@@ -1,0 +1,61 @@
+{% extends "layout/page_without_tabs.html.twig" %}
+
+{% block content_title %}{{ title }}{% endblock %}
+
+{% block content_body %}
+   {{ include('@companypurchasing/parts/nav.html.twig') }}
+
+   <form method="get" action="{{ base }}/requests" class="row g-2 mb-3">
+      <div class="col-md-2">
+         <label class="form-label">{{ __('Number', 'companypurchasing') }}</label>
+         <input type="text" class="form-control" name="number" value="{{ filters.number }}" maxlength="60">
+      </div>
+      <div class="col-md-2">
+         <label class="form-label">{{ __('Current state', 'companypurchasing') }}</label>
+         <select class="form-select" name="state">
+            <option value="">{{ __('All', 'companypurchasing') }}</option>
+            {% for code, label in states %}
+               <option value="{{ code }}" {{ filters.state == code ? 'selected' : '' }}>{{ label }}</option>
+            {% endfor %}
+         </select>
+      </div>
+      <div class="col-md-2">
+         <label class="form-label">{{ __('From', 'companypurchasing') }}</label>
+         <input type="date" class="form-control" name="from" value="{{ filters.from }}">
+      </div>
+      <div class="col-md-2">
+         <label class="form-label">{{ __('To', 'companypurchasing') }}</label>
+         <input type="date" class="form-control" name="to" value="{{ filters.to }}">
+      </div>
+      <div class="col-md-2">
+         <label class="form-label">{{ __('Category', 'companypurchasing') }}</label>
+         <input type="text" class="form-control" name="category" value="{{ filters.category }}" maxlength="190">
+      </div>
+      <div class="col-md-2">
+         <label class="form-label">{{ __('Entity', 'companypurchasing') }}</label>
+         <select class="form-select" name="entities_id">
+            <option value="">{{ __('All', 'companypurchasing') }}</option>
+            {% for id, name in entities %}
+               <option value="{{ id }}" {{ filters.entities_id ~ '' == id ~ '' ? 'selected' : '' }}>{{ name }}</option>
+            {% endfor %}
+         </select>
+      </div>
+      {% if can_entity %}
+         <div class="col-md-3">
+            <label class="form-label">{{ __('Scope', 'companypurchasing') }}</label>
+            <select class="form-select" name="scope">
+               <option value="mine" {{ scope == 'mine' ? 'selected' : '' }}>{{ __('My requests', 'companypurchasing') }}</option>
+               <option value="entity" {{ scope == 'entity' ? 'selected' : '' }}>{{ __('All requests of my entities', 'companypurchasing') }}</option>
+            </select>
+         </div>
+      {% endif %}
+      <div class="col-md-3 d-flex align-items-end gap-2">
+         <button type="submit" class="btn btn-primary"><i class="ti ti-filter me-1"></i>{{ __('Filter', 'companypurchasing') }}</button>
+         {% if can_create %}
+            <a class="btn btn-outline-primary" href="{{ base }}/request/new"><i class="ti ti-plus me-1"></i>{{ __('New purchase request', 'companypurchasing') }}</a>
+         {% endif %}
+      </div>
+   </form>
+
+   {{ include('@companypurchasing/parts/request_table.html.twig') }}
+{% endblock %}

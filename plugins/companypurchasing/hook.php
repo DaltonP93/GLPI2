@@ -34,6 +34,12 @@
  * y columnas nuevas en `items` (`ordered_qty`, `received_qty`, `purchase_unit_price`, `line_cost_total`) y en
  * `requests` (`purchase_started_at`, `purchase_quotes_id`, `purchase_suppliers_id`, `cost_policies_id`,
  * `receiving_seq`, `receiving_synced_seq`), añadidas también en UPGRADE (ALTER idempotente) sobre P2D-2.
+ * Tablas propias P2D-4 (entrega física + cierre; ADR-0023):
+ *   - glpi_plugin_companypurchasing_delivery_batches : lote/evento de entrega APPEND-ONLY (idempotency_key UNIQUE).
+ * y columnas nuevas en `receipt_units` (`delivery_batches_id`, `delivered_at`, `delivered_to_users_id`) y en
+ * `requests` (`delivery_seq`, `delivery_synced_seq`), añadidas también en UPGRADE (ALTER idempotente) sobre P2D-3.
+ * P2D-4 siembra además notificaciones NATIVAS (Notification + NotificationTemplate + traducción + destinos) sólo si
+ * faltan: un upgrade jamás pisa lo que el administrador ajustó.
  *
  * @license GPL-3.0-or-later
  */
@@ -375,6 +381,45 @@ function plugin_companypurchasing_install() {
         UNIQUE KEY `policy_hash` (`policy_hash`)
     ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
 
+    // --- P2D-4: entrega física (gate §5; ADR-0023). ---
+    // Lote/evento de ENTREGA (APPEND-ONLY). `idempotency_key` de la OPERACIÓN (UNIQUE) + `input_sha256`.
+    $DB->doQuery("CREATE TABLE IF NOT EXISTS `glpi_plugin_companypurchasing_delivery_batches` (
+        `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        `requests_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `entities_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `idempotency_key` VARCHAR(190) NOT NULL,
+        `input_sha256` CHAR(64) NOT NULL DEFAULT '',
+        `actor_users_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `recipient_users_id` INT UNSIGNED NOT NULL DEFAULT 0,
+        `delivered_at` TIMESTAMP NULL DEFAULT NULL,
+        `notes` TEXT DEFAULT NULL,
+        `units_count` INT UNSIGNED NOT NULL DEFAULT 0,
+        `correlation_id` VARCHAR(64) NOT NULL DEFAULT '',
+        `date_creation` TIMESTAMP NULL DEFAULT NULL,
+        PRIMARY KEY (`id`),
+        UNIQUE KEY `idempotency_key` (`idempotency_key`),
+        KEY `requests_id` (`requests_id`),
+        KEY `entities_id` (`entities_id`),
+        KEY `recipient_users_id` (`recipient_users_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
+    // Unidad: a qué lote de entrega pertenece, cuándo y a quién (NULL = aún no entregada). Una unidad se entrega
+    // UNA sola vez (el UPDATE de la entrega exige `delivery_batches_id IS NULL`).
+    foreach ([
+        'delivery_batches_id'   => "INT UNSIGNED NULL DEFAULT NULL",
+        'delivered_at'          => "TIMESTAMP NULL DEFAULT NULL",
+        'delivered_to_users_id' => "INT UNSIGNED NULL DEFAULT NULL",
+    ] as $col => $ddl) {
+        plugin_companypurchasing_add_column_if_missing('glpi_plugin_companypurchasing_receipt_units', $col, $ddl);
+    }
+    plugin_companypurchasing_add_index_if_missing('glpi_plugin_companypurchasing_receipt_units', 'delivery_batches_id', '`delivery_batches_id`');
+    // Marcador DURABLE de sincronización entrega → motor (mismo patrón que `receiving_seq`).
+    foreach ([
+        'delivery_seq'        => "INT UNSIGNED NOT NULL DEFAULT 0",
+        'delivery_synced_seq' => "INT UNSIGNED NOT NULL DEFAULT 0",
+    ] as $col => $ddl) {
+        plugin_companypurchasing_add_column_if_missing('glpi_plugin_companypurchasing_requests', $col, $ddl);
+    }
+
     // Derecho propio del plugin en todos los perfiles (valor 0 por defecto). IDEMPOTENTE: GLPI vuelve a
     // llamar install() al ACTUALIZAR el plugin (p. ej. 0.2.0 → 0.3.0); re-agregarlo violaría el UNIQUE
     // (profiles_id, name) de glpi_profilerights y abortaría el upgrade.
@@ -399,6 +444,12 @@ function plugin_companypurchasing_install() {
     // claves AUSENTES: un reinstall/upgrade NO pisa la configuración que un administrador ya ajustó
     // (grupos aprobadores, quórum, mapas de scopes…).
     $current = Config::getConfigurationValues(PluginConfig::CONTEXT);
+    // P2D-4: el recorrido del ledger para notificaciones arranca en "ahora" (jamás notifica hechos históricos de
+    // una instalación que se actualiza). Sólo si falta: un reinstall no lo retrocede.
+    if (!is_array($current) || !array_key_exists('notify_cursor', $current)) {
+        Config::setConfigurationValues(PluginConfig::CONTEXT, ['notify_cursor' => (string) plugin_companypurchasing_workflow_last_history_id()]);
+        $current = Config::getConfigurationValues(PluginConfig::CONTEXT);
+    }
     $missing = array_diff_key(PluginConfig::DEFAULTS, is_array($current) ? $current : []);
     if ($missing !== []) {
         Config::setConfigurationValues(PluginConfig::CONTEXT, $missing);
@@ -419,6 +470,9 @@ function plugin_companypurchasing_install() {
         );
     }
 
+    // P2D-4: notificaciones NATIVAS (sólo las que falten; nunca se pisan las existentes).
+    \GlpiPlugin\Companypurchasing\Service\NotificationSeeder::seed();
+
     return true;
 }
 
@@ -434,7 +488,11 @@ function plugin_companypurchasing_uninstall() {
         CronTask::unregister('companypurchasing');
     }
 
+    // P2D-4: notificaciones/plantillas NATIVAS propias del tipo de solicitud (vía API nativa, sin SQL).
+    \GlpiPlugin\Companypurchasing\Service\NotificationSeeder::purge();
+
     foreach ([
+        'glpi_plugin_companypurchasing_delivery_batches',
         'glpi_plugin_companypurchasing_inventory_outbox',
         'glpi_plugin_companypurchasing_receipt_units',
         'glpi_plugin_companypurchasing_receipt_batches',
@@ -481,6 +539,36 @@ function plugin_companypurchasing_add_column_if_missing(string $table, string $c
 }
 
 /**
+ * Agrega un índice a una tabla PROPIA si no existe (upgrade idempotente; comprobación EN VIVO).
+ */
+function plugin_companypurchasing_add_index_if_missing(string $table, string $index, string $columns): void {
+    /** @var DBmysql $DB */
+    global $DB;
+    if (preg_match('/^glpi_plugin_companypurchasing_[a-z_]+$/', $table) !== 1 || preg_match('/^[a-z_]+$/', $index) !== 1
+        || preg_match('/^`[a-z_]+`(,`[a-z_]+`)*$/', $columns) !== 1) {
+        throw new \InvalidArgumentException('tabla/índice inválido para migración');
+    }
+    $res = $DB->doQuery("SHOW INDEX FROM `{$table}` WHERE `Key_name` = '{$index}'");
+    if ($res !== false && $DB->numrows($res) > 0) {
+        return;
+    }
+    $DB->doQuery("ALTER TABLE `{$table}` ADD INDEX `{$index}` ({$columns})");
+}
+
+/** Último id del ledger del motor (0 si companyworkflow no está disponible): arranque del cursor de notificaciones. */
+function plugin_companypurchasing_workflow_last_history_id(): int {
+    try {
+        if (class_exists(\GlpiPlugin\Companyworkflow\Api\WorkflowApi::class)
+            && method_exists(\GlpiPlugin\Companyworkflow\Api\WorkflowApi::class, 'lastHistoryId')) {
+            return (new \GlpiPlugin\Companyworkflow\Api\WorkflowApi())->lastHistoryId();
+        }
+    } catch (\Throwable) {
+        // sin motor: el cursor arranca en 0 y el recorrido no encuentra hechos de Compras.
+    }
+    return 0;
+}
+
+/**
  * Listener best-effort de `companyworkflow:transitioned` / `companyworkflow:approval_invalidated`:
  * PROYECTA el estado confirmado del motor en `requests.domain_state` (cache). Nunca lanza: la
  * transición ya está confirmada. Si este listener se pierde, la proyección converge en la siguiente
@@ -500,6 +588,16 @@ function plugin_companypurchasing_on_workflow_event($payload) {
         }
     } catch (\Throwable) {
         // best-effort: la proyección nunca compromete la transición ya confirmada.
+    }
+    // P2D-4: notificación NATIVA derivada del hecho DURABLE del ledger (`workflow_history_id`). Como mucho una vez
+    // por hecho; si este listener se pierde, la Acción automática recorre el ledger. Nunca revierte nada.
+    try {
+        $hid = (int) ($payload['workflow_history_id'] ?? 0);
+        if ($hid > 0) {
+            (new \GlpiPlugin\Companypurchasing\Service\NotificationDispatcher())->dispatchHistory($hid, $payload);
+        }
+    } catch (\Throwable) {
+        // best-effort
     }
     return $payload;
 }

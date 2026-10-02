@@ -55,6 +55,13 @@ class PurchasingEvent extends CommonDBTM
     public const EV_HANDOFF_RETRY     = 'handoff.retry';
     public const EV_HANDOFF_ERROR     = 'handoff.error';      // final (requiere intervención)
 
+    // Eventos de negocio de P2D-4 (entrega física, cierre y notificaciones nativas).
+    public const EV_DELIVERY_RECORDED  = 'delivery.recorded';     // lote de entrega + unidades DELIVERED (misma transacción)
+    public const EV_DELIVERY_SYNCED    = 'delivery.synced';       // el motor reflejó la entrega TOTAL (saga física)
+    public const EV_REQUEST_CLOSED     = 'request.closed';        // cierre administrativo confirmado por el motor
+    public const EV_NOTIFICATION_RAISED = 'notification.raised';  // evento nativo disparado (como mucho una vez por hecho)
+    public const EV_NOTIFICATION_FAILED = 'notification.failed';  // el fallo NO revierte el hecho de negocio
+
     public static function getTable($classname = null)
     {
         return 'glpi_plugin_companypurchasing_events';

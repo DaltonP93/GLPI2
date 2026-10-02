@@ -18,6 +18,8 @@ namespace GlpiPlugin\Companypurchasing\Command;
 use GlpiPlugin\Companypurchasing\Api\PurchasingIntegrationApi;
 use GlpiPlugin\Companypurchasing\Model\Request;
 use GlpiPlugin\Companypurchasing\Service\ApprovalOrchestrator;
+use GlpiPlugin\Companypurchasing\Service\DeliveryException;
+use GlpiPlugin\Companypurchasing\Service\DeliveryService;
 use GlpiPlugin\Companypurchasing\Service\DocumentVersionAllocator;
 use GlpiPlugin\Companypurchasing\Service\NumberingService;
 use GlpiPlugin\Companypurchasing\Service\QuoteManager;
@@ -34,7 +36,7 @@ final class ConcurrencyProbeCommand extends Command
     {
         $this->setName('plugins:companypurchasing:concurrency-probe')
             ->setDescription('Probe INTERNO de concurrencia (numeración/submit/cotización/versiones/aprobación). Sólo para pruebas.')
-            ->addOption('op', null, InputOption::VALUE_REQUIRED, 'assign | submit | edit | addline | select-quote | docversion | approve | receive | claim')
+            ->addOption('op', null, InputOption::VALUE_REQUIRED, 'assign | submit | edit | addline | select-quote | docversion | approve | receive | claim | deliver')
             ->addOption('entity', null, InputOption::VALUE_OPTIONAL, 'entities_id', '0')
             ->addOption('year', null, InputOption::VALUE_OPTIONAL, 'año', '0')
             ->addOption('request', null, InputOption::VALUE_OPTIONAL, 'requests_id', '0')
@@ -51,7 +53,12 @@ final class ConcurrencyProbeCommand extends Command
             ->addOption('key', null, InputOption::VALUE_OPTIONAL, 'idempotency_key (receive)', '')
             ->addOption('worker', null, InputOption::VALUE_OPTIONAL, 'workerId (claim)', '')
             ->addOption('limit', null, InputOption::VALUE_OPTIONAL, 'límite (claim)', '10')
-            ->addOption('lease', null, InputOption::VALUE_OPTIONAL, 'segundos de lease (claim)', '60');
+            ->addOption('lease', null, InputOption::VALUE_OPTIONAL, 'segundos de lease (claim)', '60')
+            // P2D-4
+            ->addOption('units', null, InputOption::VALUE_OPTIONAL, 'receipt_unit_uuid separados por coma (deliver)', '')
+            ->addOption('recipient', null, InputOption::VALUE_OPTIONAL, 'users_id del destinatario (deliver)', '0')
+            ->addOption('hold', null, InputOption::VALUE_OPTIONAL, 'ms que se retienen los locks de las unidades (deliver)', '0')
+            ->addOption('delay', null, InputOption::VALUE_OPTIONAL, 'ms de espera antes de empezar (deliver)', '0');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -119,6 +126,27 @@ final class ConcurrencyProbeCommand extends Command
                     ]]);
                     $output->writeln('OK:' . $r['status'] . ':' . count($r['units']) . ':' . $r['batch_id']);
                     return Command::SUCCESS;
+                // ---- P2D-4 ----
+                case 'deliver':
+                    usleep(max(0, (int) $input->getOption('delay')) * 1000);
+                    $hold = max(0, (int) $input->getOption('hold'));
+                    // Pausa DENTRO de la transacción, con las unidades YA bloqueadas (FOR UPDATE): demuestra que otra
+                    // entrega de la misma unidad espera el COMMIT y ve la unidad entregada en su validación.
+                    $svc = new class ($hold) extends DeliveryService {
+                        public function __construct(private int $holdMs)
+                        {
+                            parent::__construct();
+                        }
+
+                        protected function afterUnitsLocked(array $unitIds): void
+                        {
+                            usleep($this->holdMs * 1000);
+                        }
+                    };
+                    $units = array_values(array_filter(explode(',', (string) $input->getOption('units'))));
+                    $r = $svc->deliver($reqId, $units, (int) $input->getOption('recipient'), (string) $input->getOption('key'));
+                    $output->writeln('OK:' . $r['status'] . ':' . count($r['units']) . ':' . $r['batch_id']);
+                    return Command::SUCCESS;
                 case 'submit':
                     $output->writeln('OK:' . $rm->submitDraft($reqId));
                     return Command::SUCCESS;
@@ -137,6 +165,10 @@ final class ConcurrencyProbeCommand extends Command
                     $output->writeln('ERR:op-desconocida');
                     return Command::SUCCESS;
             }
+        } catch (DeliveryException $e) {
+            // P2D-4: el TIPO del rechazo controlado (p. ej. unit_not_deliverable vs concurrency_conflict) es parte del contrato.
+            $output->writeln('ERR:' . $e->kind . ':' . $e->getMessage());
+            return Command::SUCCESS;
         } catch (\Throwable $e) {
             $output->writeln('ERR:' . $e->getMessage());
             return Command::SUCCESS;
@@ -148,7 +180,7 @@ final class ConcurrencyProbeCommand extends Command
         $full = READ
             | Request::RIGHT_CREATE_REQUEST | Request::RIGHT_VIEW_OWN | Request::RIGHT_VIEW_ENTITY
             | Request::RIGHT_EDIT_DRAFT | Request::RIGHT_MANAGE_CONFIG | Request::RIGHT_MANAGE_PURCHASING
-            | Request::RIGHT_RECEIVE;
+            | Request::RIGHT_RECEIVE | Request::RIGHT_DELIVER;
         $_SESSION['glpiID']                      = $userId;
         $_SESSION['glpiname']                    = 'cpur_probe';
         $_SESSION['glpiactive_entity']           = $entity;

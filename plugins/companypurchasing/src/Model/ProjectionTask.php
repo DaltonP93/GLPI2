@@ -8,6 +8,10 @@
  * P2D-3: converge además la saga de RECEPCIÓN (el motor refleja los contadores físicos ya confirmados; corre con
  * el contexto de sistema de la CronTask) y reporta anomalías e instancias con una versión anterior de la definición.
  *
+ * P2D-4: la saga física converge también la ENTREGA total (RECEIVED → DELIVERED) y, como red de seguridad de las
+ * notificaciones NATIVAS, recorre el ledger del motor desde un cursor (`NotificationDispatcher::sweep`): un hecho cuyo
+ * listener se perdió igual se notifica (como mucho una vez por hecho).
+ *
  * NUNCA aprueba, rechaza ni invalida: sólo proyecta estado confirmado y reporta anomalías.
  *
  * @license GPL-3.0-or-later
@@ -20,6 +24,7 @@ namespace GlpiPlugin\Companypurchasing\Model;
 use CommonGLPI;
 use CronTask;
 use GlpiPlugin\Companypurchasing\Service\ApprovalOrchestrator;
+use GlpiPlugin\Companypurchasing\Service\NotificationDispatcher;
 
 class ProjectionTask extends CommonGLPI
 {
@@ -46,6 +51,13 @@ class ProjectionTask extends CommonGLPI
     public static function cronReconcileprojection(CronTask $task)
     {
         $r = (new ApprovalOrchestrator())->reconcileAll(self::BATCH);
+        $n = ['scanned' => 0, 'raised' => 0, 'cursor' => 0];
+        try {
+            $n = (new NotificationDispatcher())->sweep(self::BATCH);
+        } catch (\Throwable) {
+            // best-effort: una notificación jamás compromete la reconciliación ni los hechos de negocio.
+        }
+        $task->log(sprintf('notificaciones: revisadas=%d disparadas=%d cursor=%d', $n['scanned'], $n['raised'], $n['cursor']));
         $task->log(sprintf(
             'revisadas=%d corregidas=%d sin_instancia=%d integridad_pendiente=%d recepcion_pendiente=%d anomalias_recepcion=%d definicion_anterior=%d(bloqueadas=%d) errores=%d cursor=%d',
             $r['checked'],

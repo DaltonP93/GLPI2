@@ -35,8 +35,8 @@ class Request extends CommonDBTM
     // Incrementos posteriores (P2D-2…P2D-4):
     public const RIGHT_MANAGE_PURCHASING = 64;  // gestionar compras (cotizar/seleccionar/iniciar compra) — P2D-2/3
     public const RIGHT_RECEIVE           = 128; // registrar recepción física — ACTIVO desde P2D-3
-    public const RIGHT_DELIVER           = 256; // registrar entrega — reservado (P2D-4)
-    public const RIGHT_VIEW_METRICS      = 512; // ver métricas/tableros — reservado (P2D-4)
+    public const RIGHT_DELIVER           = 256; // registrar entrega física — ACTIVO desde P2D-4
+    public const RIGHT_VIEW_METRICS      = 512; // ver métricas/tablero — ACTIVO desde P2D-4
     // P2D-3: consumidor de INTEGRACIÓN del handoff (SI-4, vía `PurchasingIntegrationApi`). Mínimo privilegio:
     // un perfil técnico dedicado sólo necesita este bit (+ entidades); NO es Super-Admin ni ve solicitudes.
     public const RIGHT_INTEGRATION       = 1024;

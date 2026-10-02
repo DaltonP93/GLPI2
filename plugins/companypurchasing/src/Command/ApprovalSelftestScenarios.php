@@ -123,6 +123,9 @@ trait ApprovalSelftestScenarios
             // P2D-3: upgrade 0.3.0 → 0.4.0 sobre los datos P2D-2 recién creados; luego recepción + outbox.
             $this->scenarioUpgradeP2d3();
             $this->runReceivingScenarios();
+            // P2D-4: upgrade 0.4.0 → 0.5.0 sobre los datos P2D-1/2/3 recién creados; luego entrega/cierre/UI/notif./métricas.
+            $this->scenarioUpgradeP2d4();
+            $this->runDeliveryScenarios();
             // Al final: republica con quórum 2 (las instancias ya creadas conservan su versión).
             $this->scenarioQuorum();
         } finally {
@@ -1287,7 +1290,8 @@ trait ApprovalSelftestScenarios
                 $DB->delete(WorkflowDef::getTable(), ['id' => (int) $row['id']]);
             }
             $DB->delete(Delegation::getTable(), ['users_id_from' => $this->uFin]);
-            foreach (['inventory_outbox', 'receipt_units', 'receipt_batches', 'cost_policies', 'integrity', 'quote_items', 'quotes', 'doc_versions', 'docseq', 'policies'] as $t) {
+            $DB->delete(\QueuedNotification::getTable(), ['itemtype' => Request::class]);
+            foreach (['delivery_batches', 'inventory_outbox', 'receipt_units', 'receipt_batches', 'cost_policies', 'integrity', 'quote_items', 'quotes', 'doc_versions', 'docseq', 'policies'] as $t) {
                 $DB->delete('glpi_plugin_companypurchasing_' . $t, ['id' => ['>', 0]]);
             }
             $DB->delete(PurchasingEvent::getTable(), ['event' => PurchasingEvent::EV_DEFINITION_PUBLISHED]);

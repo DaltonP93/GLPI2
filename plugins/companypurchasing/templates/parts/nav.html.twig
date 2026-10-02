@@ -1,0 +1,10 @@
+{# Navegación de Compras: sólo páginas que los derechos de la sesión permiten (la ACL real está en el servidor). #}
+<ul class="nav nav-tabs mb-3" role="tablist">
+   {% for key, p in nav %}
+      <li class="nav-item">
+         <a class="nav-link {{ key == active ? 'active' : '' }}" href="{{ p.page }}">
+            <i class="{{ p.icon }} me-1"></i>{{ p.title }}
+         </a>
+      </li>
+   {% endfor %}
+</ul>

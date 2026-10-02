@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Tests UNITARIOS puros de companypurchasing (sin bootstrap de GLPI) — P2D-1 + P2D-2 + P2D-3.
+ * Tests UNITARIOS puros de companypurchasing (sin bootstrap de GLPI) — P2D-1 + P2D-2 + P2D-3 + P2D-4 (`p2d4.php`).
  *
  * Ejercitan la lógica que NO depende del core: dinero EXACTO (sin float; PYG sin decimales),
  * determinismo del snapshot de scope, invariante "comercial no contamina REQUEST_SCOPE", formato de
@@ -37,6 +37,21 @@ require $svc . 'CostAllocator.php';
 require $svc . 'HandoffPayload.php';
 require $svc . 'ReceivingService.php'; // sólo uuidV4()
 require dirname(__DIR__, 2) . '/src/Api/PurchasingIntegrationApi.php'; // sólo sanitizeError()
+// P2D-4 (lógica PURA; traducción simulada: `__()` devuelve el msgid, como GLPI sin catálogo).
+if (!function_exists('__')) {
+    function __(string $s, string $domain = ''): string
+    {
+        return $s;
+    }
+}
+require $svc . 'DeliveryException.php';
+require $svc . 'DeliveryRules.php';
+require $svc . 'NotificationRules.php';
+require $svc . 'NotificationSeeder.php';
+require $svc . 'MetricsMath.php';
+require $svc . 'ConfigForm.php';
+require $svc . 'Labels.php';
+require $svc . 'SafeError.php';
 
 use GlpiPlugin\Companypurchasing\Api\PurchasingIntegrationApi;
 use GlpiPlugin\Companypurchasing\Service\ApprovalOrchestrator;
@@ -592,6 +607,9 @@ $scan = [
     dirname(__DIR__, 2) . '/src/Api/PurchasingIntegrationApi.php',
     $svc . 'ReceivingService.php', $svc . 'ReceivingSync.php', $svc . 'CostAllocator.php', $svc . 'CostPolicy.php',
     $svc . 'CostPolicyStore.php', $svc . 'HandoffPayload.php',
+    // P2D-4: entrega/cierre/métricas/notificaciones tampoco hablan con Snipe/HTTP/activos ni usan float/división.
+    $svc . 'DeliveryService.php', $svc . 'DeliveryRules.php', $svc . 'MetricsMath.php', $svc . 'MetricsService.php',
+    $svc . 'NotificationDispatcher.php', $svc . 'InboxService.php',
 ];
 $forbidden = ['curl_', 'guzzle', 'fsockopen', 'stream_socket_client', 'http://', 'https://', 'snipe', 'infocom', 'computer', 'companyqr', 'companyintegrations', '(float)', 'floatval', 'round(', 'bcdiv', ' / '];
 $hits = [];
@@ -610,6 +628,8 @@ foreach ($scan as $f) {
     }
 }
 ok('código (sin comentarios) libre de clientes HTTP/Snipe/activos/Infocom/companyqr/float/división' . ($hits !== [] ? ' — ' . implode(', ', $hits) : ''), $hits === []);
+
+require __DIR__ . '/p2d4.php';
 
 echo "\n" . ($fail > 0
     ? "\033[31mUNIT FAIL: {$fail}/{$total}\033[0m"

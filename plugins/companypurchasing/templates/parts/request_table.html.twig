@@ -1,0 +1,39 @@
+{# Tabla de solicitudes (filas ya filtradas por ACL + entidad en el servidor). #}
+{% if rows is empty %}
+   <div class="alert alert-info">{{ __('No requests to show', 'companypurchasing') }}</div>
+{% else %}
+   <div class="table-responsive">
+      <table class="table table-hover table-sm align-middle">
+         <thead>
+            <tr>
+               <th>{{ __('Number', 'companypurchasing') }}</th>
+               <th>{{ __('Date', 'companypurchasing') }}</th>
+               <th>{{ __('Category', 'companypurchasing') }}</th>
+               <th>{{ __('Department', 'companypurchasing') }}</th>
+               <th class="text-end">{{ __('Amount', 'companypurchasing') }}</th>
+               <th>{{ __('Currency', 'companypurchasing') }}</th>
+               <th>{{ __('Current state', 'companypurchasing') }}</th>
+               <th>{{ __('Stage', 'companypurchasing') }}</th>
+               <th>{{ __('Last update', 'companypurchasing') }}</th>
+               {% if show_actions ?? false %}<th>{{ __('Pending actions', 'companypurchasing') }}</th>{% endif %}
+            </tr>
+         </thead>
+         <tbody>
+            {% for r in rows %}
+               <tr>
+                  <td><a href="{{ base }}/request/{{ r.id }}">{{ r.number is not empty ? r.number : '#' ~ r.id }}</a></td>
+                  <td>{{ r.date_creation|formatted_datetime }}</td>
+                  <td>{{ r.category }}</td>
+                  <td>{{ r.department }}</td>
+                  <td class="text-end">{{ r.amount_display }}</td>
+                  <td>{{ r.currency }}</td>
+                  <td><span class="badge bg-secondary-lt">{{ r.state_label }}</span></td>
+                  <td>{{ r.phase_label }}</td>
+                  <td>{{ r.date_mod|formatted_datetime }}</td>
+                  {% if show_actions ?? false %}<td>{{ (r.action_labels ?? [])|join(', ') }}</td>{% endif %}
+               </tr>
+            {% endfor %}
+         </tbody>
+      </table>
+   </div>
+{% endif %}

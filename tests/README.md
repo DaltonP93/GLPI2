@@ -7,7 +7,7 @@ estructura; las pruebas de cada módulo se agregan al desarrollarlo.
 |---------|-----------|
 | `smoke/` | Verificaciones rápidas post-instalación/actualización (`run-smoke.sh`). |
 | `upgrade/` | Suite de compatibilidad ante actualización de GLPI (`verify-core-untouched.sh`). |
-| `e2e/` | Pruebas end-to-end de flujos completos (a definir por módulo). |
+| `e2e/` | Pruebas end-to-end HTTP reales contra el stack: `companyqr-http.sh` (login → scan → reporte → ticket) y `companypurchasing-http.sh` (UI de Compras: GET/POST, CSRF, PRG, escape, ACL del lado servidor). |
 
 ## Pirámide de pruebas
 1. **Unitarias** — dentro de cada `plugins/*/tests` y `services/*/tests`.

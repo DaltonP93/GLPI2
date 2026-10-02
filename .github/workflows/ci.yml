@@ -210,6 +210,9 @@ jobs:
       - name: E2E HTTP real (login → scan → report → ticket) — FAIL-CLOSED
         run: bash tests/e2e/companyqr-http.sh
 
+      - name: E2E HTTP real UI de Compras (GET/POST, CSRF, PRG, escape, ACL) — FAIL-CLOSED
+        run: bash tests/e2e/companypurchasing-http.sh
+
       - name: Verificar localización (fail-closed)
         run: bash tests/localization/verify-localization.sh
 
