@@ -6,7 +6,7 @@
  *   GET /plugins/companypurchasing/requests            Mis solicitudes (VIEW_OWN; alcance entidad con VIEW_ENTITY)
  *   GET /plugins/companypurchasing/inbox/{box}         Bandejas derivadas del motor (para mí / compras / recepción / entrega)
  *   GET /plugins/companypurchasing/request/new         Nueva solicitud (CREATE_REQUEST)
- *   GET /plugins/companypurchasing/request/{id}        Detalle (canView)
+ *   GET /plugins/companypurchasing/request/{id}        Detalle (RequestUiAccess: VIEW_OWN/VIEW_ENTITY, o acción ACTUAL sobre ella)
  *   GET /plugins/companypurchasing/request/{id}/edit   Borrador / devuelta (EDIT_DRAFT + editable por el motor)
  *   GET /plugins/companypurchasing/metrics             Métricas (VIEW_METRICS)
  *   GET /plugins/companypurchasing/config              Configuración (MANAGE_CONFIG)
@@ -35,6 +35,7 @@ use GlpiPlugin\Companypurchasing\Service\PurchasingWorkflow;
 use GlpiPlugin\Companypurchasing\Service\RequestDetailBuilder;
 use GlpiPlugin\Companypurchasing\Service\RequestManager;
 use GlpiPlugin\Companypurchasing\Service\RequestQuery;
+use GlpiPlugin\Companypurchasing\Service\UiAccessException;
 use GlpiPlugin\Companypurchasing\Service\WorkflowGateway;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -140,11 +141,7 @@ final class PageController extends AbstractController
     #[Route('/request/{id}', name: 'cpur_request_show', methods: ['GET'], requirements: ['id' => '\d+'])]
     public function show(int $id): Response
     {
-        try {
-            $view = (new RequestDetailBuilder())->build($id);
-        } catch (\RuntimeException $e) {
-            throw str_contains($e->getMessage(), 'inexistente') ? new NotFoundHttpException() : new AccessDeniedHttpException();
-        }
+        $view = self::detailOr40x($id);
         $view['decide_labels'] = [];
         foreach ($view['can']['decide'] as $a) {
             $view['decide_labels'][$a] = Labels::action($a);
@@ -175,15 +172,15 @@ final class PageController extends AbstractController
     #[Route('/request/{id}/edit', name: 'cpur_request_edit', methods: ['GET'], requirements: ['id' => '\d+'])]
     public function edit(int $id): Response
     {
-        try {
-            $view = (new RequestDetailBuilder())->build($id);
-        } catch (\RuntimeException $e) {
-            throw str_contains($e->getMessage(), 'inexistente') ? new NotFoundHttpException() : new AccessDeniedHttpException();
-        }
+        $view = self::detailOr40x($id);
         if (!$view['can']['edit']) {
             throw new AccessDeniedHttpException();
         }
-        $req = (new RequestManager())->getViewable($id);
+        try {
+            $req = (new RequestManager())->getViewable($id); // edición = lectura GENERAL del solicitante
+        } catch (\RuntimeException) {
+            throw new AccessDeniedHttpException();
+        }
         return $this->render('@companypurchasing/request_form.html.twig', self::page(__('Edit purchase request', 'companypurchasing'), 'requests', [
             'request'   => $req->fields,
             'view'      => $view,
@@ -286,5 +283,22 @@ final class PageController extends AbstractController
             'budget'     => (string) \Budget::dropdown(['name' => 'budgets_id', 'value' => (int) ($values['budgets_id'] ?? 0),
                                                         'entity' => $entity, 'display' => false]),
         ];
+    }
+
+    /**
+     * Detalle con la lectura de `RequestUiAccess` (general o CONTEXTUAL de la acción actual). Rechazo TIPADO:
+     * inexistente ⇒ 404, sin lectura ⇒ 403 (nunca se interpreta el texto del mensaje). Cualquier otro fallo ⇒ 403.
+     *
+     * @return array<string,mixed>
+     */
+    private static function detailOr40x(int $id): array
+    {
+        try {
+            return (new RequestDetailBuilder())->build($id);
+        } catch (UiAccessException $e) {
+            throw $e->kind === UiAccessException::NOT_FOUND ? new NotFoundHttpException() : new AccessDeniedHttpException();
+        } catch (\RuntimeException) {
+            throw new AccessDeniedHttpException();
+        }
     }
 }

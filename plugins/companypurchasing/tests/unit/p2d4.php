@@ -225,6 +225,48 @@ ok('toda acción exige sesión autenticada (SecurityStrategy) y responde con PRG
     substr_count($actions, '#[SecurityStrategy(Firewall::STRATEGY_AUTHENTICATED)]') === count($ar[1])
     && substr_count($pages, '#[SecurityStrategy(Firewall::STRATEGY_AUTHENTICATED)]') === count($pr[1])
     && preg_match_all('/return \$this->act\(/', $actions) === count($ar[1]));
+// Preflight HTTP TIPADO (403, nunca PRG): cada acción verifica su derecho MÍNIMO antes de `act()`; `decide` lo delega al
+// motor; las rutas de una solicitud verifican además su entidad. `act()` propaga los rechazos HTTP tipados.
+$expectedPreflight = [
+    'cpur_request_create' => 'requireHttpRight(PurchaseRequest::RIGHT_CREATE_REQUEST)',
+    'cpur_request_update' => 'requireHttpRight(PurchaseRequest::RIGHT_EDIT_DRAFT)',
+    'cpur_line_add'       => 'requireHttpRight(PurchaseRequest::RIGHT_EDIT_DRAFT)',
+    'cpur_line_update'    => 'requireHttpRight(PurchaseRequest::RIGHT_EDIT_DRAFT)',
+    'cpur_line_remove'    => 'requireHttpRight(PurchaseRequest::RIGHT_EDIT_DRAFT)',
+    'cpur_request_submit' => 'requireHttpRight(PurchaseRequest::RIGHT_EDIT_DRAFT)',
+    'cpur_request_decide' => 'requireDecisionRight($id)',
+    'cpur_quote_create'   => 'requireHttpRight(PurchaseRequest::RIGHT_MANAGE_PURCHASING)',
+    'cpur_quote_update'   => 'requireHttpRight(PurchaseRequest::RIGHT_MANAGE_PURCHASING)',
+    'cpur_quote_select'   => 'requireHttpRight(PurchaseRequest::RIGHT_MANAGE_PURCHASING)',
+    'cpur_quote_attach'   => 'requireHttpRight(PurchaseRequest::RIGHT_MANAGE_PURCHASING)',
+    'cpur_purchase_start' => 'requireHttpRight(PurchaseRequest::RIGHT_MANAGE_PURCHASING)',
+    'cpur_receive'        => 'requireHttpRight(PurchaseRequest::RIGHT_RECEIVE)',
+    'cpur_deliver'        => 'requireHttpRight(PurchaseRequest::RIGHT_DELIVER)',
+    'cpur_close'          => 'requireHttpRight(PurchaseRequest::RIGHT_MANAGE_PURCHASING)',
+    'cpur_pdf_retry'      => 'requireGeneralRead($id)',
+    'cpur_config_save'    => 'requireHttpRight(PurchaseRequest::RIGHT_MANAGE_CONFIG)',
+    'cpur_config_publish' => 'requireHttpRight(PurchaseRequest::RIGHT_MANAGE_CONFIG)',
+];
+$preflightOk = count($ar[1]) === count($expectedPreflight);
+foreach (preg_split('/(?=#\[SecurityStrategy)/', $actions) ?: [] as $seg) {
+    if (preg_match("/name: '(cpur_\\w+)'/", $seg, $nm) !== 1) {
+        continue;
+    }
+    $want = $expectedPreflight[$nm[1]] ?? null;
+    $req  = $want !== null ? strpos($seg, 'self::' . $want) : false;
+    $act  = strpos($seg, 'return $this->act(');
+    $scoped = str_contains(substr($seg, 0, (int) strpos($seg, ')]')), '{id}');
+    $preflightOk = $preflightOk && $req !== false && $act !== false && $req < $act
+        && (!$scoped || str_contains($want, '($id)') || (($e = strpos($seg, 'self::requireRequestInEntity($id)')) !== false && $e < $act));
+}
+ok('🔒 [HTTP-403] cada acción POST verifica su derecho MÍNIMO (o el motor, en decide) y la entidad ANTES del PRG', $preflightOk);
+$ui = $read($root . '/src/Controller/UiSupport.php');
+ok('🔒 [HTTP-403] act() propaga los rechazos HTTP tipados (no los convierte en PRG) y el preflight lanza AccessDeniedHttpException',
+    preg_match('/catch \(HttpExceptionInterface \$e\) \{\s*throw \$e;\s*\}\s*catch \(\\\\Throwable/', $ui) === 1
+    && preg_match('/function requireHttpRight\(int \$bit\): void\s*\{\s*if \(!Session::haveRight\(PurchaseRequest::\$rightname, \$bit\)\) \{\s*throw new AccessDeniedHttpException\(\);/', $actions) === 1
+    && str_contains($actions, 'array_intersect(ApprovalOrchestrator::ACTIONS, $mine) === []'));
+ok('🔒 [HTTP-403] ningún controlador decide ACL / 404 por el TEXTO de una excepción',
+    preg_match('/getMessage\(\)\s*,\s*[\'"]|str_contains\(\$e->getMessage/', $actions . $pages . $ui) !== 1);
 ok('PageController no invoca operaciones que mutan',
     preg_match('/->(createDraft|updateDraft|addLine|updateLine|removeLine|submit|decide|createQuote|updateQuote|selectQuote|attachQuoteDocument|startPurchase|receive|deliver|closeRequest|publishDefinition)\(/', $pages) !== 1);
 ok('los controladores no ejecutan SQL ni consultan tablas de otros plugins',

@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # =====================================================================
 # companypurchasing-http.sh — E2E HTTP REAL de la UI de Compras (P2D-4, ADR-0023 §8).
-# Verifica por HTTP (no sólo servicios) las reglas de la superficie web:
-#   - páginas GET autenticadas (sin sesión ⇒ no se sirven);
-#   - acciones sólo POST (GET sobre una ruta de acción ⇒ 405, el controlador no corre);
-#   - CSRF nativo obligatorio (sin token / token inválido / token reutilizado ⇒ 403);
-#   - PRG: POST válido ⇒ 302 a una página GET;
-#   - salida escapada (un texto con <script> se muestra escapado);
-#   - ACL del lado servidor: un usuario sin derechos de Compras recibe 403 en las páginas y su POST
-#     (con CSRF válido) NO crea nada;
-#   - sin secretos en el HTML (lease_token, hashes internos).
+# Comprueba, por HTTP contra el stack (no sólo servicios):
+#   [0] sin sesión ⇒ la UI no se sirve (cualquier código ≠ 200; GLPI redirige al login);
+#   [2] páginas GET autenticadas (admin) ⇒ 200 y sin `lease_token` / `payload_sha256` / `input_sha256` en el HTML;
+#   [3] GET sobre 7 rutas de acción ⇒ 405 (el controlador no corre);
+#   [4] POST sin token CSRF y con token inválido ⇒ 403;
+#   [5] POST válido ⇒ 302/303 a `/request/{id}/edit` (PRG); token ya usado ⇒ 403; texto con <script> mostrado
+#       escapado; exactamente UNA solicitud creada y CERO por los POST rechazados por CSRF;
+#   [6] acción AUTORIZADA pero rechazada por el dominio (admin con DELIVER entrega un BORRADOR) ⇒ 302/303 (PRG) y el
+#       contenido del detalle (cabecera…auditoría) no cambia;
+#   [7] usuario autenticado SIN derechos de Compras (Self-Service): 7 páginas ⇒ 403/404; control positivo (un token de
+#       la meta nativa es un CSRF válido: el admin crea con él ⇒ PRG); con un token CSRF VÁLIDO de su propia sesión:
+#       POST /request/create ⇒ 403 y exactamente 0 solicitudes; POST /request/{id}/receive y /deliver ⇒ 403 y el
+#       contenido del detalle no cambia.
 # Fail-closed: cualquier paso que falle aborta con exit≠0.
 # =====================================================================
 set -euo pipefail
@@ -103,20 +107,58 @@ for bad in nocsrf badcsrf replay; do
 done
 echo "   ok: los POST rechazados por CSRF no crearon nada"
 
-echo ">> [6] ACL del lado servidor: usuario sin derechos de Compras ('$LOW_USER')"
+echo ">> [6] Rechazo funcional de una acción AUTORIZADA ⇒ PRG (no 403), sin cambios"
+detail_digest() { # huella del CONTENIDO del detalle (cabecera … auditoría), sin los tokens que cambian por render
+  expect '200' "$(code "$JAR_A" "$P/request/$1")" "GET detalle /request/$1 (admin)" >&2
+  python3 - "$TMP/body.html" <<'PYEOF'
+import hashlib, re, sys
+h = open(sys.argv[1], encoding='utf-8').read()
+a, z = h.find('<span class="badge bg-primary">'), h.rfind('</tbody>')
+seg = h[a:z] if a >= 0 and z > a else ''
+seg = re.sub(r'(_glpi_csrf_token"[^>]*value=")[^"]+', r'\1X', seg)
+seg = re.sub(r'ui-(rcv|dlv)-[0-9a-f]+', r'ui-\1-X', seg)
+print(hashlib.sha256(seg.encode()).hexdigest() if seg else 'VACIO')
+PYEOF
+}
+SNAP="$(detail_digest "$RID")"
+[ "$SNAP" != "VACIO" ] || fail "no se pudo extraer el contenido del detalle"
+expect '200' "$(code "$JAR_A" "$P/request/$RID")" "GET detalle (token CSRF del admin)"
+AT="$(csrf_of "$TMP/body.html")"
+[ -n "$AT" ] || fail "el detalle no trae token CSRF"
+# El admin TIENE RIGHT_DELIVER: pasa el preflight; el DOMINIO rechaza entregar un BORRADOR ⇒ PRG + mensaje, nada cambia.
+expect '302|303' "$(code "$JAR_A" -X POST "$P/request/$RID/deliver" --data-urlencode "idempotency_key=e2e-dlv-$MARK" \
+  --data-urlencode "_glpi_csrf_token=$AT")" "POST /request/$RID/deliver autorizado pero inválido para un borrador (PRG)"
+[ "$(detail_digest "$RID")" = "$SNAP" ] || fail "el rechazo funcional cambió la solicitud"
+echo "   ok: rechazo funcional ⇒ PRG y la solicitud no cambió"
+
+echo ">> [7] ACL del lado servidor: usuario autenticado SIN derechos de Compras ('$LOW_USER') ⇒ 403"
 login "$JAR_L" "$LOW_USER" "$LOW_PASS"
 for path in requests request/new metrics config inbox/purchasing inbox/delivery "request/$RID"; do
   expect '403|404' "$(code "$JAR_L" "$P/$path")" "GET /$path sin derecho"
 done
-# Token CSRF VÁLIDO de su propia sesión (meta nativa del layout) ⇒ pasa CSRF y lo frena la ACL.
-expect '200' "$(code "$JAR_L" "$BASE/front/preference.php")" "GET preferencias (sesión sin derechos de Compras)"
-LT="$(meta_csrf_of "$TMP/body.html")"
-[ -n "$LT" ] || LT="$(csrf_of "$TMP/body.html")"
-[ -n "$LT" ] || fail "no se obtuvo un token CSRF de la sesión sin derechos"
-expect '302|303' "$(code "$JAR_L" -X POST "$P/request/create" --data-urlencode "category=$MARK-low" \
-  --data-urlencode "_glpi_csrf_token=$LT")" "POST /request/create sin derecho (CSRF válido)"
+meta_token() { # token CSRF VÁLIDO y NUEVO de la sesión (meta nativa del layout); uno por POST (GLPI los consume)
+  expect '200' "$(code "$1" "$BASE/front/preference.php")" "GET preferencias (token CSRF de la sesión)" >&2
+  local t; t="$(meta_csrf_of "$TMP/body.html")"; [ -n "$t" ] || t="$(csrf_of "$TMP/body.html")"
+  printf '%s' "$t"
+}
+# Control POSITIVO del método: un token de la meta nativa ES un CSRF válido (el admin crea con él ⇒ PRG). Así el 403
+# del usuario sin derecho, obtenido con el MISMO método, no puede deberse al CSRF.
+T="$(meta_token "$JAR_A")"; [ -n "$T" ] || fail "sin token CSRF (meta) del admin"
+expect '302|303' "$(code "$JAR_A" -X POST "$P/request/create" --data-urlencode "category=$MARK-meta" \
+  --data-urlencode "_glpi_csrf_token=$T")" "control: POST /request/create con token de la meta (admin) ⇒ PRG"
+[ "$(count_cat "$MARK-meta")" -eq 1 ] || fail "control: el token de la meta no creó la solicitud"
+T="$(meta_token "$JAR_L")"; [ -n "$T" ] || fail "sin token CSRF (meta) de la sesión sin derechos"
+expect '403' "$(code "$JAR_L" -X POST "$P/request/create" --data-urlencode "category=$MARK-low" \
+  --data-urlencode "_glpi_csrf_token=$T")" "POST /request/create sin CREATE_REQUEST (CSRF válido)"
 [ "$(count_cat "$MARK-low")" -eq 0 ] || fail "un usuario SIN derecho creó una solicitud"
-echo "   ok: el POST sin derecho no creó nada"
+echo "   ok: exactamente 0 solicitudes creadas por el usuario sin derecho"
+for op in receive deliver; do
+  T="$(meta_token "$JAR_L")"; [ -n "$T" ] || fail "sin token CSRF (meta) de la sesión sin derechos"
+  expect '403' "$(code "$JAR_L" -X POST "$P/request/$RID/$op" --data-urlencode "idempotency_key=e2e-low-$op-$MARK" \
+    --data-urlencode "_glpi_csrf_token=$T")" "POST /request/$RID/$op sin derecho operativo (CSRF válido)"
+done
+[ "$(detail_digest "$RID")" = "$SNAP" ] || fail "un POST operacional SIN derecho cambió la solicitud"
+echo "   ok: POST operacionales sin derecho ⇒ 403 y la solicitud no cambió"
 
 rm -rf "$TMP"
-echo "E2E OK: UI de Compras — GET/POST, CSRF, PRG, escape, ACL server-side (flujo HTTP real)."
+echo "E2E OK: UI de Compras — sesión, GET/POST (405), CSRF (403), PRG, escape, rechazo funcional (PRG), ACL server-side (403) — flujo HTTP real."

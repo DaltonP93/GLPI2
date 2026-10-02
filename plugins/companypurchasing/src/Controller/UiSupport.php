@@ -18,6 +18,7 @@ use GlpiPlugin\Companypurchasing\Menu;
 use GlpiPlugin\Companypurchasing\Service\SafeError;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 trait UiSupport
 {
@@ -46,7 +47,10 @@ trait UiSupport
         ];
     }
 
-    /** PRG: ejecuta la acción, deja el mensaje NATIVO (éxito o error seguro) y redirige con GET. */
+    /**
+     * PRG: ejecuta la acción AUTORIZADA, deja el mensaje NATIVO (éxito o rechazo funcional seguro) y redirige con GET.
+     * Un rechazo HTTP tipado (403/404, p. ej. el preflight de derecho) NUNCA se convierte en PRG: se propaga.
+     */
     protected function act(string $redirectPath, callable $fn): Response
     {
         try {
@@ -59,6 +63,8 @@ trait UiSupport
             if ($message !== '') {
                 Session::addMessageAfterRedirect(htmlescape($message), false, INFO);
             }
+        } catch (HttpExceptionInterface $e) {
+            throw $e;
         } catch (\Throwable $e) {
             \Toolbox::logInFile('companypurchasing', sprintf("UI action failed (%s): %s\n", get_class($e), \GlpiPlugin\Companypurchasing\Api\PurchasingIntegrationApi::sanitizeError($e->getMessage())));
             Session::addMessageAfterRedirect(htmlescape(SafeError::userMessage($e)), false, ERROR);

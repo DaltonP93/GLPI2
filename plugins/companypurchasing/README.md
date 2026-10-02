@@ -103,6 +103,7 @@ Compras `MANAGE_PURCHASING` para iniciar la compra; worker de integración **só
 | `Service/NotificationDispatcher` + `NotificationRules` + `NotificationSeeder` + `Model/NotificationTargetRequest` | Notificaciones **nativas** (`NotificationEvent::raiseEvent` → `QueuedNotification`): 10 eventos con plantillas/notificaciones sembradas sólo si faltan. Disparador = ledger del motor (listener en vivo + recorrido con cursor en la Acción automática). Como mucho una vez por hecho (`notify:<history_id>:<evento>`). Un fallo de envío **no revierte** el negocio (`notification.failed`). |
 | `Service/MetricsService` + `MetricsMath` | Tablero (`RIGHT_VIEW_METRICS`): solicitudes por estado/mes, montos solicitado/aprobado/comprado **separados por moneda** (exactos, sin float), desglose por entidad/departamento/categoría/proveedor, ciclo y duración por etapa (ledger del motor), recepción, inventario (outbox) y entrega. Aislamiento por entidad (`scopeEntities`). |
 | `Service/RequestQuery` / `RequestDetailBuilder` / `Labels` / `ConfigForm` | Listado con ACL server-side (`VIEW_OWN` ⇒ sólo propias; `VIEW_ENTITY` ⇒ su entidad); detalle consolidado; etiquetas i18n de estados/acciones/eventos; validación del formulario de configuración. |
+| `Service/RequestUiAccess` + `UiAccessException` | Lectura de UNA solicitud en la UI. `VIEW_*` es la lectura **general**. Una acción **actual** autorizada sobre **esa** solicitud (decisión del motor, compras, recepción, entrega o cierre) es la lectura **contextual**. Siempre exige la entidad. Usa los mismos predicados que las bandejas. Rechazo tipado: 404 / 403. |
 | `IntegrationLinkGateway` → `companyintegrations` `InventoryLinkApi` | Muestra en el detalle de la unidad la fase SI-4 y el activo GLPI vinculado mediante una API pública READ-ONLY de `companyintegrations` (sin SQL cross-plugin). |
 
 **Configuración P2D-4:** `delivery_max_units_per_batch` (1000), `inbox_scan_cap` (2000), `metrics_max_requests`
@@ -112,6 +113,17 @@ Compras `MANAGE_PURCHASING` para iniciar la compra; worker de integración **só
 **Perfiles P2D-4:** entregador `plugin_companypurchasing:RIGHT_DELIVER` (+ `plugin_companyworkflow:READ`);
 cierre `MANAGE_PURCHASING`; tablero `RIGHT_VIEW_METRICS`. El **destinatario** de una entrega debe tener un perfil en
 la entidad de la solicitud.
+
+**Lectura en la UI:** los perfiles operativos mínimos (`READ` + `RIGHT_RECEIVE` / `RIGHT_DELIVER` /
+`MANAGE_PURCHASING`, sin `VIEW_*`) y los aprobadores efectivos del motor abren **sólo** la solicitud que hoy pueden
+accionar, la misma que ven en su bandeja. Al terminar la acción, sin `VIEW_*`, dejan de verla (403). La búsqueda y el
+historial general siguen exigiendo `VIEW_OWN` / `VIEW_ENTITY`.
+
+**HTTP:**
+- sin el derecho mínimo de la acción (o sin la entidad de la solicitud) ⇒ **403**;
+- CSRF inválido ⇒ 403 (nativo);
+- acción autorizada rechazada por una regla de negocio ⇒ PRG + mensaje;
+- acción correcta ⇒ PRG.
 
 **Notificaciones:** el administrador ajusta destinatarios/plantillas en *Configuración → Notificaciones* (tipo
 "Solicitud de compra"); el plugin no envía correos por su cuenta ni tiene cola propia.

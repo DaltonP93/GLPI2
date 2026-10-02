@@ -26,6 +26,9 @@
  *   [LEGACY-DELIVERY]     instancia de una versión SIN fase de entrega: no se entrega, se reporta, no se muta.
  *   [P2D4-RIGHTS]         VIEW_OWN / VIEW_ENTITY / MANAGE_PURCHASING / RECEIVE / DELIVER / VIEW_METRICS en servicios de UI.
  *   [INBOX]               bandejas derivadas del motor (aprobaciones/compras/recepción/entrega), multi-entidad.
+ *   [UI-ACTIONABLE-READ]  lectura CONTEXTUAL (`RequestUiAccess`) con perfiles MÍNIMOS sin VIEW_*: la acción ACTUAL sobre
+ *                         ESA solicitud ⇒ bandeja + detalle; sin acción, otra etapa u otra entidad ⇒ 403; la búsqueda
+ *                         general no se amplía.
  *   [NOTIFY]              notificaciones NATIVAS en la cola `QueuedNotification` (destinatarios correctos), una vez por
  *                         hecho (listener + recorrido del ledger), el fallo de envío NO revierte el negocio.
  *   [METRICS]             conteos y montos EXACTOS (deltas), multi-moneda separada, aislamiento por entidad, 403.
@@ -47,6 +50,7 @@ use GlpiPlugin\Companypurchasing\Model\OutboxEntry;
 use GlpiPlugin\Companypurchasing\Model\PurchasingEvent;
 use GlpiPlugin\Companypurchasing\Model\ReceiptUnit;
 use GlpiPlugin\Companypurchasing\Model\Request;
+use GlpiPlugin\Companypurchasing\Service\ApprovalOrchestrator;
 use GlpiPlugin\Companypurchasing\Service\DeliveryException;
 use GlpiPlugin\Companypurchasing\Service\DeliveryRules;
 use GlpiPlugin\Companypurchasing\Service\DeliveryService;
@@ -60,9 +64,12 @@ use GlpiPlugin\Companypurchasing\Service\PurchasingWorkflow;
 use GlpiPlugin\Companypurchasing\Service\RequestDetailBuilder;
 use GlpiPlugin\Companypurchasing\Service\RequestManager;
 use GlpiPlugin\Companypurchasing\Service\RequestQuery;
+use GlpiPlugin\Companypurchasing\Service\RequestUiAccess;
+use GlpiPlugin\Companypurchasing\Service\UiAccessException;
 use GlpiPlugin\Companypurchasing\Service\WorkflowGateway;
 use GlpiPlugin\Companyworkflow\Model\HistoryEvent;
 use GlpiPlugin\Companyworkflow\Model\Instance;
+use GlpiPlugin\Companyworkflow\Model\WorkflowDef;
 
 trait DeliverySelftestScenarios
 {
@@ -94,6 +101,7 @@ trait DeliverySelftestScenarios
         $this->scenarioLegacyDelivery();
         $this->scenarioP2d4Rights();
         $this->scenarioInbox();
+        $this->scenarioUiActionableRead();
         $this->scenarioMetrics();
         $this->scenarioNotify();
         $this->scenarioE2eFull();
@@ -814,6 +822,118 @@ trait DeliverySelftestScenarios
         $this->check('[INBOX] entregada por completo ⇒ sale de entregas pendientes', !in_array($started, $ids((new InboxService())->box(InboxService::BOX_DELIVERY)), true));
         $this->asCloser($this->uBuyer);
         $this->check('[INBOX] y entra en Compras para el cierre (acción close del motor)', in_array($started, $ids((new InboxService())->box(InboxService::BOX_PURCHASING)), true));
+    }
+
+    // ================================================================ [UI-ACTIONABLE-READ]
+
+    /**
+     * Lectura CONTEXTUAL de la UI con perfiles MÍNIMOS reales (sin VIEW_OWN / VIEW_ENTITY). Cada caso usa el MISMO camino
+     * que la página de detalle (`RequestDetailBuilder::build` ⇒ `RequestUiAccess`): "ok", o el rechazo TIPADO
+     * (`denied` ⇒ 403, `not_found` ⇒ 404).
+     */
+    private function scenarioUiActionableRead(): void
+    {
+        $this->out->writeln('== [UI-ACTIONABLE-READ] lectura contextual: acción actual + solicitud + entidad (perfiles sin VIEW_*) ==');
+        $box = static fn (string $b): array => array_map(static fn (array $r): int => $r['id'], (new InboxService())->box($b));
+        $detail = static function (int $id): string {
+            try {
+                (new RequestDetailBuilder())->build($id);
+                return 'ok';
+            } catch (UiAccessException $e) {
+                return $e->kind;
+            } catch (\Throwable) {
+                return 'error'; // cualquier otro fallo NO es un rechazo tipado: la comprobación falla (no aborta)
+            }
+        };
+        $via = static function (int $id): ?string {
+            $r = new Request();
+            return $r->getFromDB($id) ? (new RequestUiAccess())->readVia($r) : null;
+        };
+        $searchDenied = fn (): bool => $this->throws(fn () => (new RequestQuery())->search([], RequestQuery::SCOPE_ENTITY, 500));
+        $minApprover = fn (int $u, ?array $ents = null) => $this->applySession($u, $ents ?? [$this->entityA], [
+            'plugin_companypurchasing' => READ,
+            'plugin_companyworkflow'   => READ | WorkflowDef::RIGHT_ACT,
+            'plugin_companysignature'  => ALLSTANDARDRIGHT,
+        ]);
+        $minOp = fn (int $u, int $bit, ?array $ents = null) => $this->applySession($u, $ents ?? [$this->entityA], [
+            'plugin_companypurchasing' => READ | $bit,
+            'plugin_companyworkflow'   => READ,
+        ]);
+        $denied = UiAccessException::DENIED;
+
+        // ---- B) aprobación: la autoridad es el motor (actionsForCurrentUser)
+        $req = $this->newSubmitted('uiread');            // PENDING_AREA_HEAD
+        $other = $this->newSubmitted('uiread-other');    // otra solicitud en la etapa del jefe
+        $minApprover($this->uHead1);
+        $row = array_values(array_filter((new InboxService())->box(InboxService::BOX_APPROVALS), static fn (array $r): bool => $r['id'] === $req))[0] ?? [];
+        $v = $detail($req) === 'ok' ? (new RequestDetailBuilder())->build($req) : [];
+        $this->check('[UI-ACTIONABLE-READ] aprobador asignado por el motor SIN VIEW_OWN/VIEW_ENTITY ⇒ aparece en "Para mí" y abre el detalle con approve/reject/return',
+            $row !== [] && $via($req) === RequestUiAccess::VIA_DECISION
+            && count(array_intersect($v['can']['decide'] ?? [], ApprovalOrchestrator::ACTIONS)) === 3 && count($v['lines'] ?? []) === 2);
+        $this->check('[UI-ACTIONABLE-READ] 🔒 el aprobador SIN VIEW_* no obtiene búsqueda / historial general', $searchDenied());
+        $minApprover($this->uFin);
+        $this->check('[UI-ACTIONABLE-READ] 🔒 aprobador de OTRA etapa ⇒ ni "Para mí" ni detalle (403)',
+            !in_array($req, $box(InboxService::BOX_APPROVALS), true) && $detail($req) === $denied);
+        $minApprover($this->uHead1, [$this->entityB]);
+        $this->check('[UI-ACTIONABLE-READ] 🔒 el aprobador con OTRA entidad activa ⇒ 403 (multi-entidad)', $detail($req) === $denied);
+        $minApprover($this->uHead1);
+        $this->orch()->decide($req, 'approve', $this->wfState($req), 'ok perfil mínimo');
+        $this->check('[UI-ACTIONABLE-READ] el aprobador SIN VIEW_* ejecuta la decisión (motor) ⇒ PURCHASING',
+            $this->wfState($req) === PurchasingWorkflow::S_PURCHASING);
+        $this->check('[UI-ACTIONABLE-READ] 🔒 ya decidida: sin acción ACTUAL el acceso contextual termina (403)', $detail($req) === $denied);
+
+        // ---- C) Compras: operación habilitada por el motor / la política pinneada
+        $minOp($this->uBuyer, Request::RIGHT_MANAGE_PURCHASING);
+        $this->check('[UI-ACTIONABLE-READ] RIGHT_MANAGE_PURCHASING SIN VIEW_* + cotización habilitada ⇒ bandeja de Compras + detalle',
+            in_array($req, $box(InboxService::BOX_PURCHASING), true) && $detail($req) === 'ok' && $via($req) === RequestUiAccess::VIA_PURCHASING);
+        $this->check('[UI-ACTIONABLE-READ] 🔒 misma sesión, solicitud NO accionable para Compras (id manual) ⇒ 403',
+            !in_array($other, $box(InboxService::BOX_PURCHASING), true) && $detail($other) === $denied);
+        $this->check('[UI-ACTIONABLE-READ] 🔒 Compras SIN VIEW_* no obtiene búsqueda / historial general', $searchDenied());
+
+        // ---- D) recepción
+        $started = $this->startedRequest('uiread-rcv', [['Switch', 2, 0]], ['70']); // IN_PURCHASE
+        $minOp($this->uReceiver, Request::RIGHT_RECEIVE);
+        $this->check('[UI-ACTIONABLE-READ] RIGHT_RECEIVE SIN VIEW_* + receive_* disponible ⇒ bandeja de recepción + detalle',
+            in_array($started, $box(InboxService::BOX_RECEIVING), true) && $detail($started) === 'ok' && $via($started) === RequestUiAccess::VIA_RECEIVING);
+        $this->check('[UI-ACTIONABLE-READ] 🔒 misma sesión, solicitudes NO recibibles (id manual) ⇒ 403',
+            $detail($req) === $denied && $detail($other) === $denied);
+        $this->recv()->receive($started, 'uiread-r-' . $this->suffix, [['items_id' => $this->lineIds($started)[0], 'quantity' => '2']]);
+        $this->check('[UI-ACTIONABLE-READ] 🔒 recibida por completo (sin receive_*) ⇒ el receptor SIN VIEW_* ya no la abre (403)',
+            $this->wfState($started) === PurchasingWorkflow::S_RECEIVED && $detail($started) === $denied);
+
+        // ---- E) entrega
+        $minOp($this->uDeliverer, Request::RIGHT_DELIVER);
+        $v = $detail($started) === 'ok' ? (new RequestDetailBuilder())->build($started) : [];
+        $this->check('[UI-ACTIONABLE-READ] RIGHT_DELIVER SIN VIEW_* + deliver_complete con unidades pendientes ⇒ bandeja de entregas + detalle con unidades',
+            in_array($started, $box(InboxService::BOX_DELIVERY), true) && $via($started) === RequestUiAccess::VIA_DELIVERY
+            && count($v['units'] ?? []) === 2 && ($v['can']['deliver'] ?? false) === true);
+        $this->check('[UI-ACTIONABLE-READ] 🔒 misma sesión, solicitudes NO entregables (id manual) ⇒ 403 y tampoco lee sus unidades',
+            $detail($req) === $denied && $detail($other) === $denied
+            && $this->kindOf(fn () => $this->dlv()->unitsWithGate($req)) === DeliveryException::ACL);
+        $minOp($this->uDeliverer, Request::RIGHT_DELIVER, [$this->entityB]);
+        $this->check('[UI-ACTIONABLE-READ] 🔒 entregador con OTRA entidad activa ⇒ 403 aunque haya entrega pendiente', $detail($started) === $denied);
+        $minOp($this->uDeliverer, Request::RIGHT_DELIVER);
+        $this->dlv()->deliver($started, $this->uuidsOf($started), $this->uRecipient, 'uiread-d-' . $this->suffix);
+        $this->check('[UI-ACTIONABLE-READ] 🔒 entregada por completo ⇒ el entregador SIN VIEW_* ya no la abre (403)', $detail($started) === $denied);
+
+        // ---- F) cierre
+        $minOp($this->uBuyer, Request::RIGHT_MANAGE_PURCHASING);
+        $v = $detail($started) === 'ok' ? (new RequestDetailBuilder())->build($started) : [];
+        $this->check('[UI-ACTIONABLE-READ] RIGHT_MANAGE_PURCHASING SIN VIEW_* + close disponible ⇒ bandeja de Compras + detalle con "cerrar"',
+            in_array($started, $box(InboxService::BOX_PURCHASING), true) && $via($started) === RequestUiAccess::VIA_PURCHASING
+            && ($v['can']['close'] ?? false) === true);
+        $this->dlv()->closeRequest($started, 'cierre perfil mínimo');
+        $this->check('[UI-ACTIONABLE-READ] 🔒 cerrada (sin acción actual) ⇒ 403 para Compras SIN VIEW_*', $detail($started) === $denied);
+        $this->check('[UI-ACTIONABLE-READ] id inexistente ⇒ 404 tipado (no 403)', $detail(2147483000) === UiAccessException::NOT_FOUND);
+
+        // ---- VIEW_* sigue siendo la lectura GENERAL (cualquier estado), sin cambios
+        $this->applySession($this->uMetrics, [$this->entityA], ['plugin_companypurchasing' => READ | Request::RIGHT_VIEW_ENTITY]);
+        $this->check('[UI-ACTIONABLE-READ] VIEW_ENTITY: lectura general de la entidad, también de una solicitud CERRADA',
+            $detail($started) === 'ok' && $via($started) === RequestUiAccess::VIA_VIEW);
+        $this->applySession($this->uMetrics, [$this->entityA], ['plugin_companypurchasing' => READ | Request::RIGHT_VIEW_OWN]);
+        $this->check('[UI-ACTIONABLE-READ] 🔒 VIEW_OWN sobre una ajena sin acción actual ⇒ 403', $detail($started) === $denied);
+        $this->asRequester();
+        $this->check('[UI-ACTIONABLE-READ] VIEW_OWN: el solicitante abre la SUYA en cualquier estado', $detail($started) === 'ok' && $via($started) === RequestUiAccess::VIA_VIEW);
     }
 
     // ================================================================ [METRICS]

@@ -314,14 +314,14 @@ class DeliveryService
     }
 
     /**
-     * Motivos que bloquean el cierre (lectura con ACL de vista). Vacío ⇒ lista para cerrar.
+     * Motivos que bloquean el cierre (lectura con la ACL de lectura de la UI: `RequestUiAccess`). Vacío ⇒ lista para cerrar.
      *
      * @return array{state:string, blockers:array<int,string>}
      */
     public function closeReadiness(int $requestId): array
     {
         $req = $this->loadRequest($requestId);
-        if (!(new RequestManager())->canView($req)) {
+        if (!(new RequestUiAccess($this->wf))->canRead($req)) {
             throw new DeliveryException(DeliveryException::ACL, 'sin permiso para ver la solicitud');
         }
         $inst = $this->wf->loadInstance((int) ($req->fields['workflow_instances_id'] ?? 0));
@@ -332,8 +332,9 @@ class DeliveryService
     }
 
     /**
-     * Unidades de la solicitud con su gate de inventario (lectura con ACL: vista de la solicitud, RECEIVE o DELIVER;
-     * entidad). NO expone `last_error`, tokens de lease ni datos técnicos del handoff.
+     * Unidades de la solicitud con su gate de inventario (lectura con la ACL de lectura de la UI, `RequestUiAccess`: vista
+     * general, o una acción ACTUAL sobre ESTA solicitud; nunca "RECEIVE/DELIVER ⇒ cualquier solicitud de la entidad").
+     * NO expone `last_error`, tokens de lease ni datos técnicos del handoff.
      *
      * @return array<int,array<string,mixed>>
      */
@@ -343,9 +344,7 @@ class DeliveryService
         global $DB;
         $req = $this->loadRequest($requestId);
         $this->assertEntity($req);
-        if (!(new RequestManager())->canView($req)
-            && !Session::haveRight(Request::$rightname, Request::RIGHT_DELIVER)
-            && !Session::haveRight(Request::$rightname, Request::RIGHT_RECEIVE)) {
+        if (!(new RequestUiAccess($this->wf))->canRead($req)) {
             throw new DeliveryException(DeliveryException::ACL, 'sin permiso para ver las unidades');
         }
         $rows = [];

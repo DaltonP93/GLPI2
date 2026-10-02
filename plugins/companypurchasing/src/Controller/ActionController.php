@@ -5,9 +5,14 @@
  *   - es POST (ninguna ruta GET muta) y pasa por el CSRF NATIVO de GLPI 11 (`CheckCsrfListener`; no se revalida aquí
  *     para no consumir el token dos veces);
  *   - exige sesión autenticada (`Firewall::STRATEGY_AUTHENTICATED`);
+ *   - PREFLIGHT HTTP grueso (`requireHttpRight` / `requireDecisionRight` / `requireGeneralRead`), ANTES del PRG: sin el
+ *     derecho mínimo de la acción, o sin acceso a la entidad de la solicitud ⇒ **403** tipado (solicitud inexistente
+ *     ⇒ 404). Para `decide` la autoridad es el motor (`actionsForCurrentUser`);
  *   - delega TODA regla (ACL, entidad, estado, idempotencia, concurrencia) al servicio de dominio existente
- *     (`RequestManager`, `ApprovalOrchestrator`, `QuoteManager`, `ReceivingService`, `DeliveryService`);
- *   - responde con PRG: mensaje nativo + redirect a una URL INTERNA construida en el servidor.
+ *     (`RequestManager`, `ApprovalOrchestrator`, `QuoteManager`, `ReceivingService`, `DeliveryService`), que vuelve a
+ *     comprobar todo: el preflight no reemplaza esas comprobaciones;
+ *   - acción autorizada (correcta o rechazada por una regla de negocio) ⇒ PRG: mensaje nativo seguro + redirect a una
+ *     URL INTERNA construida en el servidor.
  *
  * @license GPL-3.0-or-later
  */
@@ -28,9 +33,12 @@ use GlpiPlugin\Companypurchasing\Service\DeliveryService;
 use GlpiPlugin\Companypurchasing\Service\PluginConfig;
 use GlpiPlugin\Companypurchasing\Service\ReceivingService;
 use GlpiPlugin\Companypurchasing\Service\RequestManager;
+use GlpiPlugin\Companypurchasing\Service\WorkflowGateway;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\Routing\Attribute\Route;
 
 final class ActionController extends AbstractController
@@ -59,6 +67,7 @@ final class ActionController extends AbstractController
     #[Route('/request/create', name: 'cpur_request_create', methods: ['POST'])]
     public function create(Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_CREATE_REQUEST);
         return $this->act('/requests', function () use ($http): array {
             $in = $this->header($http);
             $in['entities_id'] = (int) $http->request->get('entities_id', (int) ($_SESSION['glpiactive_entity'] ?? 0));
@@ -72,6 +81,8 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/update', name: 'cpur_request_update', methods: ['POST'], requirements: ['id' => '\d+'])]
     public function update(int $id, Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_EDIT_DRAFT);
+        self::requireRequestInEntity($id);
         return $this->act('/request/' . $id . '/edit', function () use ($id, $http): string {
             (new RequestManager())->updateDraft($id, $this->header($http));
             return __('Request updated', 'companypurchasing');
@@ -82,6 +93,8 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/line/add', name: 'cpur_line_add', methods: ['POST'], requirements: ['id' => '\d+'])]
     public function addLine(int $id, Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_EDIT_DRAFT);
+        self::requireRequestInEntity($id);
         return $this->act('/request/' . $id . '/edit', function () use ($id, $http): string {
             (new RequestManager())->addLine($id, $this->line($http));
             return __('Line added', 'companypurchasing');
@@ -92,6 +105,8 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/line/{lineId}/update', name: 'cpur_line_update', methods: ['POST'], requirements: ['id' => '\d+', 'lineId' => '\d+'])]
     public function updateLine(int $id, int $lineId, Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_EDIT_DRAFT);
+        self::requireRequestInEntity($id);
         return $this->act('/request/' . $id . '/edit', function () use ($lineId, $http): string {
             (new RequestManager())->updateLine($lineId, $this->line($http));
             return __('Line updated', 'companypurchasing');
@@ -102,6 +117,8 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/line/{lineId}/remove', name: 'cpur_line_remove', methods: ['POST'], requirements: ['id' => '\d+', 'lineId' => '\d+'])]
     public function removeLine(int $id, int $lineId): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_EDIT_DRAFT);
+        self::requireRequestInEntity($id);
         return $this->act('/request/' . $id . '/edit', function () use ($lineId): string {
             (new RequestManager())->removeLine($lineId);
             return __('Line removed', 'companypurchasing');
@@ -114,6 +131,8 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/submit', name: 'cpur_request_submit', methods: ['POST'], requirements: ['id' => '\d+'])]
     public function submit(int $id, Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_EDIT_DRAFT);
+        self::requireRequestInEntity($id);
         return $this->act('/request/' . $id, function () use ($id, $http): string {
             (new ApprovalOrchestrator())->submit($id, $this->text($http, 'comment'));
             return __('Request submitted', 'companypurchasing');
@@ -124,6 +143,7 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/decide', name: 'cpur_request_decide', methods: ['POST'], requirements: ['id' => '\d+'])]
     public function decide(int $id, Request $http): Response
     {
+        self::requireDecisionRight($id); // la autoridad es el MOTOR (actionsForCurrentUser), no un derecho de Compras
         return $this->act('/request/' . $id, function () use ($id, $http): string {
             // `expected_state` = etapa que el usuario VIO al renderizar: si cambió, el orquestador no decide en otra.
             $r = (new ApprovalOrchestrator())->decide($id, (string) $http->request->get('decision', ''),
@@ -140,6 +160,8 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/quote/create', name: 'cpur_quote_create', methods: ['POST'], requirements: ['id' => '\d+'])]
     public function createQuote(int $id, Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_MANAGE_PURCHASING);
+        self::requireRequestInEntity($id);
         return $this->act('/request/' . $id, function () use ($id, $http): string {
             (new ApprovalOrchestrator())->createQuote($id, $this->quote($http) + ['suppliers_id' => (int) $http->request->get('suppliers_id', 0)]);
             return __('Quote created', 'companypurchasing');
@@ -150,6 +172,8 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/quote/{quoteId}/update', name: 'cpur_quote_update', methods: ['POST'], requirements: ['id' => '\d+', 'quoteId' => '\d+'])]
     public function updateQuote(int $id, int $quoteId, Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_MANAGE_PURCHASING);
+        self::requireRequestInEntity($id);
         return $this->act('/request/' . $id, function () use ($id, $quoteId, $http): string {
             $this->assertQuoteOf($quoteId, $id);
             (new ApprovalOrchestrator())->updateQuote($quoteId, $this->quote($http));
@@ -161,6 +185,8 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/quote/{quoteId}/select', name: 'cpur_quote_select', methods: ['POST'], requirements: ['id' => '\d+', 'quoteId' => '\d+'])]
     public function selectQuote(int $id, int $quoteId, Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_MANAGE_PURCHASING);
+        self::requireRequestInEntity($id);
         return $this->act('/request/' . $id, function () use ($id, $quoteId, $http): string {
             $expected = $http->request->get('lock_version');
             (new ApprovalOrchestrator())->selectQuote($id, $quoteId, $expected === null || $expected === '' ? null : (int) $expected);
@@ -172,12 +198,11 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/quote/{quoteId}/attach', name: 'cpur_quote_attach', methods: ['POST'], requirements: ['id' => '\d+', 'quoteId' => '\d+'])]
     public function attachQuoteDocument(int $id, int $quoteId, Request $http): Response
     {
-        return $this->act('/request/' . $id, function () use ($id, $quoteId, $http): string {
+        self::requireHttpRight(PurchaseRequest::RIGHT_MANAGE_PURCHASING);
+        $req = self::requireRequestInEntity($id);
+        return $this->act('/request/' . $id, function () use ($id, $quoteId, $http, $req): string {
             $this->assertQuoteOf($quoteId, $id);
-            if (!Session::haveRight(PurchaseRequest::$rightname, PurchaseRequest::RIGHT_MANAGE_PURCHASING)) {
-                throw new \RuntimeException('permiso denegado (MANAGE_PURCHASING)');
-            }
-            $docId = $this->storeUpload($http->files->get('document'), $id);
+            $docId = $this->storeUpload($http->files->get('document'), $req);
             (new ApprovalOrchestrator())->attachQuoteDocument($quoteId, $docId);
             return __('Document attached', 'companypurchasing');
         });
@@ -187,6 +212,8 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/purchase/start', name: 'cpur_purchase_start', methods: ['POST'], requirements: ['id' => '\d+'])]
     public function startPurchase(int $id, Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_MANAGE_PURCHASING);
+        self::requireRequestInEntity($id);
         return $this->act('/request/' . $id, function () use ($id, $http): string {
             (new ReceivingService())->startPurchase($id, $this->text($http, 'comment'));
             return __('Purchase started', 'companypurchasing');
@@ -199,6 +226,8 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/receive', name: 'cpur_receive', methods: ['POST'], requirements: ['id' => '\d+'])]
     public function receive(int $id, Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_RECEIVE);
+        self::requireRequestInEntity($id);
         return $this->act('/request/' . $id, function () use ($id, $http): string {
             $lines = [];
             foreach ((array) $http->request->all('qty') as $itemsId => $qty) {
@@ -219,6 +248,8 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/deliver', name: 'cpur_deliver', methods: ['POST'], requirements: ['id' => '\d+'])]
     public function deliver(int $id, Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_DELIVER);
+        self::requireRequestInEntity($id);
         return $this->act('/request/' . $id, function () use ($id, $http): string {
             $r = (new DeliveryService())->deliver($id, array_values(array_map('strval', (array) $http->request->all('units'))),
                 (int) $http->request->get('recipient_users_id', 0), (string) $http->request->get('idempotency_key', ''), $this->text($http, 'notes'));
@@ -230,6 +261,8 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/close', name: 'cpur_close', methods: ['POST'], requirements: ['id' => '\d+'])]
     public function close(int $id, Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_MANAGE_PURCHASING);
+        self::requireRequestInEntity($id);
         return $this->act('/request/' . $id, function () use ($id, $http): string {
             $r = (new DeliveryService())->closeRequest($id, $this->text($http, 'comment'));
             return $r['status'] === 'already_closed' ? __('The request was already closed', 'companypurchasing') : __('Request closed', 'companypurchasing');
@@ -240,6 +273,7 @@ final class ActionController extends AbstractController
     #[Route('/request/{id}/pdf/retry', name: 'cpur_pdf_retry', methods: ['POST'], requirements: ['id' => '\d+'])]
     public function retryPdf(int $id): Response
     {
+        self::requireGeneralRead($id); // misma ACL que ApprovalOrchestrator::retryPdf (VIEW_OWN / VIEW_ENTITY)
         return $this->act('/request/' . $id, function () use ($id): string {
             (new ApprovalOrchestrator())->retryPdf($id);
             return __('Approved PDF generation retried', 'companypurchasing');
@@ -252,10 +286,8 @@ final class ActionController extends AbstractController
     #[Route('/config/save', name: 'cpur_config_save', methods: ['POST'])]
     public function saveConfig(Request $http): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_MANAGE_CONFIG);
         return $this->act('/config', function () use ($http): string {
-            if (!Session::haveRight(PurchaseRequest::$rightname, PurchaseRequest::RIGHT_MANAGE_CONFIG)) {
-                throw new \RuntimeException('permiso denegado (MANAGE_CONFIG)');
-            }
             $values = ConfigForm::validate($http->request->all());
             foreach ($values as $key => $v) {
                 if (ConfigForm::KEYS[$key] === 'group' && (int) $v > 0 && !(new \Group())->getFromDB((int) $v)) {
@@ -271,10 +303,69 @@ final class ActionController extends AbstractController
     #[Route('/config/publish', name: 'cpur_config_publish', methods: ['POST'])]
     public function publish(): Response
     {
+        self::requireHttpRight(PurchaseRequest::RIGHT_MANAGE_CONFIG);
         return $this->act('/config', function (): string {
             (new ApprovalOrchestrator())->publishDefinition(); // MANAGE_CONFIG + fail-closed en el orquestador
             return __('A new workflow definition version was published', 'companypurchasing');
         });
+    }
+
+    // ---------------------------------------------------------------- preflight HTTP (403 TIPADO, antes del PRG)
+
+    /**
+     * Derecho HTTP MÍNIMO de la acción. Sin él ⇒ 403 (`AccessDeniedHttpException`), nunca PRG. Es un control GRUESO que
+     * NO reemplaza al dominio: el servicio vuelve a aplicar ACL, entidad, estado y reglas, y SUS rechazos (acción
+     * autorizada pero no permitida por una regla de negocio) sí terminan en PRG + mensaje seguro.
+     */
+    private static function requireHttpRight(int $bit): void
+    {
+        if (!Session::haveRight(PurchaseRequest::$rightname, $bit)) {
+            throw new AccessDeniedHttpException();
+        }
+    }
+
+    /** Solicitud de la ruta: inexistente ⇒ 404; su entidad no es accesible para la sesión ⇒ 403. */
+    private static function requireRequestInEntity(int $id): PurchaseRequest
+    {
+        $req = new PurchaseRequest();
+        if ($id <= 0 || !$req->getFromDB($id)) {
+            throw new NotFoundHttpException();
+        }
+        if (!Session::haveAccessToEntity((int) $req->fields['entities_id'])) {
+            throw new AccessDeniedHttpException();
+        }
+        return $req;
+    }
+
+    /**
+     * `decide`: la AUTORIDAD es companyworkflow. La sesión debe tener approve / reject / return sobre ESTA instancia
+     * (`actionsForCurrentUser`, misma lógica que `transition()`); si no ⇒ 403. Con alguna decisión disponible, el resto
+     * (acción concreta, etapa esperada, integridad) lo resuelve el orquestador (PRG).
+     */
+    private static function requireDecisionRight(int $id): void
+    {
+        $req = self::requireRequestInEntity($id);
+        $wf = new WorkflowGateway();
+        $inst = $wf->loadInstance((int) ($req->fields['workflow_instances_id'] ?? 0));
+        $mine = [];
+        if ($inst !== null) {
+            try {
+                $mine = $wf->actionsForCurrentUser($inst);
+            } catch (\Throwable) {
+                $mine = [];
+            }
+        }
+        if (array_intersect(ApprovalOrchestrator::ACTIONS, $mine) === []) {
+            throw new AccessDeniedHttpException();
+        }
+    }
+
+    /** Lectura GENERAL (VIEW_OWN / VIEW_ENTITY) de la solicitud; si no ⇒ 403. */
+    private static function requireGeneralRead(int $id): void
+    {
+        if (!(new RequestManager())->canView(self::requireRequestInEntity($id))) {
+            throw new AccessDeniedHttpException();
+        }
     }
 
     // ---------------------------------------------------------------- traducción HTTP → entrada de servicio
@@ -340,7 +431,7 @@ final class ActionController extends AbstractController
      * Archivo subido ⇒ `Document` NATIVO de la entidad de la solicitud (GLPI valida extensión/MIME con `DocumentType` y
      * lo mueve a su almacén). Nunca se guarda en tablas propias.
      */
-    private function storeUpload(mixed $file, int $requestId): int
+    private function storeUpload(mixed $file, PurchaseRequest $req): int
     {
         if (!$file instanceof UploadedFile || !$file->isValid()) {
             throw new \InvalidArgumentException('archivo inválido o ausente');
@@ -352,7 +443,6 @@ final class ActionController extends AbstractController
         if (\Document::isValidDoc($name) === '') {
             throw new \InvalidArgumentException('tipo de archivo no permitido');
         }
-        $req = (new RequestManager())->getViewable($requestId);
         $prefix = bin2hex(random_bytes(8)) . '_';
         $file->move(GLPI_TMP_DIR, $prefix . $name);
         $docId = (int) (new \Document())->add([

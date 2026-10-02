@@ -7,6 +7,9 @@
  *   - "mis solicitudes" (`RIGHT_VIEW_OWN`): sólo las propias (solicitante = usuario autenticado) en entidades activas.
  *   - alcance "entidad" (`RIGHT_VIEW_ENTITY`): todas las de las entidades activas.
  *
+ * Búsqueda / historial GENERAL: los derechos operativos (MANAGE / RECEIVE / DELIVER) y la condición de aprobador NO
+ * amplían este listado; dan sólo lectura CONTEXTUAL de la solicitud accionable (`RequestUiAccess`).
+ *
  * Las filas son de PRESENTACIÓN (etiquetas i18n, importes exactos); jamás exponen hashes, tokens ni claves internas.
  *
  * @license GPL-3.0-or-later
@@ -57,25 +60,6 @@ final class RequestQuery
             $rows[] = self::present($r);
         }
         return $rows;
-    }
-
-    /**
-     * Filas de presentación de solicitudes por id, sólo las VISIBLES para la sesión (`canView`: entidad + derecho).
-     *
-     * @param array<int,int> $ids
-     * @return array<int,array<string,mixed>>
-     */
-    public function presentIds(array $ids): array
-    {
-        $out = [];
-        $rm = new RequestManager();
-        foreach (array_unique(array_map('intval', $ids)) as $id) {
-            $req = new Request();
-            if ($id > 0 && $req->getFromDB($id) && $rm->canView($req)) {
-                $out[] = self::present($req->fields);
-            }
-        }
-        return $out;
     }
 
     /**

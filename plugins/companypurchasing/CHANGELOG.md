@@ -72,6 +72,33 @@ lectura para bandejas/notificaciones; con una versión anterior esas lecturas fa
     `[LEGACY-DELIVERY]`, `[P2D4-RIGHTS]`, `[INBOX]`, `[METRICS]`, `[NOTIFY]`, `[E2E-FULL]`;
   - probe `deliver` con procesos paralelos reales.
 
+### Fixed — ACL/UI (revisión del PR #20)
+- **Lectura contextual explícita** (`Service/RequestUiAccess`):
+  - `VIEW_OWN` / `VIEW_ENTITY` siguen siendo la lectura **general** (listados, búsqueda, historial).
+  - Una acción **actual** autorizada da lectura de **esa** solicitud, siempre con acceso a su entidad. Cuenta como
+    acción actual: una decisión del motor, una operación de compras habilitada, recepción, entrega o cierre.
+  - Las bandejas usan los **mismos** predicados: una solicitud aparece en la bandeja si y solo si se puede abrir su
+    detalle.
+  - Antes, la bandeja "Para mí" (y el detalle) exigían `VIEW_*`, y podían ocultar la solicitud a su aprobador efectivo.
+  - Los derechos operativos ya no son un `VIEW_ENTITY` implícito: `DeliveryService::unitsWithGate` dejaba a
+    cualquier titular de RECEIVE o DELIVER leer las unidades de cualquier solicitud de la entidad.
+  - Rechazo tipado `UiAccessException`: inexistente ⇒ 404, sin lectura ⇒ 403, sin interpretar el texto del mensaje.
+- **POST sin derecho ⇒ 403, no PRG:**
+  - Preflight HTTP grueso en `ActionController`, antes del PRG: derecho mínimo de cada acción y entidad de la
+    solicitud. Para `decide`, la autoridad es el motor (`actionsForCurrentUser`).
+  - `act()` propaga los rechazos HTTP tipados. Solo los rechazos funcionales de una acción autorizada terminan en
+    PRG + mensaje seguro.
+  - El preflight no reemplaza las comprobaciones del dominio.
+- Tests:
+  - selftest `[UI-ACTIONABLE-READ]`, 22 comprobaciones con perfiles mínimos reales sin `VIEW_*`: aprobador, Compras,
+    receptor, entregador, otra etapa, otra entidad, id manual no accionable ⇒ 403, inexistente ⇒ 404, `VIEW_*`
+    intacto;
+  - guards estáticos `[HTTP-403]`;
+  - E2E HTTP: POST sin `CREATE_REQUEST` con CSRF válido ⇒ 403 y 0 creadas; `/receive` y `/deliver` sin derecho ⇒ 403
+    sin cambios; rechazo funcional autorizado ⇒ PRG sin cambios; control positivo del token CSRF;
+  - mutantes: DELIVER con acceso a toda la entidad, "Para mí" filtrada por `canView`, RECEIVE sin acción actual y
+    lectura contextual sin chequeo de entidad.
+
 ### Changed
 - `RIGHT_DELIVER` (256) y `RIGHT_VIEW_METRICS` (512) pasan a estar activos.
 - `uninstall()` elimina también `delivery_batches` y las notificaciones/plantillas nativas del tipo.

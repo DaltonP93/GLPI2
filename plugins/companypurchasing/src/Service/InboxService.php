@@ -10,8 +10,9 @@
  *   - Recepciones pendientes (`RIGHT_RECEIVE`): acción `receive_partial` / `receive_complete` disponible.
  *   - Entregas pendientes (`RIGHT_DELIVER`): acción `deliver_complete` disponible y unidades aún sin entregar.
  *
- * Multi-entidad fail-closed: sólo entidades ACTIVAS de la sesión; cada fila se presenta con `canView` o con el
- * derecho operativo de la bandeja.
+ * Multi-entidad fail-closed: sólo entidades ACTIVAS de la sesión. Los predicados son los de `RequestUiAccess`: una fila
+ * de una bandeja es exactamente una solicitud que la sesión puede ABRIR por lectura contextual (y viceversa). La
+ * bandeja "Para mí" no exige VIEW_OWN / VIEW_ENTITY: basta que el MOTOR confirme la decisión pendiente.
  *
  * @license GPL-3.0-or-later
  */
@@ -21,7 +22,6 @@ declare(strict_types=1);
 namespace GlpiPlugin\Companypurchasing\Service;
 
 use Session;
-use GlpiPlugin\Companypurchasing\Model\ReceiptUnit;
 use GlpiPlugin\Companypurchasing\Model\Request;
 
 final class InboxService
@@ -35,12 +35,12 @@ final class InboxService
     private const NOT_OPEN = [PurchasingWorkflow::S_DRAFT, PurchasingWorkflow::S_REJECTED, PurchasingWorkflow::S_CANCELLED, PurchasingWorkflow::S_CLOSED];
 
     private WorkflowGateway $wf;
-    private PolicyStore $policies;
+    private RequestUiAccess $access;
 
     public function __construct(?WorkflowGateway $wf = null)
     {
         $this->wf = $wf ?? new WorkflowGateway();
-        $this->policies = new PolicyStore();
+        $this->access = new RequestUiAccess($this->wf);
     }
 
     /** Bandejas visibles para la sesión (según derechos). @return array<int,string> */
@@ -65,14 +65,11 @@ final class InboxService
         return match ($box) {
             self::BOX_APPROVALS  => $this->approvals(),
             self::BOX_PURCHASING => $this->operational(Request::RIGHT_MANAGE_PURCHASING, fn (Request $r, array $acts, string $st): bool
-                => array_intersect($acts, [PurchasingWorkflow::A_START_PURCHASE, PurchasingWorkflow::A_CLOSE]) !== []
-                    || (empty($r->fields['purchase_started_at']) && $this->quoteStage($r, $st))),
+                => $this->access->purchasingActionable($r, $acts, $st)),
             self::BOX_RECEIVING  => $this->operational(Request::RIGHT_RECEIVE, static fn (Request $r, array $acts, string $st): bool
-                => !empty($r->fields['purchase_started_at'])
-                    && array_intersect($acts, [PurchasingWorkflow::A_RECEIVE_PARTIAL, PurchasingWorkflow::A_RECEIVE_COMPLETE]) !== []),
+                => RequestUiAccess::receivingActionable($r, $acts)),
             self::BOX_DELIVERY   => $this->operational(Request::RIGHT_DELIVER, static fn (Request $r, array $acts, string $st): bool
-                => in_array(PurchasingWorkflow::A_DELIVER_COMPLETE, $acts, true)
-                    && countElementsInTable(ReceiptUnit::getTable(), ['requests_id' => (int) $r->getID(), 'physical_state' => ReceiptUnit::PHYSICAL_RECEIVED]) > 0),
+                => RequestUiAccess::deliveryActionable($r, $acts)),
             default              => throw new \RuntimeException('bandeja desconocida'),
         };
     }
@@ -85,10 +82,15 @@ final class InboxService
         foreach ($pending as $p) {
             $byId[(int) $p['items_id']] = $p['actions'];
         }
+        // Lectura CONTEXTUAL (no `canView`): el aprobador efectivo puede no tener VIEW_OWN / VIEW_ENTITY.
         $rows = [];
-        foreach ((new RequestQuery())->presentIds(array_keys($byId)) as $row) {
-            $row['actions'] = $byId[$row['id']] ?? [];
-            $rows[] = $row;
+        foreach ($byId as $id => $actions) {
+            $req = new Request();
+            if ($id > 0 && $req->getFromDB($id) && $this->access->canRead($req)) {
+                $row = RequestQuery::present($req->fields);
+                $row['actions'] = $actions;
+                $rows[] = $row;
+            }
         }
         return $rows;
     }
@@ -137,15 +139,5 @@ final class InboxService
             }
         }
         return $rows;
-    }
-
-    /** ¿El estado del motor es uno donde la política PINNEADA de la solicitud habilita cotizar? */
-    private function quoteStage(Request $req, string $state): bool
-    {
-        try {
-            return in_array($state, $this->policies->forRequest($req)->quoteStates(), true);
-        } catch (\Throwable) {
-            return false;
-        }
     }
 }

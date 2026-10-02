@@ -5,7 +5,8 @@
  * aprobaciones/historial, PDFs/evidencias, recepción, unidades físicas, integración de inventario, entrega, cierre y
  * auditoría. SÓLO LECTURA.
  *
- * Seguridad: exige `canView` (entidad + VIEW_OWN/VIEW_ENTITY). Los permisos de cada acción (`can.*`) se DERIVAN de las
+ * Seguridad: exige la lectura de `RequestUiAccess` (entidad + VIEW_OWN/VIEW_ENTITY, o una acción ACTUAL autorizada sobre
+ * ESTA solicitud: decisión del motor, compras, recepción o entrega). Los permisos de cada acción (`can.*`) se DERIVAN de las
  * acciones del MOTOR (`availableActions` / `actionsForCurrentUser`) ∩ el derecho de dominio — nunca de `domain_state`.
  * Estos `can.*` sólo deciden qué formulario mostrar: cada POST vuelve a pasar por el servicio de dominio, que aplica
  * ACL, entidad y estado (fail-closed). Nunca expone tokens, lease, hashes internos ni errores técnicos.
@@ -35,12 +36,12 @@ final class RequestDetailBuilder
 
     /**
      * @return array<string,mixed>
-     * @throws \RuntimeException sin permiso de vista / inexistente (fail-closed)
+     * @throws UiAccessException inexistente / sin lectura general ni contextual (fail-closed)
      */
     public function build(int $requestId): array
     {
         $rm  = new RequestManager();
-        $req = $rm->getViewable($requestId);
+        $req = (new RequestUiAccess($this->wf))->getReadable($requestId);
         $id  = (int) $req->getID();
         $f   = $req->fields;
         $me  = (int) (Session::getLoginUserID() ?: 0);
@@ -273,7 +274,9 @@ final class RequestDetailBuilder
             'deliveries' => $deliveries,
             'blockers'   => $blockers,
             'audit'      => $audit,
-            'pdf_retry'  => array_filter($versions, static fn (array $v): bool => in_array($v['pdf_status'], [DocumentVersionAllocator::PDF_ERROR, DocumentVersionAllocator::PDF_PENDING], true)) !== [],
+            // Reintentar el PDF exige la lectura GENERAL (misma ACL que `ApprovalOrchestrator::retryPdf`).
+            'pdf_retry'  => $rm->canView($req)
+                && array_filter($versions, static fn (array $v): bool => in_array($v['pdf_status'], [DocumentVersionAllocator::PDF_ERROR, DocumentVersionAllocator::PDF_PENDING], true)) !== [],
         ];
     }
 

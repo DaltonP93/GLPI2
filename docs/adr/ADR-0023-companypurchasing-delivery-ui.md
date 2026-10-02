@@ -118,6 +118,53 @@ incorrecta. Sin tocar el core, `MethodGuardController` declara una ruta GET/HEAD
 estático exige que cubra todas las acciones y ninguna página. El mismo comportamiento del core afecta a las rutas
 POST de otros plugins (p. ej. `companyqr`, `companyworkflow`); queda como seguimiento fuera de P2D-4.
 
+**Lectura: general vs. contextual (aclaración de revisión).**
+- `VIEW_OWN` / `VIEW_ENTITY` = **lectura general**: listados, búsqueda, historial y detalle en cualquier estado
+  (`RequestManager::canView`, `RequestQuery::search`). Nada de lo que sigue amplía esa lectura.
+- **Acción actual autorizada = lectura contextual de ESA solicitud** (`RequestUiAccess`), mientras la acción exista:
+  - (B) el motor ofrece a la sesión approve / reject / return sobre esa instancia (`actionsForCurrentUser`);
+  - (C) `MANAGE_PURCHASING` y una operación de compras habilitada: `start_purchase`, o cotizar según la política
+    pinneada antes de iniciar la compra;
+  - (D) `RIGHT_RECEIVE` y `receive_*` disponibles;
+  - (E) `RIGHT_DELIVER` y `deliver_complete` con unidades sin entregar;
+  - (F) `MANAGE_PURCHASING` y `close` disponible.
+- Siempre se exige además acceso a la entidad de la solicitud. Los predicados son los mismos que arman las bandejas:
+  "aparece en mi bandeja" ⇔ "puedo abrir el detalle".
+- Un derecho operativo **nunca** es un `VIEW_ENTITY` implícito: decidida, recibida, entregada o cerrada la solicitud,
+  quien no tiene `VIEW_*` deja de poder abrirla (403).
+- El aprobador asignado por el motor la ve en "Para mí", abre el detalle y decide aunque no tenga `VIEW_*`.
+- Los helpers de lectura que usa el detalle (`DeliveryService::unitsWithGate` / `closeReadiness`) usan la misma
+  política. Antes, `unitsWithGate` dejaba a cualquier titular de RECEIVE o DELIVER leer las unidades de cualquier
+  solicitud de la entidad.
+- Rechazo tipado (`UiAccessException`): inexistente ⇒ 404, sin lectura ⇒ 403; nunca se interpreta el texto del mensaje.
+
+**Respuesta HTTP de las acciones (regla).**
+
+| Caso | Respuesta |
+|---|---|
+| Sin autenticación | mecanismo nativo de GLPI |
+| CSRF ausente, inválido o reutilizado | 403 (nativo) |
+| Sesión autenticada sin el derecho HTTP mínimo de la acción, o sin acceso a la entidad de la solicitud | **403** |
+| Solicitud inexistente | 404 |
+| Acción autorizada pero rechazada por una regla de negocio | PRG + mensaje seguro |
+| Acción correcta | PRG |
+
+El derecho mínimo lo verifica un preflight tipado en `ActionController`, **antes** del PRG:
+
+| Acción | Derecho mínimo |
+|---|---|
+| `create` | `CREATE_REQUEST` |
+| `update`, líneas, `submit` | `EDIT_DRAFT` |
+| cotizaciones, `purchase/start`, `close` | `MANAGE_PURCHASING` |
+| `receive` | `RIGHT_RECEIVE` |
+| `deliver` | `RIGHT_DELIVER` |
+| `config/*` | `MANAGE_CONFIG` |
+| `pdf/retry` | lectura general |
+| `decide` | autoridad del motor: approve / reject / return disponible para la sesión sobre esa instancia |
+
+El preflight es grueso: no reemplaza las comprobaciones del dominio, que el servicio vuelve a aplicar. `act()` propaga
+cualquier rechazo HTTP tipado y solo convierte en PRG los rechazos funcionales de una acción autorizada.
+
 ### 9. Notificaciones NATIVAS
 `NotificationTargetRequest` (namespace del modelo) + plantillas/notificaciones sembradas en `install()` sólo si
 faltan (idempotente; nunca pisa lo que el administrador ajustó). Eventos: `request_submitted`,
