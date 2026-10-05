@@ -1,5 +1,8 @@
 # Diseño técnico — `companyworkflow` (motor reusable)
 
+> **Estado (baseline de Fase 2, `main` `6c7d994`):** **implementado** (PR #5; `companyworkflow` 0.6.0). Este documento es el **diseño previo** y se conserva
+> como registro: ante cualquier diferencia mandan el código y `../releases/phase2-baseline.md`.
+
 Complementa `../adr/ADR-0012-companyworkflow.md`. **Diseño, sin implementación.** Todo vía
 plugin + APIs/hooks/notificaciones **soportados**. **Sin tocar el core** (Regla 0).
 

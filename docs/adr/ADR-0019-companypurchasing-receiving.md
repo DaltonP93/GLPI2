@@ -1,6 +1,7 @@
 # ADR-0019: `companypurchasing` P2D-3 — recepción física, costo por unidad y handoff a SI-4
 
-- **Estado:** Propuesto (implementado en P2D-3; pendiente de revisión humana)
+- **Estado:** Aceptado — implementado en P2D-3 y mergeado con aprobación humana: PR #16 (`3a30e18`).
+  *(Estado original: "Propuesto (implementado en P2D-3; pendiente de revisión humana)".)*
 - **Fecha:** 2026-09-25
 - **Decisores:** Producto, Compras, finanzas, seguridad, plataforma
 - **Módulo/área:** `plugins/companypurchasing` (0.3.0 → 0.4.0)

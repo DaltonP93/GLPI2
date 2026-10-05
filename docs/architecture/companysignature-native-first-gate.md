@@ -1,5 +1,8 @@
 # Gate native-first — `companysignature` (Fase 2C)
 
+> **Estado (baseline de Fase 2, `main` `6c7d994`):** aprobado e **implementado** (PR #10; `companysignature` 0.5.0). Este documento es el **diseño previo** y se conserva
+> como registro: ante cualquier diferencia mandan el código y `../releases/phase2-baseline.md`.
+
 > **Documento de decisión previa a implementar. NO contiene lógica.**
 > Objetivo: confirmar el diseño aprobado (ADR-0014 + `companysignature-technical-design.md`)
 > contra el **proceso native-first** (Configurar → Plugin existente → Extender → Integrar →

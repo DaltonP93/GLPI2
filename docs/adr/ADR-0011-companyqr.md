@@ -1,6 +1,7 @@
 # ADR-0011: `companyqr` — QR por activo, ficha segura y reporte de problema
 
-- **Estado:** Aceptado (diseño); implementación pendiente de aprobación del diseño detallado.
+- **Estado:** Aceptado — **implementado**: Fase 1, PR #3 (`a22e33a`); API pública `CompanyQrApi` en SI4-3, PR #19 (`9382ef2`). Baseline de Fase 2: `companyqr` 0.3.0 (`docs/releases/phase2-baseline.md`).
+  *(Estado original: "Aceptado (diseño); implementación pendiente de aprobación del diseño detallado".)*
 - **Fecha:** 2026-09-11
 - **Decisores:** Producto, seguridad, plataforma
 - **Módulo/área:** `plugins/companyqr` (Fase 1)

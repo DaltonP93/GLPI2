@@ -1,5 +1,8 @@
 # Diseño técnico — `companysignature`
 
+> **Estado (baseline de Fase 2, `main` `6c7d994`):** **implementado** (PR #10; `companysignature` 0.5.0). Este documento es el **diseño previo** y se conserva
+> como registro: ante cualquier diferencia mandan el código y `../releases/phase2-baseline.md`.
+
 Complementa `../adr/ADR-0014-companysignature.md`. **Diseño, sin implementación.** Reutiliza
 identidad/sesión/`Log`/TCPDF nativos. **Sin tocar el core.**
 

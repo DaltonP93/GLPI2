@@ -1,5 +1,8 @@
 # Plan de pruebas — integración Snipe-IT (SI-1 y mandatorias)
 
+> **Estado (baseline de Fase 2, `main` `6c7d994`):** SI-1 **implementado** (PR #6) y SI-4 **implementado** (PR #17, #18 y #19) con el worker **deshabilitado** (`si4_enabled = 0`). Este documento es el **diseño previo** y se conserva
+> como registro: ante cualquier diferencia mandan el código y `../releases/phase2-baseline.md`.
+
 **Diseño, sin implementación.** Mismo rigor de 3 niveles que Fase 1 (unit · integración
 fail-closed · E2E). Las pruebas de integración usan un **Snipe-IT sandbox** o un **stub HTTP**
 del cliente (nunca la DB de Snipe).

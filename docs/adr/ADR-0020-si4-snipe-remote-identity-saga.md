@@ -1,6 +1,7 @@
 # ADR-0020: SI-4 (incremento SI4-1) — identidad remota determinista en Snipe-IT y saga durable por unidad
 
-- **Estado:** Propuesto (SI4-1 implementado; pendiente de revisión humana)
+- **Estado:** Aceptado — SI4-1 implementado y mergeado con aprobación humana: PR #17 (`15cefa5`). El worker SI-4 sigue **deshabilitado** (`si4_enabled = 0`): ver `docs/operations/si4-readiness.md`.
+  *(Estado original: "Propuesto (SI4-1 implementado; pendiente de revisión humana)".)*
 - **Fecha:** 2026-09-29
 - **Decisores:** Producto, TI/activos, seguridad, plataforma
 - **Módulo/área:** `plugins/companyintegrations` (0.2.0 → 0.3.0)

@@ -1,6 +1,7 @@
 # ADR-0023: `companypurchasing` P2D-4 — entrega física, cierre, UI, bandejas, notificaciones nativas y métricas
 
-- **Estado:** Propuesto (implementado en P2D-4; pendiente de revisión humana)
+- **Estado:** Aceptado — implementado en P2D-4 y mergeado con aprobación humana: PR #20 (`6c7d994`).
+  *(Estado original: "Propuesto (implementado en P2D-4; pendiente de revisión humana)".)*
 - **Fecha:** 2026-10-01
 - **Decisores:** Producto, Compras, finanzas, seguridad, plataforma
 - **Módulo/área:** `plugins/companypurchasing` (0.4.0 → 0.5.0) y `plugins/companyworkflow` (0.5.0 → 0.6.0, sólo

@@ -1,6 +1,7 @@
 # ADR-0012: `companyworkflow` — motor de workflow configurable y reusable
 
-- **Estado:** Aceptado (diseño); implementación pendiente de aprobación humana.
+- **Estado:** Aceptado — **implementado**: Fase 2A, PR #5 (`7d7fa70`); extendido en los PR #10, #15 y #20. Baseline de Fase 2: `companyworkflow` 0.6.0 (`docs/releases/phase2-baseline.md`).
+  *(Estado original: "Aceptado (diseño); implementación pendiente de aprobación humana".)*
 - **Fecha:** 2026-09-14
 - **Decisores:** Producto, seguridad, plataforma
 - **Módulo/área:** `plugins/companyworkflow` (Fase 2)

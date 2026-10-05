@@ -1,5 +1,8 @@
 # Integración Fase 2 — compras · workflow · firma (+ inventario/companyqr, API/eventos, IA/WhatsApp)
 
+> **Estado (baseline de Fase 2, `main` `6c7d994`):** **implementado** (workflow PR #5, firma PR #10, Compras PR #12 a #20; SI-4 con el worker **deshabilitado**). Este documento es el **diseño previo** y se conserva
+> como registro: ante cualquier diferencia mandan el código y `../releases/phase2-baseline.md`.
+
 Cómo se relacionan los tres plugins de Fase 2 entre sí, con GLPI nativo y con `companyqr`.
 **Diseño, sin implementación.** **Sin tocar el core.**
 
