@@ -139,4 +139,57 @@ class WorkflowGateway
     {
         return $instanceId > 0 ? $this->api()->history(['instances_id' => $instanceId]) : [];
     }
+
+    // ---------------------------------------------------------------- P2D-4: lectura para bandejas/notificaciones/métricas
+    // (API de SÓLO LECTURA de companyworkflow >= 0.6.0; fail-closed si el motor instalado no la ofrece).
+
+    /** Acciones que la sesión ACTUAL puede ejecutar ahora (ACL + entidad + aprobador efectivo + voto). @return array<int,string> */
+    public function actionsForCurrentUser(Instance $inst): array
+    {
+        return $this->apiWith('actionsForCurrentUser')->actionsForCurrentUser($inst);
+    }
+
+    /** @return array<int,array{instances_id:int, items_id:int, entities_id:int, state_code:string, actions:array<int,string>}> */
+    public function pendingDecisionsForCurrentUser(string $itemtype, int $limit, int $scanCap): array
+    {
+        return $this->apiWith('pendingDecisionsForCurrentUser')->pendingDecisionsForCurrentUser($itemtype, $limit, $scanCap);
+    }
+
+    /** Aprobadores EFECTIVOS de la etapa actual. @return array<int,int> */
+    public function currentApprovers(Instance $inst): array
+    {
+        return $this->apiWith('currentApprovers')->currentApprovers($inst);
+    }
+
+    /** @return array<string,mixed>|null */
+    public function historyById(int $historyId): ?array
+    {
+        return $historyId > 0 ? $this->api()->historyById($historyId) : null;
+    }
+
+    /** Filas del ledger posteriores a `$sinceId` (orden causal). @param array<int,string> $events @return array<int,array<string,mixed>> */
+    public function historySince(int $sinceId, array $events, int $limit): array
+    {
+        return $this->api()->history(['since_id' => max(0, $sinceId), 'events' => $events, 'limit' => max(1, $limit)]);
+    }
+
+    /** Ledger de VARIAS instancias (métricas por etapa). @param array<int,int> $instanceIds @param array<int,string> $events @return array<int,array<string,mixed>> */
+    public function historyFor(array $instanceIds, array $events): array
+    {
+        $ids = array_values(array_filter(array_map('intval', $instanceIds), static fn (int $i): bool => $i > 0));
+        if ($ids === []) {
+            return [];
+        }
+        $this->apiWith('lastHistoryId');
+        return $this->api()->history(['instances_ids' => $ids, 'events' => $events]);
+    }
+
+    private function apiWith(string $method): WorkflowApi
+    {
+        $api = $this->api();
+        if (!method_exists($api, $method)) {
+            throw new \RuntimeException("companyworkflow >= 0.6.0 requerido ({$method}) (fail-closed)");
+        }
+        return $api;
+    }
 }

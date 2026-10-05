@@ -1,0 +1,15 @@
+{% extends "layout/page_without_tabs.html.twig" %}
+
+{% block content_title %}{{ title }}{% endblock %}
+
+{% block content_body %}
+   {{ include('@companypurchasing/parts/nav.html.twig') }}
+
+   <ul class="nav nav-pills mb-3">
+      {% for key, label in tabs %}
+         <li class="nav-item"><a class="nav-link {{ key == box ? 'active' : '' }}" href="{{ base }}/inbox/{{ key }}">{{ label }}</a></li>
+      {% endfor %}
+   </ul>
+
+   {{ include('@companypurchasing/parts/request_table.html.twig', {show_actions: box == 'approvals'}) }}
+{% endblock %}

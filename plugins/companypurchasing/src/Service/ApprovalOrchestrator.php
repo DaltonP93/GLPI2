@@ -659,7 +659,9 @@ class ApprovalOrchestrator
      * la Acción automática nativa corre con el contexto de sistema de la CronTask) y REPORTA sin mutar:
      * sincronización aún pendiente (`receiving_pending`, p. ej. CLI sin sesión), anomalías no convergibles
      * (`receiving_anomaly`) e instancias iniciadas bajo una versión ANTERIOR de la definición, sin fase de compra
-     * (`legacy`; `legacy_blocked` si ya están en APPROVED y no pueden avanzar). Idempotente.
+     * (`legacy`; `legacy_blocked` si ya están en APPROVED y no pueden avanzar). P2D-4: la saga física converge también
+     * la entrega total (RECEIVED → DELIVERED) y se reportan instancias sin fase de entrega (`legacy`;
+     * `legacy_blocked` si ya recibieron todo y no pueden registrar la entrega). Idempotente.
      *
      * @return array{state:string, corrected:bool, linked:bool, orphan:bool, dirty:bool, receiving_pending:bool,
      *               receiving_anomaly:?string, legacy:bool, legacy_blocked:bool}
@@ -679,6 +681,13 @@ class ApprovalOrchestrator
             $pending = $sync['status'] === ReceivingSync::ST_PENDING;
             $anomaly = $sync['anomaly'];
             $r['to'] = $sync['state'] !== '' ? $sync['state'] : $r['to'];
+            // P2D-4: instancia de una versión ANTERIOR sin fase de ENTREGA (P2D-3): se reporta, no se migra; queda
+            // BLOQUEADA si ya recibió todo y no puede registrar la entrega.
+            $inst = $this->instanceFor($req, false);
+            if ($inst !== null && $this->wf->isOpen($inst) && !$this->wf->definitionHasAction($inst, PurchasingWorkflow::A_DELIVER_COMPLETE)) {
+                $legacy = true;
+                $blocked = $this->wf->stateCode($inst) === PurchasingWorkflow::S_RECEIVED;
+            }
         } else {
             $inst = $this->instanceFor($req, false);
             if ($inst !== null && $this->wf->isOpen($inst) && !$this->wf->definitionHasAction($inst, PurchasingWorkflow::A_START_PURCHASE)) {

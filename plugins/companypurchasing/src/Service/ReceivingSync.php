@@ -1,7 +1,7 @@
 <?php
 
 /**
- * SAGA idempotente que lleva el estado del MOTOR a reflejar los CONTADORES FÍSICOS de recepción (P2D-3).
+ * SAGA idempotente que lleva el estado del MOTOR a reflejar los HECHOS FÍSICOS: recepción (P2D-3) y entrega (P2D-4).
  *
  * Autoridades (no se mezclan):
  *   - `companyworkflow` es la autoridad del ESTADO (IN_PURCHASE / PARTIALLY_RECEIVED / RECEIVED).
@@ -20,6 +20,11 @@
  * PARTIALLY_RECEIVED; todas las líneas completas ⇒ RECEIVED. Motor "adelantado", fuera de la fase o con una
  * versión de definición anterior sin fase de compra ⇒ ANOMALÍA reportada (sin mutar nada).
  *
+ * P2D-4 (`PurchasingWorkflow::physicalTarget`): TODAS las unidades entregadas ⇒ DELIVERED (`deliver_complete`,
+ * condición `delivery_bound`). Marcador durable propio: `requests.delivery_seq` (se incrementa en la MISMA
+ * transacción que cada lote de entrega) / `requests.delivery_synced_seq`. Una instancia CERRADA (CLOSED) con todo
+ * entregado está convergida. Una versión de definición sin la acción requerida ⇒ anomalía `legacy_definition`.
+ *
  * @license GPL-3.0-or-later
  */
 
@@ -28,6 +33,7 @@ declare(strict_types=1);
 namespace GlpiPlugin\Companypurchasing\Service;
 
 use GlpiPlugin\Companypurchasing\Model\PurchasingEvent;
+use GlpiPlugin\Companypurchasing\Model\ReceiptUnit;
 use GlpiPlugin\Companypurchasing\Model\Request;
 use GlpiPlugin\Companypurchasing\Model\RequestItem;
 
@@ -71,7 +77,8 @@ class ReceivingSync
     public static function isPending(Request $req): bool
     {
         return !empty($req->fields['purchase_started_at'])
-            && (int) ($req->fields['receiving_seq'] ?? 0) > (int) ($req->fields['receiving_synced_seq'] ?? 0);
+            && ((int) ($req->fields['receiving_seq'] ?? 0) > (int) ($req->fields['receiving_synced_seq'] ?? 0)
+                || (int) ($req->fields['delivery_seq'] ?? 0) > (int) ($req->fields['delivery_synced_seq'] ?? 0));
     }
 
     /** @return array{status:string, state:string, target:string, seq:int, synced_seq:int, applied:array<int,string>, anomaly:?string, error:?string} */
@@ -85,13 +92,16 @@ class ReceivingSync
         //     así que marcar `synced_seq = seq` nunca afirma más de lo observado.
         $seq    = (int) ($req->fields['receiving_seq'] ?? 0);
         $synced = (int) ($req->fields['receiving_synced_seq'] ?? 0);
+        $dseq    = (int) ($req->fields['delivery_seq'] ?? 0);
+        $dsynced = (int) ($req->fields['delivery_synced_seq'] ?? 0);
         $out = ['status' => self::ST_NOT_STARTED, 'state' => (string) ($req->fields['domain_state'] ?? ''), 'target' => '',
                 'seq' => $seq, 'synced_seq' => $synced, 'applied' => [], 'anomaly' => null, 'error' => null];
         if (empty($req->fields['purchase_started_at'])) {
             return $out;
         }
         try {
-            $target = PurchasingWorkflow::receivingTarget($this->counters($requestId));
+            [$total, $delivered] = $this->unitCounts($requestId);
+            $target = PurchasingWorkflow::physicalTarget($this->counters($requestId), $total, $delivered);
         } catch (\Throwable $e) {
             return $this->anomaly($req, $out, self::ANOMALY_COUNTERS, '', $seq, $e->getMessage());
         }
@@ -99,8 +109,14 @@ class ReceivingSync
 
         $instId = (int) ($req->fields['workflow_instances_id'] ?? 0);
         $inst = $instId > 0 ? $this->wf->loadInstance($instId) : null;
-        if ($inst === null || !$this->wf->isOpen($inst)
-            || (string) $inst->fields['itemtype'] !== Request::class || (int) $inst->fields['items_id'] !== $requestId) {
+        if ($inst === null || (string) $inst->fields['itemtype'] !== Request::class || (int) $inst->fields['items_id'] !== $requestId) {
+            return $this->anomaly($req, $out, self::ANOMALY_INSTANCE, $target, $seq);
+        }
+        if (!$this->wf->isOpen($inst)) {
+            // P2D-4: CERRADA tras la entrega total ⇒ convergida (los marcadores se ponen al día; nada se reabre).
+            if ($this->wf->stateCode($inst) === PurchasingWorkflow::S_CLOSED && $target === PurchasingWorkflow::S_DELIVERED) {
+                return $this->converged($req, $out, $inst, $seq, $synced, $dseq, $dsynced, $source);
+            }
             return $this->anomaly($req, $out, self::ANOMALY_INSTANCE, $target, $seq);
         }
         $current = $this->wf->stateCode($inst);
@@ -109,10 +125,12 @@ class ReceivingSync
         if ($path === null) {
             return $this->anomaly($req, $out, self::ANOMALY_ENGINE_AHEAD, $target, $seq);
         }
-        if ($path !== [] && !$this->wf->definitionHasAction($inst, $path[0])) {
-            // Instancia iniciada bajo una versión ANTERIOR de la definición (sin fase de compra): conserva su
-            // versión; se reporta y NO se muta en silencio.
-            return $this->anomaly($req, $out, self::ANOMALY_LEGACY_DEFINITION, $target, $seq);
+        foreach ($path as $needed) {
+            if (!$this->wf->definitionHasAction($inst, $needed)) {
+                // Instancia iniciada bajo una versión ANTERIOR de la definición (sin fase de compra/entrega): conserva
+                // su versión; se reporta y NO se muta en silencio (ninguna transición parcial del camino).
+                return $this->anomaly($req, $out, self::ANOMALY_LEGACY_DEFINITION, $target, $seq);
+            }
         }
 
         foreach ($path as $action) {
@@ -121,7 +139,8 @@ class ReceivingSync
             $res = $this->wf->transition($inst, $action, [
                 'comment'               => 'receiving sync (' . $source . ')',
                 // Condiciones de la definición: sólo este código las aporta (hecho local ya confirmado).
-                'fields'                => ['purchase_bound' => 1, 'receipt_bound' => 1, 'receiving_seq' => $seq],
+                'fields'                => ['purchase_bound' => 1, 'receipt_bound' => 1, 'receiving_seq' => $seq,
+                                            'delivery_bound' => 1, 'delivery_seq' => $dseq],
                 'expected_lock_version' => $lockBefore,
             ]);
             if (!$res->success) {
@@ -131,9 +150,9 @@ class ReceivingSync
                 return $out;
             }
             $out['applied'][] = $action;
-            $this->audit->recordOnce($requestId, PurchasingEvent::EV_RECEIVING_SYNCED, (int) $req->fields['entities_id'], [
+            $this->audit->recordOnce($requestId, $action === PurchasingWorkflow::A_DELIVER_COMPLETE ? PurchasingEvent::EV_DELIVERY_SYNCED : PurchasingEvent::EV_RECEIVING_SYNCED, (int) $req->fields['entities_id'], [
                 'action' => $action, 'from' => $from, 'to' => (string) ($res->data['to'] ?? ''), 'target' => $target,
-                'receiving_seq' => $seq, 'workflow_lock_version' => $lockBefore, 'source' => $source,
+                'receiving_seq' => $seq, 'delivery_seq' => $dseq, 'workflow_lock_version' => $lockBefore, 'source' => $source,
             ], (string) $req->fields['correlation_id'], 'receiving-sync:' . $requestId . ':' . (int) $inst->getID() . ':' . $lockBefore . ':' . $action);
             $inst = $this->wf->loadInstance((int) $inst->getID());
             if ($inst === null) {
@@ -141,12 +160,29 @@ class ReceivingSync
             }
         }
 
-        // (2) Convergido para `seq`: marcador monotónico (nunca retrocede; un lote posterior lo deja pendiente).
+        return $this->converged($req, $out, $inst, $seq, $synced, $dseq, $dsynced, $source);
+    }
+
+    /**
+     * (2) Convergido para `seq`/`dseq`: marcadores monotónicos (nunca retroceden; un lote posterior los deja
+     * pendientes).
+     *
+     * @param array<string,mixed> $out
+     * @return array{status:string, state:string, target:string, seq:int, synced_seq:int, applied:array<int,string>, anomaly:?string, error:?string}
+     */
+    private function converged(Request $req, array $out, \GlpiPlugin\Companyworkflow\Model\Instance $inst, int $seq, int $synced, int $dseq, int $dsynced, string $source): array
+    {
         /** @var \DBmysql $DB */
         global $DB;
+        $requestId = (int) $req->getID();
         if ($synced < $seq) {
             $DB->update(Request::getTable(), ['receiving_synced_seq' => $seq], [
                 'id' => $requestId, 'receiving_synced_seq' => ['<', $seq],
+            ]);
+        }
+        if ($dsynced < $dseq) {
+            $DB->update(Request::getTable(), ['delivery_synced_seq' => $dseq], [
+                'id' => $requestId, 'delivery_synced_seq' => ['<', $dseq],
             ]);
         }
         $out['status'] = self::ST_CONVERGED;
@@ -154,6 +190,14 @@ class ReceivingSync
         $out['synced_seq'] = max($synced, $seq);
         $this->projection->sync($req, $source);
         return $out;
+    }
+
+    /** @return array{0:int, 1:int} [unidades totales, unidades ENTREGADAS] de la solicitud */
+    private function unitCounts(int $requestId): array
+    {
+        $total = countElementsInTable(ReceiptUnit::getTable(), ['requests_id' => $requestId]);
+        $delivered = countElementsInTable(ReceiptUnit::getTable(), ['requests_id' => $requestId, 'physical_state' => ReceiptUnit::PHYSICAL_DELIVERED]);
+        return [$total, $delivered];
     }
 
     /** @return array<int,array{ordered_qty:int, received_qty:int}> */

@@ -1,0 +1,120 @@
+{% extends "layout/page_without_tabs.html.twig" %}
+
+{% block content_title %}{{ title }}{% endblock %}
+
+{% block content_body %}
+   {{ include('@companypurchasing/parts/nav.html.twig') }}
+
+   {% set editing = request is not null %}
+   <form method="post" action="{{ base }}{{ editing ? '/request/' ~ request.id ~ '/update' : '/request/create' }}" class="card mb-3">
+      <div class="card-header"><h3 class="card-title">{{ __('Request header', 'companypurchasing') }}</h3></div>
+      <div class="card-body row g-3">
+         {% if not editing %}
+            <div class="col-md-4">
+               <label class="form-label">{{ __('Entity', 'companypurchasing') }}</label>
+               <select class="form-select" name="entities_id" required>
+                  {% for id, name in entities %}<option value="{{ id }}">{{ name }}</option>{% endfor %}
+               </select>
+            </div>
+            <div class="col-md-2">
+               <label class="form-label">{{ __('Currency', 'companypurchasing') }}</label>
+               <input type="text" class="form-control" name="currency_code" value="{{ currency }}" maxlength="3" pattern="[A-Za-z]{3}" required>
+            </div>
+         {% else %}
+            <div class="col-md-2">
+               <label class="form-label">{{ __('Currency', 'companypurchasing') }}</label>
+               <input type="text" class="form-control" value="{{ currency }}" disabled>
+            </div>
+         {% endif %}
+         <div class="col-md-3">
+            <label class="form-label">{{ __('Category', 'companypurchasing') }}</label>
+            <input type="text" class="form-control" name="category" maxlength="190" value="{{ request.category ?? '' }}">
+         </div>
+         <div class="col-md-3">
+            <label class="form-label">{{ __('Destination', 'companypurchasing') }}</label>
+            <input type="text" class="form-control" name="destination" maxlength="255" value="{{ request.destination ?? '' }}">
+         </div>
+         <div class="col-md-4">
+            <label class="form-label">{{ __('Department', 'companypurchasing') }}</label>
+            {{ dropdowns.department|raw }}
+         </div>
+         <div class="col-md-4">
+            <label class="form-label">{{ __('Suggested supplier', 'companypurchasing') }}</label>
+            {{ dropdowns.supplier|raw }}
+         </div>
+         <div class="col-md-4">
+            <label class="form-label">{{ __('Budget', 'companypurchasing') }}</label>
+            {{ dropdowns.budget|raw }}
+         </div>
+         <div class="col-md-6">
+            <label class="form-label">{{ __('Justification', 'companypurchasing') }}</label>
+            <textarea class="form-control" name="reason" rows="3" maxlength="4000">{{ request.reason ?? '' }}</textarea>
+         </div>
+         <div class="col-md-6">
+            <label class="form-label">{{ __('Observations', 'companypurchasing') }}</label>
+            <textarea class="form-control" name="observations" rows="3" maxlength="4000">{{ request.observations ?? '' }}</textarea>
+         </div>
+      </div>
+      <div class="card-footer d-flex gap-2">
+         {{ include('@companypurchasing/parts/csrf.html.twig') }}
+         <button type="submit" class="btn btn-primary"><i class="ti ti-device-floppy me-1"></i>{{ editing ? __('Save', 'companypurchasing') : __('Create draft', 'companypurchasing') }}</button>
+         {% if editing %}<a class="btn btn-outline-secondary" href="{{ base }}/request/{{ request.id }}">{{ __('View request', 'companypurchasing') }}</a>{% endif %}
+      </div>
+   </form>
+
+   {% if editing %}
+      <div class="card mb-3">
+         <div class="card-header"><h3 class="card-title">{{ __('Lines', 'companypurchasing') }}</h3></div>
+         <div class="card-body">
+            {% for l in lines %}
+               <form method="post" action="{{ base }}/request/{{ request.id }}/line/{{ l.id }}/update" class="row g-2 align-items-end border-bottom pb-2 mb-2">
+                  <div class="col-md-1"><label class="form-label">{{ __('Line', 'companypurchasing') }}</label><input class="form-control" value="{{ l.line_no }}" disabled></div>
+                  <div class="col-md-3"><label class="form-label">{{ __('Description', 'companypurchasing') }}</label><input class="form-control" name="description" maxlength="255" value="{{ l.description }}" required></div>
+                  <div class="col-md-2"><label class="form-label">{{ __('Category', 'companypurchasing') }}</label><input class="form-control" name="category" maxlength="190" value="{{ l.category }}"></div>
+                  <div class="col-md-1"><label class="form-label">{{ __('Quantity', 'companypurchasing') }}</label><input class="form-control" name="quantity" inputmode="numeric" value="{{ l.quantity }}" required></div>
+                  <div class="col-md-1"><label class="form-label">{{ __('Unit', 'companypurchasing') }}</label><input class="form-control" name="unit" maxlength="30" value="{{ l.unit }}"></div>
+                  <div class="col-md-2"><label class="form-label">{{ __('Estimated unit price', 'companypurchasing') }}</label><input class="form-control" name="estimated_unit_price" inputmode="decimal" value="{{ l.estimated_unit_price.raw }}"></div>
+                  <div class="col-md-1 form-check"><input class="form-check-input" type="checkbox" name="is_inventoriable" value="1" {{ l.is_inventoriable ? 'checked' : '' }}><label class="form-check-label">{{ __('Inventoriable', 'companypurchasing') }}</label></div>
+                  <div class="col-md-1 d-flex gap-1">
+                     {{ include('@companypurchasing/parts/csrf.html.twig') }}
+                     <button type="submit" class="btn btn-sm btn-primary" title="{{ __('Save', 'companypurchasing') }}"><i class="ti ti-device-floppy"></i></button>
+                  </div>
+               </form>
+               <form method="post" action="{{ base }}/request/{{ request.id }}/line/{{ l.id }}/remove" class="mb-3">
+                  {{ include('@companypurchasing/parts/csrf.html.twig') }}
+                  <button type="submit" class="btn btn-sm btn-outline-danger"><i class="ti ti-trash me-1"></i>{{ __('Remove line', 'companypurchasing') }}</button>
+               </form>
+            {% else %}
+               <div class="alert alert-info">{{ __('The request has no lines yet', 'companypurchasing') }}</div>
+            {% endfor %}
+
+            <h4 class="mt-3">{{ __('Add line', 'companypurchasing') }}</h4>
+            <form method="post" action="{{ base }}/request/{{ request.id }}/line/add" class="row g-2 align-items-end">
+               <div class="col-md-3"><label class="form-label">{{ __('Description', 'companypurchasing') }}</label><input class="form-control" name="description" maxlength="255" required></div>
+               <div class="col-md-2"><label class="form-label">{{ __('Category', 'companypurchasing') }}</label><input class="form-control" name="category" maxlength="190"></div>
+               <div class="col-md-1"><label class="form-label">{{ __('Quantity', 'companypurchasing') }}</label><input class="form-control" name="quantity" inputmode="numeric" required></div>
+               <div class="col-md-1"><label class="form-label">{{ __('Unit', 'companypurchasing') }}</label><input class="form-control" name="unit" maxlength="30"></div>
+               <div class="col-md-2"><label class="form-label">{{ __('Estimated unit price', 'companypurchasing') }}</label><input class="form-control" name="estimated_unit_price" inputmode="decimal" required></div>
+               <div class="col-md-2 form-check"><input class="form-check-input" type="checkbox" name="is_inventoriable" value="1"><label class="form-check-label">{{ __('Inventoriable', 'companypurchasing') }}</label></div>
+               <div class="col-md-1">
+                  {{ include('@companypurchasing/parts/csrf.html.twig') }}
+                  <button type="submit" class="btn btn-primary"><i class="ti ti-plus"></i></button>
+               </div>
+            </form>
+         </div>
+      </div>
+
+      {% if view.can.submit %}
+         <form method="post" action="{{ base }}/request/{{ request.id }}/submit" class="card">
+            <div class="card-body d-flex gap-2 align-items-end">
+               <div class="flex-grow-1">
+                  <label class="form-label">{{ __('Comment', 'companypurchasing') }}</label>
+                  <input class="form-control" name="comment" maxlength="4000">
+               </div>
+               {{ include('@companypurchasing/parts/csrf.html.twig') }}
+               <button type="submit" class="btn btn-success"><i class="ti ti-send me-1"></i>{{ __('Submit for approval', 'companypurchasing') }}</button>
+            </div>
+         </form>
+      {% endif %}
+   {% endif %}
+{% endblock %}

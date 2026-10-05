@@ -7,7 +7,8 @@
  * también la identidad de idempotencia del futuro SI-4. FK lógica = `items_id` (la línea real, NUNCA
  * `line_no`). `unit_index`/`correlation_key` son sólo display/correlación. `unit_cost` es un snapshot exacto
  * e INMUTABLE (política de costo pinneada). `physical_state` es el estado de NEGOCIO de la unidad (no la
- * saga de integración, que es de companyintegrations).
+ * saga de integración, que es de companyintegrations): RECEIVED → DELIVERED (P2D-4, una sola vez, por
+ * `DeliveryService`; `delivery_batches_id`/`delivered_at`/`delivered_to_users_id` registran la entrega).
  *
  * REGLA 0: tabla PROPIA del plugin (prefijo `glpi_plugin_companypurchasing_`), no del core.
  *
@@ -24,7 +25,9 @@ class ReceiptUnit extends CommonDBTM
 {
     public static $rightname = 'plugin_companypurchasing';
 
-    public const PHYSICAL_RECEIVED = 'RECEIVED';
+    public const PHYSICAL_RECEIVED  = 'RECEIVED';
+    /** P2D-4: entregada al destinatario (una sola vez; `delivery_batches_id` la liga a su lote de entrega). */
+    public const PHYSICAL_DELIVERED = 'DELIVERED';
 
     public static function getTable($classname = null)
     {

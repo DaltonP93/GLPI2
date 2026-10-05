@@ -32,6 +32,10 @@ Ver `../../CLAUDE.md`, `../../docs/adr/ADR-0002-glpi-core-immutable.md` y
 - **Auditoría append-only** (`..._history`): una fila por evento; jamás se borra.
 - **API de dominio** (`Api\WorkflowApi`) + hook `companyworkflow:transitioned` para que
   `companypurchasing` (y futuros) definan su workflow y reaccionen.
+- **API de LECTURA para bandejas/notificaciones (0.6.0):** `actionsForCurrentUser()`,
+  `pendingDecisionsForCurrentUser()`, `currentApprovers()`, `history(['instances_ids' => …])` y
+  `lastHistoryId()`. Reutilizan la misma lógica de `transition()` (derecho, entidad, aprobador efectivo,
+  voto ya emitido) sin mutar nada; los plugins de dominio derivan de aquí sus botones y bandejas.
 
 ## Estructura
 | Ruta | Rol |
@@ -49,14 +53,17 @@ Ver `../../CLAUDE.md`, `../../docs/adr/ADR-0002-glpi-core-immutable.md` y
 - **Unit (puro):** `php plugins/companyworkflow/tests/unit/run.php` — condiciones, quórum,
   resolución de transición, ventana de delegación.
 - **Integración + E2E (en GLPI):** `php bin/console plugins:companyworkflow:selftest` — persistencia,
-  ACL, multi-entidad, quórum, delegación, versión, SLA, el ciclo completo + negativos, y `[UPGRADE]`
-  (`install()` repetido sobre una instalación existente sin duplicar ni pisar nada).
+  ACL, multi-entidad, quórum, delegación, versión, SLA, el ciclo completo + negativos, `[UPGRADE]`
+  (`install()` repetido sobre una instalación existente sin duplicar ni pisar nada) e `[INBOX]` (API de lectura).
 
 ## Limitaciones / deuda técnica (v1)
 - `approver_kind = entity_manager` aún no resuelve aprobadores (devuelve conjunto vacío,
   fail-closed); v1 cubre `group`/`profile`/`user`. Seguimiento en fase posterior.
-- **Notificaciones:** se emite el evento de dominio y se calculan destinatarios; el cableado de
-  **plantillas/targets de correo nativo** se difiere a un follow-up (no se construye motor propio).
-- **UI (bandeja/timeline/action_bar):** la superficie HTTP expone la acción por API JSON; las
-  vistas Twig de bandeja quedan como follow-up (el E2E de v1 valida el ciclo por la API + la
-  declaración de rutas por reflexión).
+- **Notificaciones:** el motor emite el evento de dominio y calcula destinatarios; las plantillas/targets de
+  correo NATIVOS los cablea cada plugin de dominio (Compras lo hace desde 0.5.0 con
+  `NotificationTargetRequest`). El motor no construye un sistema de correo propio.
+- **UI genérica del motor (bandeja/timeline/action_bar):** la superficie HTTP del motor expone la acción por
+  API JSON. La bandeja y la barra de acciones viven en cada plugin de dominio, derivadas de la API de lectura
+  0.6.0 (Compras: `companypurchasing` 0.5.0).
+- `pendingDecisionsForCurrentUser()` recorre las instancias abiertas del tipo hasta un tope (`scanCap`) que fija
+  el consumidor (v1).

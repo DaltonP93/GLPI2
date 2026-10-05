@@ -457,7 +457,7 @@ trait ReceivingSelftestScenarios
     private function scenarioP2d3Persist(): void
     {
         $this->out->writeln('== [P2D3-PERSIST] esquema, versión, derecho y definición ==');
-        $this->check('[P2D3-PERSIST] versión del plugin 0.4.0', defined('PLUGIN_COMPANYPURCHASING_VERSION') && PLUGIN_COMPANYPURCHASING_VERSION === '0.4.0');
+        $this->check('[P2D3-PERSIST] versión del plugin ≥ 0.4.0 (P2D-3 incluido)', defined('PLUGIN_COMPANYPURCHASING_VERSION') && version_compare(PLUGIN_COMPANYPURCHASING_VERSION, '0.4.0', '>='));
         $this->check('[P2D3-PERSIST] tablas P2D-3', array_reduce(self::P2D3_TABLES, fn (bool $c, string $t): bool => $c && $this->tableExistsLive("glpi_plugin_companypurchasing_{$t}"), true));
         $this->check('[P2D3-PERSIST] unit_cost DECIMAL exacto (no float)', $this->columnType('glpi_plugin_companypurchasing_receipt_units', 'unit_cost') === 'decimal(20,6)'
             && $this->columnType('glpi_plugin_companypurchasing_items', 'line_cost_total') === 'decimal(20,6)');

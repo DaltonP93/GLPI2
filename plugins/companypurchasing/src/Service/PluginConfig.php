@@ -72,6 +72,19 @@ final class PluginConfig
         'outbox_max_lease_seconds'   => '3600',
         // Tope de unidades por lote de recepción (defensa ante entradas desmesuradas; fail-closed).
         'receipt_max_units_per_batch' => '1000',
+
+        // --- P2D-4: entrega, bandejas, notificaciones nativas y métricas (operacional, NO pinneado). ---
+        // Tope de unidades por lote de entrega (fail-closed).
+        'delivery_max_units_per_batch' => '1000',
+        // Bandeja "para mí": máximo de instancias abiertas que se recorren en el motor (v1, ver ADR-0023).
+        'inbox_scan_cap'             => '2000',
+        // Métricas: máximo de solicitudes cuya duración por etapa se calcula desde el ledger del motor.
+        'metrics_max_requests'       => '5000',
+        // Interruptor del plugin para disparar notificaciones NATIVAS (además de `use_notifications` de GLPI).
+        'notifications_enabled'      => '1',
+        // Cursor del recorrido del ledger del motor para notificaciones perdidas (install() lo arranca en
+        // "ahora" para no notificar hechos históricos al actualizar).
+        'notify_cursor'              => '0',
     ];
 
     /** Sufijo de configuración por etapa de aprobación (clave estable, no dato de negocio). */
@@ -173,6 +186,26 @@ final class PluginConfig
     public static function outboxMaxLeaseSeconds(): int
     {
         return max(1, (int) self::get('outbox_max_lease_seconds', '3600'));
+    }
+
+    public static function deliveryMaxUnitsPerBatch(): int
+    {
+        return max(1, (int) self::get('delivery_max_units_per_batch', '1000'));
+    }
+
+    public static function inboxScanCap(): int
+    {
+        return max(1, (int) self::get('inbox_scan_cap', '2000'));
+    }
+
+    public static function metricsMaxRequests(): int
+    {
+        return max(1, (int) self::get('metrics_max_requests', '5000'));
+    }
+
+    public static function notificationsEnabled(): bool
+    {
+        return (string) self::get('notifications_enabled', '1') === '1';
     }
 
     public static function syncOnWorkflowEvents(): bool

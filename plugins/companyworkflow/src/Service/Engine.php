@@ -32,6 +32,9 @@ use GlpiPlugin\Companyworkflow\Model\WorkflowDef;
 
 class Engine
 {
+    /** Acciones de DECISIÓN de una etapa de aprobación (el actor debe ser aprobador efectivo). */
+    public const DECISION_ACTIONS = ['approve', 'reject', 'return'];
+
     private ConditionEvaluator $conditions;
     private QuorumCalculator $quorum;
     private TransitionResolver $resolver;
@@ -110,7 +113,7 @@ class Engine
 
         // --- Etapa de aprobación del estado actual (aprobadores EFECTIVOS por entidad) ---
         $stage = $this->stageApprovers($transitions, $fromStateId, $defId, $ent);
-        if ($stage['step'] !== null && in_array($action, ['approve', 'reject', 'return'], true)) {
+        if ($stage['step'] !== null && in_array($action, self::DECISION_ACTIONS, true)) {
             if (!in_array($actor, $stage['approvers'], true)) {
                 return TransitionResult::fail(TransitionResult::DENIED_ACL, 'El actor no es aprobador efectivo de esta etapa.');
             }
@@ -130,6 +133,130 @@ class Engine
         }
         $transitions = $this->loadTransitions((int) $instance->fields['workflowdefs_id']);
         return $this->resolver->actionsFrom($transitions, (int) $instance->fields['current_statedefs_id']);
+    }
+
+    /**
+     * Acciones que la sesión ACTUAL puede ejecutar ahora sobre la instancia (SÓLO LECTURA; para bandejas y
+     * barras de acción de los plugins de dominio). Aplica los MISMOS pre-chequeos que `transition()` —derecho
+     * de la transición, entidad de la instancia, aprobador EFECTIVO de la etapa (grupo/perfil + delegaciones)
+     * y voto ya emitido— salvo la condición declarativa y el comentario, que dependen del contexto que el
+     * dominio aporte al ejecutar. Nunca muta nada.
+     *
+     * @return array<int,string>
+     */
+    public function actionsForCurrentUser(Instance $instance): array
+    {
+        if (!$instance->isOpen()) {
+            return [];
+        }
+        $ent = (int) $instance->fields['entities_id'];
+        if (!Session::haveAccessToEntity($ent, (bool) (int) $instance->fields['is_recursive'])) {
+            return [];
+        }
+        $defId       = (int) $instance->fields['workflowdefs_id'];
+        $fromStateId = (int) $instance->fields['current_statedefs_id'];
+        $transitions = $this->loadTransitions($defId);
+        $actor       = (int) (Session::getLoginUserID() ?: 0);
+        $stage       = $this->stageApprovers($transitions, $fromStateId, $defId, $ent);
+        $voted       = $stage['step'] !== null && $actor > 0 && $this->hasApprovedBallot((int) $instance->getID(), $fromStateId, $actor);
+
+        $out = [];
+        foreach ($this->resolver->actionsFrom($transitions, $fromStateId) as $action) {
+            $t = $this->resolver->resolve($transitions, $fromStateId, $action);
+            if ($t === null) {
+                continue;
+            }
+            $right = (int) ($t['required_right'] ?? 0);
+            if (!Session::haveRight(WorkflowDef::$rightname, $right > 0 ? $right : READ)) {
+                continue;
+            }
+            if ($stage['step'] !== null && in_array($action, self::DECISION_ACTIONS, true)) {
+                if (!in_array($actor, $stage['approvers'], true)) {
+                    continue;
+                }
+                if ($action === 'approve' && $voted) {
+                    continue;
+                }
+            }
+            $out[] = $action;
+        }
+        return $out;
+    }
+
+    /**
+     * Bandeja "pendiente de MI decisión" (SÓLO LECTURA): instancias ABIERTAS del `itemtype` en entidades activas
+     * de la sesión cuyo estado actual tiene paso de aprobación, donde el usuario actual es aprobador EFECTIVO y
+     * todavía no aprobó. Recorre a lo sumo `$scanCap` instancias (las más antiguas primero) y devuelve a lo sumo
+     * `$limit`.
+     *
+     * @return array<int,array{instances_id:int, items_id:int, entities_id:int, state_code:string, actions:array<int,string>}>
+     */
+    public function pendingDecisionsForCurrentUser(string $itemtype, int $limit = 200, int $scanCap = 2000): array
+    {
+        /** @var \DBmysql $DB */
+        global $DB;
+        $actor = (int) (Session::getLoginUserID() ?: 0);
+        $entities = array_values(array_map('intval', (array) ($_SESSION['glpiactiveentities'] ?? [])));
+        if ($actor <= 0 || $itemtype === '' || $entities === [] || $limit <= 0) {
+            return [];
+        }
+        $out = [];
+        foreach ($DB->request([
+            'SELECT' => 'id',
+            'FROM'   => Instance::getTable(),
+            'WHERE'  => ['itemtype' => $itemtype, 'status' => Instance::STATUS_OPEN, 'entities_id' => $entities],
+            'ORDER'  => 'id ASC',
+            'LIMIT'  => max(1, $scanCap),
+        ]) as $row) {
+            $inst = new Instance();
+            if (!$inst->getFromDB((int) $row['id'])) {
+                continue;
+            }
+            $defId = (int) $inst->fields['workflowdefs_id'];
+            $from  = (int) $inst->fields['current_statedefs_id'];
+            $stage = $this->stageApprovers($this->loadTransitions($defId), $from, $defId, (int) $inst->fields['entities_id']);
+            if ($stage['step'] === null || !in_array($actor, $stage['approvers'], true)) {
+                continue;
+            }
+            $actions = array_values(array_intersect($this->actionsForCurrentUser($inst), self::DECISION_ACTIONS));
+            if (!in_array('approve', $actions, true)) {
+                continue; // ya votó (o sin derecho): no está pendiente de SU decisión
+            }
+            $out[] = [
+                'instances_id' => (int) $inst->getID(),
+                'items_id'     => (int) $inst->fields['items_id'],
+                'entities_id'  => (int) $inst->fields['entities_id'],
+                'state_code'   => $this->stateCode($from),
+                'actions'      => $actions,
+            ];
+            if (count($out) >= $limit) {
+                break;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Aprobadores EFECTIVOS de la etapa ACTUAL (grupo/perfil + delegaciones, filtrados por la entidad de la
+     * instancia). Vacío si el estado no tiene paso de aprobación o la instancia está cerrada. SÓLO LECTURA.
+     *
+     * @return array<int,int>
+     */
+    public function currentApprovers(Instance $instance): array
+    {
+        if (!$instance->isOpen()) {
+            return [];
+        }
+        $defId = (int) $instance->fields['workflowdefs_id'];
+        $stage = $this->stageApprovers($this->loadTransitions($defId), (int) $instance->fields['current_statedefs_id'], $defId, (int) $instance->fields['entities_id']);
+        return $stage['approvers'];
+    }
+
+    private function hasApprovedBallot(int $instanceId, int $stateId, int $actor): bool
+    {
+        $b = new Assignment();
+        return $b->getFromDBByCrit(['instances_id' => $instanceId, 'statedefs_id' => $stateId, 'users_id' => $actor])
+            && (string) ($b->fields['decision'] ?? '') === Assignment::DECISION_APPROVED;
     }
 
     /**

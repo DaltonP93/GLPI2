@@ -12,11 +12,17 @@
  * (e `IN_PURCHASE →receive_complete→ RECEIVED`). Todos son estados del motor: no hay una segunda máquina de
  * estados. Las transiciones de compra/recepción exigen condiciones (`purchase_bound` / `receipt_bound`) que
  * sólo aporta el código de Compras tras confirmar el hecho local (la superficie HTTP genérica del motor no
- * pasa `fields`, así que no puede forzarlas). RECEIVED es INTERMEDIO (P2D-4 continúa: entrega).
+ * pasa `fields`, así que no puede forzarlas). RECEIVED es INTERMEDIO.
+ *
+ * P2D-4 extiende otra vez el MISMO proceso (nueva VERSIÓN): `RECEIVED →deliver_complete→ DELIVERED →close→ CLOSED`
+ * (`delivery_bound` / `close_bound`). RECEIVED y DELIVERED son INTERMEDIOS; CLOSED es FINAL. NO existe
+ * PARTIALLY_DELIVERED: la entrega parcial vive en `receipt_units.physical_state` y la solicitud sigue en RECEIVED
+ * hasta que TODAS sus unidades estén entregadas.
  *
  * Reglas puras (unit-testables, sin GLPI):
  *   - `spec()`                → especificación declarativa de la definición.
  *   - `receivingTarget()`     → estado de recepción que corresponde a los contadores físicos.
+ *   - `physicalTarget()`      → P2D-4: recepción + entrega (DELIVERED sólo con TODAS las unidades entregadas).
  *   - `syncPath()`            → transiciones para llevar el motor del estado actual al objetivo.
  *   - `stageIndex()`          → orden de las etapas de aprobación.
  *   - `resetsScope()`         → ¿entrar a un estado reinicia las aprobaciones de un scope?
@@ -46,6 +52,9 @@ final class PurchasingWorkflow
     public const S_IN_PURCHASE        = 'IN_PURCHASE';
     public const S_PARTIALLY_RECEIVED = 'PARTIALLY_RECEIVED';
     public const S_RECEIVED           = 'RECEIVED';
+    // P2D-4: entrega física y cierre administrativo (posteriores a RECEIVED).
+    public const S_DELIVERED          = 'DELIVERED';
+    public const S_CLOSED             = 'CLOSED';
 
     /**
      * Circuito EN ORDEN (índice = posición). Incluye la fase de compra/recepción POSTERIOR a APPROVED: entrar
@@ -53,11 +62,17 @@ final class PurchasingWorkflow
      */
     public const STAGES = [
         self::S_PENDING_AREA_HEAD, self::S_PURCHASING, self::S_PENDING_FINANCE, self::S_APPROVED,
-        self::S_IN_PURCHASE, self::S_PARTIALLY_RECEIVED, self::S_RECEIVED,
+        self::S_IN_PURCHASE, self::S_PARTIALLY_RECEIVED, self::S_RECEIVED, self::S_DELIVERED, self::S_CLOSED,
     ];
 
-    /** Estados de la fase de compra/recepción: el contenido aprobado está CONGELADO. */
-    public const PURCHASE_STATES = [self::S_IN_PURCHASE, self::S_PARTIALLY_RECEIVED, self::S_RECEIVED];
+    /** Estados de la fase de compra/recepción/entrega/cierre: el contenido aprobado está CONGELADO. */
+    public const PURCHASE_STATES = [self::S_IN_PURCHASE, self::S_PARTIALLY_RECEIVED, self::S_RECEIVED, self::S_DELIVERED, self::S_CLOSED];
+
+    /** P2D-4: estados que sólo conoce una definición con fase de ENTREGA (una instancia P2D-3 no los tiene). */
+    public const DELIVERY_PHASE_STATES = [self::S_DELIVERED, self::S_CLOSED];
+
+    /** P2D-4: estados del motor en los que se admite registrar una entrega física (todo recibido). */
+    public const DELIVERING_STATES = [self::S_RECEIVED];
 
     /** Estados del motor en los que se admite registrar una recepción física. */
     public const RECEIVING_STATES = [self::S_IN_PURCHASE, self::S_PARTIALLY_RECEIVED];
@@ -66,6 +81,12 @@ final class PurchasingWorkflow
     public const A_START_PURCHASE   = 'start_purchase';
     public const A_RECEIVE_PARTIAL  = 'receive_partial';
     public const A_RECEIVE_COMPLETE = 'receive_complete';
+    // Acciones P2D-4.
+    public const A_DELIVER_COMPLETE = 'deliver_complete';
+    public const A_CLOSE            = 'close';
+
+    /** Acciones "bound": sólo las dispara el código de Compras tras confirmar el hecho local (nunca la UI genérica). */
+    public const BOUND_ACTIONS = [self::A_START_PURCHASE, self::A_RECEIVE_PARTIAL, self::A_RECEIVE_COMPLETE, self::A_DELIVER_COMPLETE, self::A_CLOSE];
 
     /** Condición: el inicio de compra (congelamiento local) ya está confirmado por Compras. */
     public const PURCHASE_CONDITION = ['field' => 'purchase_bound', 'op' => 'eq', 'value' => 1];
@@ -73,14 +94,20 @@ final class PurchasingWorkflow
     /** Condición: el avance de recepción está respaldado por contadores físicos confirmados. */
     public const RECEIPT_CONDITION = ['field' => 'receipt_bound', 'op' => 'eq', 'value' => 1];
 
+    /** P2D-4: la entrega TOTAL está respaldada por unidades físicas entregadas y confirmadas. */
+    public const DELIVERY_CONDITION = ['field' => 'delivery_bound', 'op' => 'eq', 'value' => 1];
+
+    /** P2D-4: el cierre administrativo fue validado por Compras (todo entregado, inventario DONE, integridad limpia). */
+    public const CLOSE_CONDITION = ['field' => 'close_bound', 'op' => 'eq', 'value' => 1];
+
     /** Etapas con paso de aprobación (grupo + quórum configurables). */
     public const APPROVAL_STAGES = [self::S_PENDING_AREA_HEAD, self::S_PURCHASING, self::S_PENDING_FINANCE];
 
     /** Estados editables por el solicitante (autoridad: `is_editable` del estado en el motor). */
     public const EDITABLE = [self::S_DRAFT, self::S_RETURNED];
 
-    /** Estados finales (instancia cerrada). */
-    public const FINAL = [self::S_REJECTED, self::S_CANCELLED];
+    /** Estados finales (instancia cerrada). CLOSED también figura en STAGES: cerrar NO reinicia aprobaciones. */
+    public const FINAL = [self::S_REJECTED, self::S_CANCELLED, self::S_CLOSED];
 
     /** Condición que exige a toda aprobación venir ligada a evidencia (la aporta el orquestador). */
     public const EVIDENCE_CONDITION = ['field' => 'evidence_bound', 'op' => 'eq', 'value' => 1];
@@ -169,6 +196,9 @@ final class PurchasingWorkflow
                 $state(self::S_IN_PURCHASE, self::WF_KIND_INTERMEDIATE),
                 $state(self::S_PARTIALLY_RECEIVED, self::WF_KIND_INTERMEDIATE),
                 $state(self::S_RECEIVED, self::WF_KIND_INTERMEDIATE),
+                // P2D-4: entrega física (intermedio) y cierre administrativo (final).
+                $state(self::S_DELIVERED, self::WF_KIND_INTERMEDIATE),
+                $state(self::S_CLOSED, self::WF_KIND_FINAL),
                 $state(self::S_REJECTED, self::WF_KIND_FINAL),
                 $state(self::S_CANCELLED, self::WF_KIND_FINAL),
             ],
@@ -192,13 +222,16 @@ final class PurchasingWorkflow
                 $bound(self::S_IN_PURCHASE, self::S_PARTIALLY_RECEIVED, self::A_RECEIVE_PARTIAL, self::RECEIPT_CONDITION),
                 $bound(self::S_IN_PURCHASE, self::S_RECEIVED, self::A_RECEIVE_COMPLETE, self::RECEIPT_CONDITION),
                 $bound(self::S_PARTIALLY_RECEIVED, self::S_RECEIVED, self::A_RECEIVE_COMPLETE, self::RECEIPT_CONDITION),
+                // P2D-4: entrega TOTAL (proyección del hecho físico) y cierre administrativo (validado por Compras).
+                $bound(self::S_RECEIVED, self::S_DELIVERED, self::A_DELIVER_COMPLETE, self::DELIVERY_CONDITION),
+                $bound(self::S_DELIVERED, self::S_CLOSED, self::A_CLOSE, self::CLOSE_CONDITION),
             ],
         ];
     }
 
     /**
-     * Índice de etapa: 0..3 en el circuito de aprobación, 4..6 en la fase de compra/recepción; -1 = antes del
-     * circuito (DRAFT/RETURNED); -2 = final/desconocido.
+     * Índice de etapa: 0..3 en el circuito de aprobación, 4..8 en la fase de compra/recepción/entrega/cierre;
+     * -1 = antes del circuito (DRAFT/RETURNED); -2 = final de rechazo/cancelación o desconocido.
      */
     public static function stageIndex(string $code): int
     {
@@ -326,6 +359,34 @@ final class PurchasingWorkflow
     }
 
     /**
+     * P2D-4: estado que corresponde a los hechos FÍSICOS completos (recepción + entrega). Ninguna unidad entregada ⇒
+     * el de recepción; alguna entregada ⇒ exige recepción COMPLETA (sólo se entrega desde RECEIVED) y
+     * `unitsTotal` = Σ recibido; TODAS entregadas ⇒ DELIVERED; si no ⇒ RECEIVED (no hay PARTIALLY_DELIVERED).
+     * FAIL-CLOSED ante hechos imposibles (entregadas > total, entrega sin recepción completa, unidades ≠ recibido).
+     *
+     * @param array<int,array{ordered_qty:int, received_qty:int}> $lines
+     * @throws \RuntimeException
+     */
+    public static function physicalTarget(array $lines, int $unitsTotal, int $unitsDelivered): string
+    {
+        $receiving = self::receivingTarget($lines);
+        if ($unitsTotal < 0 || $unitsDelivered < 0 || $unitsDelivered > $unitsTotal) {
+            throw new \RuntimeException('contadores de entrega inconsistentes (fail-closed)');
+        }
+        if ($unitsDelivered === 0) {
+            return $receiving;
+        }
+        $received = 0;
+        foreach ($lines as $l) {
+            $received += (int) ($l['received_qty'] ?? 0);
+        }
+        if ($receiving !== self::S_RECEIVED || $unitsTotal !== $received) {
+            throw new \RuntimeException('entrega registrada sin recepción completa y consistente (fail-closed)');
+        }
+        return $unitsDelivered === $unitsTotal ? self::S_DELIVERED : self::S_RECEIVED;
+    }
+
+    /**
      * Transiciones (acciones) para llevar el motor de `$current` a `$target` dentro de la fase de compra, en
      * orden, SUPONIENDO que la compra ya se inició localmente (hecho durable). Desde APPROVED primero
      * `start_purchase`. `[]` = ya convergido. `null` = NO convergible hacia adelante (el motor está "más
@@ -336,10 +397,15 @@ final class PurchasingWorkflow
      */
     public static function syncPath(string $current, string $target): ?array
     {
-        if (!in_array($target, self::PURCHASE_STATES, true)) {
+        // CLOSED nunca es un objetivo físico (el cierre es una decisión administrativa explícita).
+        if (!in_array($target, self::PURCHASE_STATES, true) || $target === self::S_CLOSED) {
             return null;
         }
         if ($current === $target) {
+            return [];
+        }
+        // P2D-4: cerrada tras la entrega total ⇒ convergida (nada que hacer; jamás se reabre).
+        if ($current === self::S_CLOSED && $target === self::S_DELIVERED) {
             return [];
         }
         if ($current === self::S_APPROVED) {
@@ -350,7 +416,31 @@ final class PurchasingWorkflow
             [self::S_IN_PURCHASE, self::S_PARTIALLY_RECEIVED]  => [self::A_RECEIVE_PARTIAL],
             [self::S_IN_PURCHASE, self::S_RECEIVED]            => [self::A_RECEIVE_COMPLETE],
             [self::S_PARTIALLY_RECEIVED, self::S_RECEIVED]     => [self::A_RECEIVE_COMPLETE],
+            // P2D-4: entrega total (la recepción final pudo quedar pendiente de sincronizar).
+            [self::S_RECEIVED, self::S_DELIVERED]              => [self::A_DELIVER_COMPLETE],
+            [self::S_IN_PURCHASE, self::S_DELIVERED]           => [self::A_RECEIVE_COMPLETE, self::A_DELIVER_COMPLETE],
+            [self::S_PARTIALLY_RECEIVED, self::S_DELIVERED]    => [self::A_RECEIVE_COMPLETE, self::A_DELIVER_COMPLETE],
             default                                            => null,
+        };
+    }
+
+    // P2D-4: ETAPA (fase de negocio) de un estado, para listados/UI. Derivada del CÓDIGO del motor, nunca decide acciones.
+    public const PHASE_REQUEST   = 'request';
+    public const PHASE_APPROVAL  = 'approval';
+    public const PHASE_PURCHASE  = 'purchase';
+    public const PHASE_RECEPTION = 'reception';
+    public const PHASE_DELIVERY  = 'delivery';
+    public const PHASE_FINISHED  = 'finished';
+
+    public static function phaseOf(string $state): string
+    {
+        return match ($state) {
+            self::S_DRAFT, self::S_RETURNED, 'PENDING'                              => self::PHASE_REQUEST,
+            self::S_PENDING_AREA_HEAD, self::S_PURCHASING, self::S_PENDING_FINANCE  => self::PHASE_APPROVAL,
+            self::S_APPROVED, self::S_IN_PURCHASE                                   => self::PHASE_PURCHASE,
+            self::S_PARTIALLY_RECEIVED, self::S_RECEIVED                            => self::PHASE_RECEPTION,
+            self::S_DELIVERED                                                       => self::PHASE_DELIVERY,
+            default                                                                 => self::PHASE_FINISHED,
         };
     }
 

@@ -35,6 +35,12 @@
  * recepción + outbox, caída tras el COMMIT + convergencia por la Acción automática nativa, concurrencia real
  * (recepción y claim), lease/token del outbox, ACL/multi-entidad y definición anterior (legacy).
  *
+ * P2D-4 (trait `DeliverySelftestScenarios`, parte de ESTE selftest): upgrade 0.4.0 → 0.5.0 con datos, entrega 4 + 6,
+ * duplicados/idempotencia/gate de inventario, concurrencia real (lock), caída tras el COMMIT + convergencia, ACL,
+ * cierre (prematuro/idempotente/caída), legacy sin fase de entrega, derechos de la UI, bandejas derivadas del motor,
+ * notificaciones NATIVAS (cola real, una vez por hecho, el fallo no revierte), métricas exactas multi-moneda con
+ * aislamiento por entidad y el E2E completo hasta CLOSED.
+ *
  * @license GPL-3.0-or-later
  */
 
@@ -65,6 +71,8 @@ final class SelftestCommand extends Command
     use ApprovalSelftestScenarios;
     // P2D-3: recepción física + outbox + saga del motor, también en ESTE selftest obligatorio.
     use ReceivingSelftestScenarios;
+    // P2D-4: entrega física, cierre, bandejas, notificaciones nativas, métricas y E2E completo (mismo selftest).
+    use DeliverySelftestScenarios;
 
     private int $failures = 0;
     private OutputInterface $out;
@@ -888,6 +896,10 @@ final class SelftestCommand extends Command
         $this->check('[MIGRATE] uninstall elimina las tablas propias', !$this->tableExistsLive($table) && !$this->tableExistsLive('glpi_plugin_companypurchasing_integrity')
             && !$this->tableExistsLive('glpi_plugin_companypurchasing_receipt_units') && !$this->tableExistsLive('glpi_plugin_companypurchasing_inventory_outbox'));
         $this->check('[MIGRATE] uninstall desregistra la Acción automática', countElementsInTable(\CronTask::getTable(), ['itemtype' => \GlpiPlugin\Companypurchasing\Model\ProjectionTask::class]) === 0);
+        $this->check('[MIGRATE] uninstall elimina delivery_batches y las notificaciones/plantillas NATIVAS del tipo',
+            !$this->tableExistsLive('glpi_plugin_companypurchasing_delivery_batches')
+            && countElementsInTable(\Notification::getTable(), ['itemtype' => Request::class]) === 0
+            && countElementsInTable(\NotificationTemplate::getTable(), ['itemtype' => Request::class]) === 0);
 
         plugin_companypurchasing_install();
         $this->check('[MIGRATE] reinstall recrea las tablas propias', $this->tableExistsLive($table));
@@ -897,7 +909,8 @@ final class SelftestCommand extends Command
             $seeded++;
         }
         $this->check('[MIGRATE] reinstall re-siembra los scopes v1', $seeded >= 2);
-        foreach (['quotes', 'quote_items', 'doc_versions', 'docseq', 'policies', 'integrity', 'receipt_batches', 'receipt_units', 'inventory_outbox', 'cost_policies'] as $t) {
+        $this->check('[MIGRATE] reinstall re-siembra las 10 notificaciones NATIVAS (una vez)', countElementsInTable(\Notification::getTable(), ['itemtype' => Request::class]) === 10);
+        foreach (['quotes', 'quote_items', 'doc_versions', 'docseq', 'policies', 'integrity', 'receipt_batches', 'receipt_units', 'inventory_outbox', 'cost_policies', 'delivery_batches'] as $t) {
             $this->check("[MIGRATE] reinstall recrea glpi_plugin_companypurchasing_{$t}", $this->tableExistsLive("glpi_plugin_companypurchasing_{$t}"));
         }
         $ct = new \CronTask();
@@ -1140,6 +1153,7 @@ final class SelftestCommand extends Command
         try {
             // Datos de negocio propios (por si el reinstall no corre).
             foreach ([
+                'glpi_plugin_companypurchasing_delivery_batches',
                 'glpi_plugin_companypurchasing_inventory_outbox',
                 'glpi_plugin_companypurchasing_receipt_units',
                 'glpi_plugin_companypurchasing_receipt_batches',
