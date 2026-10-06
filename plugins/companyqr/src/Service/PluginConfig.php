@@ -31,6 +31,7 @@ final class PluginConfig
         'label_header'             => 'TI • ACTIVOS',
         'label_show_org'           => '0',
         'label_fields'             => 'public_code,type',
+        'label_batch_max'          => '200',
         'scan_retention_months'    => '12',
         'anon_rate_max'            => '5',
         'anon_rate_window_seconds' => '900',

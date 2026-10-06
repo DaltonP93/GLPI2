@@ -27,6 +27,10 @@ class Scan extends CommonDBTM
     public const RESULT_ASSET_GONE     = 'asset_gone';
     public const RESULT_REPORT_CREATED = 'report_created';
     public const RESULT_DENIED         = 'denied';
+    public const RESULT_LABEL_PRINTED  = 'label_printed';
+
+    /** Canal del evento (columna `channel`). */
+    public const CHANNEL_BATCH = 'batch'; // impresión masiva (ADR-0024)
 
     public static function getTable($classname = null)
     {

@@ -8,7 +8,8 @@ Plugin propio de la **Plataforma GLPI Modular**.
 - **Principio rector:** *el QR identifica; GLPI autoriza* (el token identifica, no autoriza).
 - **GLPI soportado:** `>=11.0` y `<12.0` (`max=12.0` excluyente; probado en 11.0.8; GLPI 12
   no soportado hasta suite de regresión — ver `../../docs/architecture/glpi-version-compatibility.md`).
-- **Estado:** Fase 1 — implementación funcional; 0.3.0 agrega la API pública `CompanyQrApi` (SI4-3, ADR-0022).
+- **Estado:** Fase 1 — implementación funcional; 0.3.0 agrega la API pública `CompanyQrApi` (SI4-3, ADR-0022);
+  0.4.0 agrega la impresión masiva de etiquetas (ADR-0024).
 
 ## Regla 0
 Este plugin **no modifica el core de GLPI**. Solo usa hooks/API/controladores oficiales.
@@ -28,7 +29,14 @@ Ver `../../CLAUDE.md` y `../../docs/adr/ADR-0002-glpi-core-immutable.md`.
 | POST | `/scan/{token}/report` | AUTHENTICATED | Reporte → ticket (solicitante = sesión) |
 | POST | `/public/{token}/report` | NO_CHECK | Reporte anónimo (rate limit + Altcha), sólo si habilitado |
 | GET | `/label/{code_id}` | AUTHENTICATED | PDF de etiqueta (derecho `print`) |
+| GET | `/labels/{batch}` | AUTHENTICATED | PDF de un lote, una etiqueta por página (derecho `print`; lote de la sesión) |
 | POST | `/admin/{action}` | AUTHENTICATED | generate/rotate/revoke (derecho `generate`, CSRF) |
+
+## Impresión masiva (ADR-0024)
+En el listado de activos: seleccionar → **Acciones** → **Imprimir etiquetas QR**. Se abre un PDF con una etiqueta por
+página. Requiere `print`; con `generate` aparece la opción "Generar los códigos QR que falten". Los activos sin acceso,
+sin código, con código suspendido/revocado o fuera del tope (`label_batch_max`, default 200, máx. 500) se omiten con
+mensaje. Cada etiqueta impresa se audita (`label_printed`, canal `batch`).
 
 ## API pública para otros plugins (`CompanyQrApi`, ADR-0022)
 `GlpiPlugin\Companyqr\Api\CompanyQrApi` — agnóstica del dominio; la usa SI-4 (companyintegrations) para el código

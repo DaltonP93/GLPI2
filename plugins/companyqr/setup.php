@@ -15,7 +15,7 @@
  * @glpi     11.0 (probado en 11.0.8)
  */
 
-define('PLUGIN_COMPANYQR_VERSION', '0.3.0');
+define('PLUGIN_COMPANYQR_VERSION', '0.4.0');
 
 // Rango de versiones GLPI: min <= GLPI < max (el limite superior es EXCLUYENTE).
 // max='12.0' => GLPI 11.x soportado; 12.x NO hasta pasar la suite de regresion.
@@ -40,6 +40,9 @@ function plugin_init_companyqr() {
 
     // Botón "QR / etiqueta" en el formulario de los activos (hook soportado).
     $PLUGIN_HOOKS['post_item_form']['companyqr'] = 'plugin_companyqr_post_item_form';
+
+    // Acción masiva nativa "Imprimir etiquetas QR" en los listados de activos (ADR-0024).
+    $PLUGIN_HOOKS['use_massive_action']['companyqr'] = true;
 
     // Sincronización del ciclo de vida del activo con el estado del código.
     $PLUGIN_HOOKS['item_update']['companyqr']   = 'plugin_companyqr_item_update';

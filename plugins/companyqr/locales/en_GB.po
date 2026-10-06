@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: companyqr 0.2.0\n"
+"Project-Id-Version: companyqr 0.4.0\n"
 "Report-Msgid-Bugs-To: \n"
 "Language: en_GB\n"
 "MIME-Version: 1.0\n"
@@ -50,3 +50,21 @@ msgstr "Problem reported via QR (%s)"
 
 msgid "Print QR label"
 msgstr "Print QR label"
+
+msgid "Print QR labels"
+msgstr "Print QR labels"
+
+msgid "One label per page, up to %d labels per batch."
+msgstr "One label per page, up to %d labels per batch."
+
+msgid "Generate missing QR codes"
+msgstr "Generate missing QR codes"
+
+msgid "%d asset(s) without a QR code were skipped."
+msgstr "%d asset(s) without a QR code were skipped."
+
+msgid "%d asset(s) with a suspended or revoked QR code were skipped."
+msgstr "%d asset(s) with a suspended or revoked QR code were skipped."
+
+msgid "%d asset(s) exceeded the batch limit and were skipped."
+msgstr "%d asset(s) exceeded the batch limit and were skipped."
