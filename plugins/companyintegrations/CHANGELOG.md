@@ -3,6 +3,19 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.6.1] — `install()` no re-otorga derechos en un upgrade
+### Fixed
+- GLPI vuelve a llamar `install()` al actualizar el plugin. Antes, cada llamada hacía `actual | todos` sobre el derecho
+  del plugin en el perfil Super-Admin (id 4), así que un upgrade devolvía en silencio bits que un administrador había
+  quitado, incluido `RIGHT_SI4`.
+- Ahora los bits completos se otorgan a Super-Admin **sólo en el primer alta del derecho** (instalación nueva), igual
+  que `companyworkflow` 0.6.1, `companysignature` 0.5.1 y `companyqr`. En un upgrade los derechos existentes se
+  preservan EXACTOS y los bits nuevos **no** se inyectan en un perfil ya administrado.
+- Sin cambios de esquema, sagas, mappings ni comportamiento SI-4.
+- Test: nuevo selftest `[UPGRADE]` (Super-Admin recortado a `READ | RIGHT_RECONCILE`, sin `RIGHT_SI4`, y otro perfil,
+  `install()` ×2, derechos EXACTOS, Super-Admin sigue sin `RIGHT_SI4`, una fila por perfil, configuración preservada,
+  sagas/mappings/`asset_bridge` intactos por huella). `[SI4-UPGRADE]` ya no espera que el upgrade sume `RIGHT_SI4`.
+
 ## [0.6.0] — API pública READ-ONLY de vínculo de inventario (P2D-4, ADR-0023)
 ### Added
 - `Api\InventoryLinkApi::forUnits(receiptUnitUuids)`: para que Compras muestre el estado de integración de cada

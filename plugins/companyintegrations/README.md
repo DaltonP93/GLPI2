@@ -224,6 +224,8 @@ saneados. Secret scan del repo en verde.
     - revalidación previa al ack (código revocado, puente divergente);
     - ACL de companyqr; multi-entidad;
     - token ausente de saga/bitácora/outbox/logs; sin Acción automática.
+  - **`[UPGRADE]` (0.6.1):** `install()` ×2 conserva EXACTOS los derechos que ajustó un administrador (Super-Admin sin
+    `RIGHT_SI4` sigue sin él; ya no `actual | todos`), con configuración, sagas, mappings y `asset_bridge` intactos.
 
 ## Limitaciones / deuda técnica (SI-1)
 - **Sin Snipe-IT real en CI:** la integración se valida con **tests de contrato** (transporte fake) —
