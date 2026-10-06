@@ -77,7 +77,7 @@ final class BulkLabelService
     {
         $codes = [];
         $outcomes = [];
-        $canGenerate = Session::haveRight(Code::$rightname, Code::RIGHT_GENERATE);
+        $canGenerate = (bool) Session::haveRight(Code::$rightname, Code::RIGHT_GENERATE);
         $isType = $itemtype !== '' && is_a($itemtype, CommonDBTM::class, true);
 
         foreach (LabelBatch::uniqueIds($ids) as $id) {
