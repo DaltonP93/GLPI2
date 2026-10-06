@@ -5,7 +5,7 @@
  * install()/uninstall() usan MIGRACIONES REVERSIBLES con prefijo propio de tabla
  * (glpi_plugin_companypurchasing_*). NO se accede por SQL directo a tablas del core para saltar reglas
  * de negocio (ver CLAUDE.md, Prohibiciones). El único write sobre una tabla core es otorgar el derecho
- * propio del plugin al perfil Super-Admin (patrón estándar de plugins), vía ProfileRight.
+ * propio del plugin al perfil Super-Admin en la PRIMERA instalación (patrón estándar de plugins), vía ProfileRight.
  *
  * Idempotencia a nivel SQL (`CREATE TABLE IF NOT EXISTS` / `DROP TABLE IF EXISTS`): un reinstall dentro
  * del MISMO proceso es correcto sin depender de la caché de esquema de GLPI.
@@ -420,25 +420,25 @@ function plugin_companypurchasing_install() {
         plugin_companypurchasing_add_column_if_missing('glpi_plugin_companypurchasing_requests', $col, $ddl);
     }
 
-    // Derecho propio del plugin en todos los perfiles (valor 0 por defecto). IDEMPOTENTE: GLPI vuelve a
-    // llamar install() al ACTUALIZAR el plugin (p. ej. 0.2.0 → 0.3.0); re-agregarlo violaría el UNIQUE
-    // (profiles_id, name) de glpi_profilerights y abortaría el upgrade.
+    // Derecho propio del plugin en todos los perfiles (valor 0 por defecto). install() es SEGURO EN UPGRADE (GLPI lo
+    // vuelve a llamar al ACTUALIZAR el plugin, p. ej. 0.5.0 → 0.5.1): el derecho se agrega sólo si FALTA (re-agregarlo
+    // violaría el UNIQUE (profiles_id, name) de glpi_profilerights y abortaría el upgrade) y SÓLO en ese primer alta se
+    // otorgan todos los bits al perfil Super-Admin (id 4 por defecto en GLPI). En un upgrade los derechos que ajustó un
+    // administrador (incluido Super-Admin) NO se tocan, tampoco se suman bits nuevos.
     if (class_exists('ProfileRight')
         && countElementsInTable(ProfileRight::getTable(), ['name' => 'plugin_companypurchasing']) === 0) {
         ProfileRight::addProfileRights(['plugin_companypurchasing']);
+        $full = READ
+            | Request::RIGHT_CREATE_REQUEST | Request::RIGHT_VIEW_OWN | Request::RIGHT_VIEW_ENTITY
+            | Request::RIGHT_EDIT_DRAFT | Request::RIGHT_MANAGE_CONFIG
+            | Request::RIGHT_MANAGE_PURCHASING | Request::RIGHT_RECEIVE | Request::RIGHT_DELIVER
+            | Request::RIGHT_VIEW_METRICS | Request::RIGHT_INTEGRATION;
+        $DB->update(
+            'glpi_profilerights',
+            ['rights' => $full],
+            ['profiles_id' => 4, 'name' => 'plugin_companypurchasing']
+        );
     }
-
-    // Otorgar todos los bits al perfil Super-Admin (id 4 por defecto en GLPI).
-    $full = READ
-        | Request::RIGHT_CREATE_REQUEST | Request::RIGHT_VIEW_OWN | Request::RIGHT_VIEW_ENTITY
-        | Request::RIGHT_EDIT_DRAFT | Request::RIGHT_MANAGE_CONFIG
-        | Request::RIGHT_MANAGE_PURCHASING | Request::RIGHT_RECEIVE | Request::RIGHT_DELIVER
-        | Request::RIGHT_VIEW_METRICS | Request::RIGHT_INTEGRATION;
-    $DB->update(
-        'glpi_profilerights',
-        ['rights' => $full],
-        ['profiles_id' => 4, 'name' => 'plugin_companypurchasing']
-    );
 
     // Configuración por defecto (contexto plugin:companypurchasing). Sin secretos. Sólo se siembran las
     // claves AUSENTES: un reinstall/upgrade NO pisa la configuración que un administrador ya ajustó

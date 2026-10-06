@@ -368,7 +368,7 @@ trait DeliverySelftestScenarios
     private function scenarioP2d4Persist(): void
     {
         $this->out->writeln('== [P2D4-PERSIST] versión, esquema, literales y definición ==');
-        $this->check('[P2D4-PERSIST] versión del plugin 0.5.0', defined('PLUGIN_COMPANYPURCHASING_VERSION') && PLUGIN_COMPANYPURCHASING_VERSION === '0.5.0');
+        $this->check('[P2D4-PERSIST] versión del plugin 0.5.1', defined('PLUGIN_COMPANYPURCHASING_VERSION') && PLUGIN_COMPANYPURCHASING_VERSION === '0.5.1');
         $this->check('[P2D4-PERSIST] tabla delivery_batches (idempotency_key UNIQUE) + columnas de entrega en receipt_units',
             $this->tableExistsLive('glpi_plugin_companypurchasing_delivery_batches') && $this->columnExistsLive('glpi_plugin_companypurchasing_receipt_units', 'delivered_to_users_id'));
         $this->check('[P2D4-PERSIST] literales compartidos = constantes reales (unidad, outbox, ledger)',

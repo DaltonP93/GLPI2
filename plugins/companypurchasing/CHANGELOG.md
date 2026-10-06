@@ -3,6 +3,20 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.5.1] — `install()` no re-otorga derechos en un upgrade
+### Fixed
+- GLPI vuelve a llamar `install()` al actualizar el plugin. Antes, cada llamada **sobrescribía** el derecho del plugin
+  en el perfil Super-Admin (id 4) con todos los bits, así que un upgrade deshacía en silencio cualquier recorte que
+  hubiera hecho un administrador.
+- Ahora los bits completos se otorgan a Super-Admin **sólo en el primer alta del derecho** (instalación nueva), igual
+  que `companyworkflow` 0.6.1, `companysignature` 0.5.1 y `companyqr`. En un upgrade no se toca ningún derecho
+  existente y los bits nuevos de una versión futura **no** se inyectan en un perfil ya administrado: los asigna el
+  administrador.
+- Sin cambios de esquema ni de lógica de dominio; tablas y datos propios intactos.
+- Test: nuevo selftest `[UPGRADE]` (Super-Admin recortado a `READ | VIEW_OWN | RECEIVE` y otro perfil, `install()` ×2,
+  derechos EXACTOS, una fila por perfil, configuración/Acción automática preservadas, datos intactos por huella).
+  `[UPGRADE-P2D3]` y `[UPGRADE-P2D4]` ya no esperan que el upgrade sume `INTEGRATION` / `DELIVER` / `VIEW_METRICS`.
+
 ## [0.5.0] — Fase 2D · P2D-4 (entrega física, cierre, UI, bandejas, notificaciones nativas, métricas)
 Ver `../../docs/adr/ADR-0023-companypurchasing-delivery-ui.md`. Requiere `companyworkflow >= 0.6.0` (API de
 lectura para bandejas/notificaciones; con una versión anterior esas lecturas fallan cerradas).
