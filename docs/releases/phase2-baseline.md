@@ -1,6 +1,7 @@
 # Baseline de Fase 2 — inventario real
 
-> **Fuente única: el código de `main` `6c7d9940977204bb2f85786bcfd742f25de5bdda`.**
+> **Fuente única: el código de `main` `74dc2c7945cded8a48b9f306097cb6f8d01cd4d3`** (incluye el PR #22: `companyworkflow`
+> 0.6.1 y `companysignature` 0.5.1, derechos seguros en upgrade).
 > Versiones, requisitos, tablas, Acciones automáticas, derechos y configuración se leyeron de
 > `plugins/*/setup.php`, `plugins/*/hook.php` y `plugins/*/src/**`. **No** se tomaron de ADRs ni READMEs.
 > No hay tag ni GitHub Release: esta baseline todavía no está publicada como release.
@@ -20,8 +21,8 @@
 | Plugin | Versión | GLPI | Estado | Tablas propias | Acción automática | Derecho (`ProfileRight`) |
 |---|---|---|---|---|---|---|
 | `companyqr` | **0.3.0** | 11.0 – <12.0 | implementado | `codes`, `scans` | — | `plugin_companyqr` |
-| `companyworkflow` | **0.6.0** | 11.0 – <12.0 | implementado | `defs`, `statedefs`, `transitions`, `steps`, `instances`, `assignments`, `delegations`, `history` | `Instance::escalation` (1 h) | `plugin_companyworkflow` |
-| `companysignature` | **0.5.0** | 11.0 – <12.0 | implementado (firma **interna** / evidencia) | `evidences`, `document_versions`, `reconcile_queue` | `ReconcileTask::reconcile` (5 min) | `plugin_companysignature` |
+| `companyworkflow` | **0.6.1** | 11.0 – <12.0 | implementado | `defs`, `statedefs`, `transitions`, `steps`, `instances`, `assignments`, `delegations`, `history` | `Instance::escalation` (1 h) | `plugin_companyworkflow` |
+| `companysignature` | **0.5.1** | 11.0 – <12.0 | implementado (firma **interna** / evidencia) | `evidences`, `document_versions`, `reconcile_queue` | `ReconcileTask::reconcile` (5 min) | `plugin_companysignature` |
 | `companyintegrations` | **0.6.0** | 11.0 – <12.0 | implementado (SI-1 + SI4-1/2/3) | `asset_bridge`, `asset_tag_aliases`, `map_companies`, `map_users`, `map_models`, `map_glpi_assettypes`, `recon`, `si4_sagas`, `si4_saga_log`, `si4_runtime` | **ninguna** (SI-4 sin CronTask a propósito) | `plugin_companyintegrations` |
 | `companypurchasing` | **0.5.0** | 11.0 – <12.0 | implementado (v1) | `requests`, `items`, `numbering`, `scope_defs`, `events`, `quotes`, `quote_items`, `doc_versions`, `docseq`, `policies`, `integrity`, `cost_policies`, `receipt_batches`, `receipt_units`, `inventory_outbox`, `delivery_batches` | `ProjectionTask::reconcileprojection` (15 min) | `plugin_companypurchasing` |
 | `companyportal` | **0.1.0** | 11.0 – <12.0 | **skeleton only — no business logic** | — | — | — |
@@ -34,9 +35,20 @@
   - crea solo lo que falta;
   - siembra solo las claves de configuración ausentes;
   - `CronTask::register()` no duplica;
-  - no pisa los derechos ajustados por un administrador.
+  - el derecho propio del plugin se agrega en todos los perfiles sólo si falta, con valor 0, así que los derechos
+    de los demás perfiles nunca se tocan en un upgrade.
+- Derechos del perfil Super-Admin (id 4). GLPI vuelve a llamar `install()` en cada upgrade, y el comportamiento
+  difiere por plugin (leído de cada `hook.php`):
 
-  El perfil Super-Admin (id 4) recibe todos los bits de cada plugin.
+  | Plugin | Instalación inicial | Upgrade |
+  |---|---|---|
+  | `companyworkflow` 0.6.1 | Super-Admin recibe todos los bits | **se preservan** los derechos existentes, aunque un administrador los haya recortado (PR #22) |
+  | `companysignature` 0.5.1 | Super-Admin recibe todos los bits | **se preservan** los derechos existentes, aunque un administrador los haya recortado (PR #22) |
+  | `companyqr` 0.3.0 | Super-Admin recibe todos los bits | **se preservan** los derechos existentes |
+  | `companyintegrations` 0.6.0 | Super-Admin recibe todos los bits | se **suman** los bits del plugin a los existentes (OR bit a bit): no quita nada, pero vuelve a dar un bit que un administrador le haya quitado a Super-Admin |
+  | `companypurchasing` 0.5.0 | Super-Admin recibe todos los bits | se **sobrescribe** el derecho de Super-Admin con todos los bits: un recorte hecho por un administrador se pierde |
+
+  Ver la limitación correspondiente en §6.
 - `uninstall()` borra las tablas propias (migración reversible). Compras también purga sus notificaciones y
   plantillas nativas.
 
@@ -160,6 +172,14 @@ Bloqueantes para habilitarlo, detallados en `../operations/si4-readiness.md` §1
 
 ## 6. Limitaciones conocidas de esta baseline
 
+- **Derechos de Super-Admin en upgrade de `companypurchasing` y `companyintegrations`** (hallazgo de esta revisión;
+  **no corregido**: exige cambiar código, fuera de este PR documental).
+  - `companypurchasing` 0.5.0 sobrescribe en cada `install()` el derecho de Super-Admin con todos los bits
+    (`plugins/companypurchasing/hook.php`). Es el mismo patrón que el PR #22 corrigió en workflow y signature.
+  - `companyintegrations` 0.6.0 suma los bits del plugin a los de Super-Admin (`rights | full`). No quita nada, pero
+    restaura un bit recortado.
+  - Mientras no se corrija, después de un upgrade de esos plugins hay que revisar y, si corresponde, volver a recortar
+    el perfil Super-Admin (ver `../operations/phase2-upgrade.md` §5).
 - **Los selftests son destructivos**: sólo para instancias desechables (CI / test efímero), **nunca** en staging
   con datos ni en producción.
   - `companypurchasing` ejecuta `[MIGRATE]`: uninstall + reinstall, borra todas sus tablas.
@@ -194,8 +214,10 @@ Bloqueantes para habilitarlo, detallados en `../operations/si4-readiness.md` §1
 
 ## 7. Evidencia de la baseline
 
-- CI post-merge de `6c7d994` (run 37362214075, evento `push`), con Static checks e Integration en verde:
-  - selftests: workflow 114 · integrations 268 · signature 87 · purchasing 573 · qr OK;
+- CI post-merge de `74dc2c7` (run 37513516382, evento `push`), con Static checks e Integration en verde:
+  - selftests: workflow 115 · integrations 268 · signature 88 · purchasing 573 · qr OK;
+  - `[UPGRADE]` de workflow y signature: "derecho de Super-Admin recortado por el administrador PRESERVADO",
+    configuración y Acción automática preservadas;
   - los 2 reconcile limpios;
   - E2E HTTP de companyqr y de companypurchasing (51 verificaciones);
   - localization ×5, America/Asuncion, security-key, core-untouched y secret-scan.

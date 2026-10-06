@@ -1,7 +1,7 @@
 # Instalación limpia — baseline de Fase 2
 
 > Guía única y reproducible para una instalación **nueva** (test / staging) de GLPI 11.0.8 + los plugins de la
-> baseline `main` `6c7d994` (ver `../releases/phase2-baseline.md`).
+> baseline `main` `74dc2c7` (ver `../releases/phase2-baseline.md`).
 > **No ejecutar en producción sin pasar antes por staging** (`deployment.md`).
 > **Sin secretos en este documento:** todo valor sensible va por `.env` (DEV/test) o por el gestor de secretos
 > (staging/producción). Ver `../security/secrets-management.md`.
@@ -75,10 +75,10 @@ done
 docker compose exec -T -u www-data glpi php bin/console plugin:list
 ```
 
-- `--username` es el administrador con el que corre el `install()`: los derechos de cada plugin se otorgan al perfil
-  Super-Admin.
-- `plugin:list` debe mostrar los 5 plugins **activados**, con las versiones de la baseline: workflow 0.6.0,
-  signature 0.5.0, qr 0.3.0, purchasing 0.5.0, integrations 0.6.0.
+- `--username` es el administrador con el que corre el `install()`. En esta instalación inicial, cada plugin crea su
+  derecho en todos los perfiles (valor 0) y otorga **todos** los bits al perfil Super-Admin (id 4).
+- `plugin:list` debe mostrar los 5 plugins **activados**, con las versiones de la baseline: workflow 0.6.1,
+  signature 0.5.1, qr 0.3.0, purchasing 0.5.0, integrations 0.6.0.
 - **Por qué este orden:**
   - Compras inicializa `notify_cursor` con el ledger del motor activo.
   - Compras exige el motor (≥ 0.6.0) y Firma.
@@ -114,6 +114,9 @@ Verificación: en **Configuración → Acciones automáticas**,
 
 1. En **Administración → Perfiles → Super-Admin**, comprobar que tiene todos los bits de `plugin_companyworkflow`,
    `plugin_companysignature`, `plugin_companyqr`, `plugin_companypurchasing` y `plugin_companyintegrations`.
+   - Los bits completos se otorgan **sólo en la instalación inicial**. Si después un administrador recorta Super-Admin,
+     un upgrade de workflow (≥ 0.6.1), signature (≥ 0.5.1) o qr **preserva** ese recorte. Compras 0.5.0 e
+     Integraciones 0.6.0 todavía no: ver `../releases/phase2-baseline.md` §6 y `phase2-upgrade.md` §5.
 2. Crear o ajustar perfiles de **mínimo privilegio**, nunca por nombre de persona. Los bits están en
    `../releases/phase2-baseline.md` §2.
 

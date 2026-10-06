@@ -1,6 +1,6 @@
 # ADR-0014: `companysignature` — aprobación electrónica interna y evidencia
 
-- **Estado:** Aceptado — **implementado** (aprobación electrónica **interna** / evidencia; **no** firma digital certificada): Fase 2C, PR #10 (`3d4610f`); install() seguro en upgrade en el PR #13. Baseline de Fase 2: `companysignature` 0.5.0 (`docs/releases/phase2-baseline.md`).
+- **Estado:** Aceptado — **implementado** (aprobación electrónica **interna** / evidencia; **no** firma digital certificada): Fase 2C, PR #10 (`3d4610f`); install() seguro en upgrade en el PR #13; derechos de Super-Admin preservados en upgrade en el PR #22 (`74dc2c7`). Baseline de Fase 2: `companysignature` 0.5.1 (`docs/releases/phase2-baseline.md`).
   *(Estado original: "Aceptado (diseño); implementación pendiente de aprobación humana".)*
 - **Fecha:** 2026-09-14
 - **Decisores:** Producto, legal/cumplimiento, seguridad, plataforma

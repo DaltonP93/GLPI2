@@ -44,7 +44,7 @@ Ver el encabezado de licencia declarado en cada `plugins/*/setup.php`.
 ---
 ## Estado del proyecto — baseline de Fase 2
 
-La Fase 2 está **completa en código** sobre `main` `6c7d994`. Es una baseline **candidata**:
+La Fase 2 está **completa en código** sobre `main` `74dc2c7`. Es una baseline **candidata**:
 - sin tag ni GitHub Release;
 - pendiente de la UAT en staging.
 
@@ -67,8 +67,8 @@ SI4-3   — QR + label + ACK/finalize .......... ✅  (código listo; worker DES
 | Plugin | Versión (`setup.php`) | Estado |
 |--------|-----------------------|--------|
 | `companyqr` | 0.3.0 | implementado |
-| `companyworkflow` | 0.6.0 | implementado |
-| `companysignature` | 0.5.0 | implementado (firma interna / evidencia) |
+| `companyworkflow` | 0.6.1 | implementado |
+| `companysignature` | 0.5.1 | implementado (firma interna / evidencia) |
 | `companyintegrations` | 0.6.0 | implementado (SI-1 + SI4-1/2/3; worker SI-4 deshabilitado) |
 | `companypurchasing` | 0.5.0 | implementado (v1) |
 | `companyportal` | 0.1.0 | **esqueleto / no implementado** |

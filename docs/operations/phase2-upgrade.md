@@ -1,7 +1,7 @@
 # Upgrade de una instalación existente — baseline de Fase 2
 
 > Lleva una instalación **existente** de GLPI 11.0.x, con versiones anteriores de los plugins propios, a la baseline
-> `main` `6c7d994` (ver `../releases/phase2-baseline.md`).
+> `main` `74dc2c7` (ver `../releases/phase2-baseline.md`).
 > **Fail-closed:** si un paso falla, no se sigue; se aplica el rollback (§8).
 > **Staging primero**, sobre una copia restaurada de producción (`deployment.md`). Nunca directo en producción.
 > **Nunca se toca el core de GLPI ni `vendor/`.** Sólo cambia el código de `plugins/<plugin>`.
@@ -25,20 +25,28 @@ Este procedimiento cubre **sólo los plugins**. Actualizar el core de GLPI (otra
 - `plugin:install` falla si la ejecución de plugins está suspendida (`plugin:suspend_execution`). **No** usar ese
   comando en este procedimiento: sirve para upgrades del core.
 - `install()` de los 5 plugins es idempotente y seguro en upgrade. Crea sólo las tablas, columnas e índices que
-  faltan, siembra sólo la configuración ausente, no duplica Acciones automáticas y no pisa los derechos ajustados por
-  un administrador.
+  faltan, siembra sólo la configuración ausente, no duplica Acciones automáticas y no toca los derechos de los
+  perfiles que no son Super-Admin.
+  - Derechos del perfil Super-Admin (id 4) en un upgrade: `companyworkflow` ≥ 0.6.1, `companysignature` ≥ 0.5.1 y
+    `companyqr` los **preservan** tal como los dejó un administrador. `companypurchasing` 0.5.0 los **sobrescribe**
+    con todos los bits y `companyintegrations` 0.6.0 le **suma** los bits del plugin. Ver
+    `../releases/phase2-baseline.md` §2 y §6.
   - Lo cubren los selftests `[UPGRADE]` / `[UPGRADE-P2D3]` / `[UPGRADE-P2D4]` / `[SI4Q-*]`.
   - El PR #20 hizo un upgrade real desde `9382ef2`, con datos, comparando huellas sha256 de todas las tablas.
 
 ### Qué cambia desde el `main` anterior (`9382ef2`)
 
-| Plugin | Versión en `9382ef2` | Baseline `6c7d994` | ¿GLPI lo marca "Para actualizar"? |
+| Plugin | Versión en `9382ef2` | Baseline `74dc2c7` | ¿GLPI lo marca "Para actualizar"? |
 |---|---|---|---|
-| `companyworkflow` | 0.5.0 | **0.6.0** | sí |
-| `companysignature` | 0.5.0 | 0.5.0 | no (sigue activado) |
+| `companyworkflow` | 0.5.0 | **0.6.1** | sí |
+| `companysignature` | 0.5.0 | **0.5.1** | sí |
 | `companyqr` | 0.3.0 | 0.3.0 | no (sigue activado) |
 | `companypurchasing` | 0.4.0 | **0.5.0** | sí |
 | `companyintegrations` | 0.5.0 | **0.6.0** | sí |
+
+Desde `6c7d994` (el `main` previo al PR #22) sólo cambian `companyworkflow` 0.6.0 → 0.6.1 y `companysignature`
+0.5.0 → 0.5.1. Son parches sin cambios de esquema ni de lógica: sólo cambia cómo `install()` trata los derechos de
+Super-Admin. Ambos aparecen "Para actualizar" y siguen el mismo procedimiento.
 
 Desde una base más vieja, cambian más plugins. El procedimiento es el mismo: se actualiza **cada plugin que
 `plugin:list` muestre "Para actualizar"**, en el orden de §4.
@@ -48,7 +56,10 @@ Desde una base más vieja, cambian más plugins. El procedimiento es el mismo: s
 1. Leer `../releases/phase2-baseline.md` §6 (limitaciones conocidas).
 2. Registrar el estado actual:
    - `php bin/console plugin:list` → versiones y estados de partida (guardar la salida);
-   - versión de GLPI 11.0.x. Los plugins declaran `11.0 ≤ GLPI < 12.0`; fuera de ese rango, **no seguir**.
+   - versión de GLPI 11.0.x. Los plugins declaran `11.0 ≤ GLPI < 12.0`; fuera de ese rango, **no seguir**;
+   - derechos del perfil Super-Admin para cada plugin (**Administración → Perfiles → Super-Admin**). Hace falta para
+     comprobar en §5.3 que el upgrade no los cambió, y para volver a recortar los de Compras e Integraciones si un
+     administrador los había recortado.
 3. PHP con `bcmath`.
 4. Reconciliaciones **antes** del upgrade. Son seguras con datos reales; guardar la salida:
 
@@ -87,7 +98,7 @@ infra/backup/backup.sh                       # DB (--single-transaction) + files
 
 ## 3. Upgrade de código (sólo plugins)
 
-- Reemplazar `plugins/<plugin>` por el código de la baseline: `git checkout 6c7d994 -- plugins/` en el despliegue, o
+- Reemplazar `plugins/<plugin>` por el código de la baseline: `git checkout 74dc2c7 -- plugins/` en el despliegue, o
   la imagen/artefacto equivalente.
   - No copiar nada dentro del core.
   - No tocar `vendor/` de GLPI.
@@ -128,8 +139,8 @@ Docker se ejecutan **como el usuario del servidor web**, desde el directorio de 
 ## 5. Validación (todavía en mantenimiento)
 
 1. `plugin:list` debe mostrar los 5 plugins **activados**, con las versiones de la baseline:
-   - workflow 0.6.0
-   - signature 0.5.0
+   - workflow 0.6.1
+   - signature 0.5.1
    - qr 0.3.0
    - purchasing 0.5.0
    - integrations 0.6.0
@@ -139,8 +150,13 @@ Docker se ejecutan **como el usuario del servidor web**, desde el directorio de 
    - El modo y la frecuencia que haya ajustado un administrador se conservan.
 3. **Administración → Perfiles**:
    - los derechos de los perfiles que ajustó un administrador se conservan;
-   - el perfil Super-Admin (id 4) queda con **todos** los bits de cada plugin, porque `install()` lo fija en cada
-     instalación o upgrade.
+   - perfil Super-Admin (id 4), comparado con lo registrado en §1.2:
+     - `plugin_companyworkflow`, `plugin_companysignature` y `plugin_companyqr`: **iguales** a los previos. Un upgrade
+       ya no les re-otorga todos los bits (PR #22). Si cambiaron ⇒ rollback;
+     - `plugin_companypurchasing`: queda con **todos** los bits, porque `install()` 0.5.0 lo sobrescribe en cada
+       upgrade. Si un administrador lo había recortado, volver a recortarlo ahora;
+     - `plugin_companyintegrations`: conserva sus bits y suma los del plugin. Si un administrador le había quitado
+       alguno, volver a quitarlo ahora.
 4. **Notificaciones (sólo en un upgrade de Compras desde < 0.5.0)**, en **Administración → Cola de notificaciones**:
    - **no** debe aparecer una ráfaga de notificaciones de solicitudes históricas;
    - si aparece, el orden de §4 no se respetó ⇒ rollback.
