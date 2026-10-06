@@ -160,6 +160,10 @@ trait Si4SelftestScenarios
         }
         $saved = \Config::getConfigurationValues(IntegrationsConfig::CONTEXT);
         $p = 'glpi_plugin_companyintegrations_';
+        $superOrig = -1;
+        foreach ($DB->request(['SELECT' => ['rights'], 'FROM' => 'glpi_profilerights', 'WHERE' => ['profiles_id' => 4, 'name' => AssetBridge::$rightname]]) as $r) {
+            $superOrig = (int) $r['rights'];
+        }
         try {
             // (1) Estado 0.2.0: sin tablas/config SI-4, derechos de SI-1, config ajustada por un admin + datos SI-1.
             foreach (['si4_saga_log', 'si4_sagas', 'map_models'] as $t) {
@@ -200,12 +204,16 @@ trait Si4SelftestScenarios
             foreach ($DB->request(['SELECT' => ['rights'], 'FROM' => 'glpi_profilerights', 'WHERE' => ['profiles_id' => 4, 'name' => AssetBridge::$rightname]]) as $r) {
                 $rights = (int) $r['rights'];
             }
-            $this->check('[SI4-UPGRADE] Super-Admin conserva bits SI-1 y suma RIGHT_SI4', ($rights & $si1Bits) === $si1Bits && ($rights & AssetBridge::RIGHT_SI4) === AssetBridge::RIGHT_SI4);
+            // 0.6.1: un upgrade NO toca derechos existentes, tampoco suma RIGHT_SI4 a Super-Admin (el administrador decide).
+            $this->check('[SI4-UPGRADE] Super-Admin conserva EXACTAMENTE los bits SI-1 (RIGHT_SI4 no se inyecta en un perfil ya administrado)', $rights === $si1Bits);
             $this->check('[SI4-UPGRADE] sin filas duplicadas del derecho', countElementsInTable('glpi_profilerights', ['name' => AssetBridge::$rightname]) === $rightsRows);
             (new AssetBridge())->delete(['id' => $bridge], true);
             (new MapCompany())->delete(['id' => $company], true);
         } finally {
             \Config::setConfigurationValues(IntegrationsConfig::CONTEXT, is_array($saved) ? $saved : []);
+            if ($superOrig >= 0) {
+                $DB->update('glpi_profilerights', ['rights' => $superOrig], ['profiles_id' => 4, 'name' => AssetBridge::$rightname]);
+            }
         }
     }
 

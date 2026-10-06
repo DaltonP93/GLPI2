@@ -307,6 +307,7 @@ trait ReceivingSelftestScenarios
             $DB->doQuery("ALTER TABLE `glpi_plugin_companypurchasing_items` DROP COLUMN `{$c}`");
         }
         \Config::deleteConfigurationValues(PluginConfig::CONTEXT, self::P2D3_CONFIG_KEYS);
+        $superOrig = $this->profileRightValue(4);
         $p2d2Full = READ | Request::RIGHT_CREATE_REQUEST | Request::RIGHT_VIEW_OWN | Request::RIGHT_VIEW_ENTITY
             | Request::RIGHT_EDIT_DRAFT | Request::RIGHT_MANAGE_CONFIG | Request::RIGHT_MANAGE_PURCHASING
             | Request::RIGHT_RECEIVE | Request::RIGHT_DELIVER | Request::RIGHT_VIEW_METRICS;
@@ -365,7 +366,8 @@ trait ReceivingSelftestScenarios
         }
         $this->check('[UPGRADE-P2D3] derecho plugin_companypurchasing una vez por perfil (sin duplicar)', $dups === 0 && $this->profileRightValue($profileId) >= 0);
         $this->check('[UPGRADE-P2D3] derecho personalizado de un perfil preservado', $this->profileRightValue($profileId) === $customRight);
-        $this->check('[UPGRADE-P2D3] Super-Admin recibe el bit nuevo INTEGRATION', ($this->profileRightValue(4) & Request::RIGHT_INTEGRATION) === Request::RIGHT_INTEGRATION);
+        // 0.5.1: un upgrade NO toca derechos existentes, tampoco suma a Super-Admin el bit nuevo (el administrador decide).
+        $this->check('[UPGRADE-P2D3] derecho de Super-Admin PRESERVADO EXACTO (el bit nuevo INTEGRATION no se inyecta en un perfil ya administrado)', $this->profileRightValue(4) === $p2d2Full);
         $cron2 = new \CronTask();
         $cron2->getFromDBbyName(\GlpiPlugin\Companypurchasing\Model\ProjectionTask::class, \GlpiPlugin\Companypurchasing\Model\ProjectionTask::CRON_NAME);
         $this->check('[UPGRADE-P2D3] Acción automática única, mismo id y frecuencia preservada',
@@ -390,6 +392,9 @@ trait ReceivingSelftestScenarios
         $this->asAdmin();
         if ($origRight >= 0) {
             $DB->update('glpi_profilerights', ['rights' => $origRight], ['profiles_id' => $profileId, 'name' => Request::$rightname]);
+        }
+        if ($superOrig >= 0) {
+            $DB->update('glpi_profilerights', ['rights' => $superOrig], ['profiles_id' => 4, 'name' => Request::$rightname]);
         }
         (new \CronTask())->update(['id' => $cronId, 'frequency' => $origFreq]);
     }

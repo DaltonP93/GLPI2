@@ -277,6 +277,10 @@ trait DeliverySelftestScenarios
         }
         $origRight = $this->profileRightValue($profileId);
         $custom = READ | Request::RIGHT_VIEW_OWN | Request::RIGHT_DELIVER;
+        // Super-Admin como en 0.4.0, sin los bits que agregó P2D-4: un upgrade NO se los suma (0.5.1).
+        $superOrig = $this->profileRightValue(4);
+        $p2d3Super = $superOrig & ~(Request::RIGHT_DELIVER | Request::RIGHT_VIEW_METRICS);
+        $DB->update('glpi_profilerights', ['rights' => $p2d3Super], ['profiles_id' => 4, 'name' => Request::$rightname]);
         $DB->update('glpi_profilerights', ['rights' => $custom], ['profiles_id' => $profileId, 'name' => Request::$rightname]);
         $configBefore = (array) \Config::getConfigurationValues(PluginConfig::CONTEXT);
         $fp = $this->p2d3Fingerprint();
@@ -322,14 +326,16 @@ trait DeliverySelftestScenarios
         $n = new \Notification();
         $this->check('[UPGRADE-P2D4] una notificación ajustada por el administrador entre installs NO se pisa', $disabled > 0
             && $n->getFromDB($disabled) && (int) $n->fields['is_active'] === 0);
-        $this->check('[UPGRADE-P2D4] derecho personalizado de un perfil preservado (y Super-Admin con DELIVER + VIEW_METRICS)',
-            $this->profileRightValue($profileId) === $custom
-            && ($this->profileRightValue(4) & (Request::RIGHT_DELIVER | Request::RIGHT_VIEW_METRICS)) === (Request::RIGHT_DELIVER | Request::RIGHT_VIEW_METRICS));
+        $this->check('[UPGRADE-P2D4] derecho personalizado de un perfil preservado (y Super-Admin EXACTO: sin DELIVER ni VIEW_METRICS inyectados)',
+            $this->profileRightValue($profileId) === $custom && $this->profileRightValue(4) === $p2d3Super);
         $this->check('[UPGRADE-P2D4] Acción automática única', countElementsInTable(\CronTask::getTable(), ['itemtype' => \GlpiPlugin\Companypurchasing\Model\ProjectionTask::class]) === 1);
         // Restaurar.
         (new \Notification())->update(['id' => $disabled, 'is_active' => 1]);
         if ($origRight >= 0) {
             $DB->update('glpi_profilerights', ['rights' => $origRight], ['profiles_id' => $profileId, 'name' => Request::$rightname]);
+        }
+        if ($superOrig >= 0) {
+            $DB->update('glpi_profilerights', ['rights' => $superOrig], ['profiles_id' => 4, 'name' => Request::$rightname]);
         }
     }
 
