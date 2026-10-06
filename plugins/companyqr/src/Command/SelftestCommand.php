@@ -16,6 +16,9 @@
  *   [API-*]       API pública `CompanyQrApi` (SI4-3, ADR-0022): get-or-create idempotente, carrera por el mismo
  *                 activo, ACL generate/print + entidad, etiqueta real sin datos técnicos ni token, sin rotar/reactivar,
  *                 install() seguro en upgrade (ver ApiSelftestScenarios).
+ *   [BULK-*]      impresión masiva (ADR-0024): Acción masiva sólo con `print`, ACL por activo, revocados fuera,
+ *                 generar faltantes sólo con `generate`, tope, PDF de N páginas, auditoría, revalidación al imprimir
+ *                 (ver BulkSelftestScenarios).
  * Probe NO fatal:
  *   [FORMS-GATE]  ¿existe una vía soportada de prefill/lock del activo en Forms nativo?
  *
@@ -55,6 +58,7 @@ use Symfony\Component\Routing\Annotation\Route;
 final class SelftestCommand extends Command
 {
     use ApiSelftestScenarios;
+    use BulkSelftestScenarios;
 
     private int $failures = 0;
     private OutputInterface $out;
@@ -63,7 +67,7 @@ final class SelftestCommand extends Command
     protected function configure(): void
     {
         $this->setName('plugins:companyqr:selftest')
-            ->setDescription('Pruebas de integración de companyqr (ACL, no-fuga, ciclo de vida, etiqueta, API pública).')
+            ->setDescription('Pruebas de integración de companyqr (ACL, no-fuga, ciclo de vida, etiqueta, API pública, impresión masiva).')
             ->addOption('out', null, InputOption::VALUE_REQUIRED, 'Ruta del PDF de etiqueta', sys_get_temp_dir() . '/companyqr-label.pdf');
     }
 
@@ -184,6 +188,9 @@ final class SelftestCommand extends Command
 
         // --- [API-*] API pública CompanyQrApi (SI4-3, ADR-0022) ---
         $this->runApiScenarios($entityA, $entityB, $suffix);
+
+        // --- [BULK-*] impresión masiva de etiquetas (ADR-0024) ---
+        $this->runBulkScenarios($entityA, $entityB, $suffix);
 
         // --- Limpieza best-effort ---
         $this->cleanup($code, $computer, $entityA, $entityB);

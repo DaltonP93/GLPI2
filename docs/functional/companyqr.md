@@ -93,8 +93,13 @@ Principio rector: **el QR identifica; GLPI autoriza.** Ver `../adr/ADR-0011-comp
   + QR + **código de inventario** (`NB-…`/`PC-…`) + **tipo**. Ubicación/organización
   **opcional** (no por defecto). Tamaño, color y campos **configurables**.
 - **Prohibido en la etiqueta:** IP, MAC, hostname, VLAN, datos técnicos sensibles.
-- **Impresión individual** en v1; diseño **preparado para lote** (no se agrega complejidad
-  de lote si compromete la v1).
+- **Impresión individual** desde el formulario del activo (botón "Imprimir etiqueta QR").
+- **Impresión masiva** (0.4.0, ADR-0024): en el listado de activos, seleccionar los activos →
+  Acciones → **"Imprimir etiquetas QR"**. Se abre **un PDF con una etiqueta por página** (mismo
+  tamaño que la individual). Requiere el derecho `print`; con `generate` se puede marcar
+  "Generar los códigos QR que falten". Se omiten (con mensaje) los activos sin acceso, sin código,
+  con código suspendido/revocado o que pasan el tope del lote (`label_batch_max`, default 200,
+  máximo 500). El lote vive 15 min en la sesión del usuario; cada etiqueta impresa queda auditada.
 - Ver mock: `mocks/companyqr-mock.html`.
 
 ## i18n

@@ -28,20 +28,55 @@ final class LabelRenderer
      */
     public function pdf(array $label): string
     {
-        [$defW, $defH] = PluginConfig::labelSizeMm();
-        $w = (float) ($label['width_mm'] ?? $defW);
-        $h = (float) ($label['height_mm'] ?? $defH);
-        $header = (string) ($label['header'] ?? PluginConfig::get('label_header', 'TI • ACTIVOS'));
-        $bg = self::hexToRgb((string) ($label['bg'] ?? PluginConfig::get('label_bg', '#f7e300')));
-        $org = $label['org'] ?? null;
+        return $this->pdfMany([$label]);
+    }
 
-        $pdf = new TCPDF('L', 'mm', [$w, $h], true, 'UTF-8', false);
+    /**
+     * Varias etiquetas en UN PDF: una etiqueta por página, cada página del tamaño de la etiqueta (apto para impresora
+     * de etiquetas). Con una sola etiqueta el resultado es el mismo que `pdf()` (ADR-0024).
+     *
+     * @param list<array{
+     *   public_code:string, type:string, qr_data:string,
+     *   header?:string, org?:?string, width_mm?:float, height_mm?:float, bg?:string
+     * }> $labels
+     * @return string PDF binario
+     */
+    public function pdfMany(array $labels): string
+    {
+        if ($labels === []) {
+            throw new \InvalidArgumentException('pdfMany() necesita al menos una etiqueta');
+        }
+        [$defW, $defH] = PluginConfig::labelSizeMm();
+        [$w0, $h0] = self::pageSize($labels[0], $defW, $defH);
+
+        $pdf = new TCPDF('L', 'mm', [$w0, $h0], true, 'UTF-8', false);
         $pdf->SetCreator('companyqr');
         $pdf->SetAutoPageBreak(false, 0);
         $pdf->SetMargins(1.5, 1.5, 1.5);
         $pdf->setPrintHeader(false);
         $pdf->setPrintFooter(false);
-        $pdf->AddPage();
+
+        foreach ($labels as $label) {
+            [$w, $h] = self::pageSize($label, $defW, $defH);
+            $pdf->AddPage('L', [$w, $h]);
+            $this->drawLabel($pdf, $label, $w, $h);
+        }
+
+        return $pdf->Output('label.pdf', 'S');
+    }
+
+    /** @return array{0:float,1:float} ancho x alto en mm de la etiqueta (o los de la configuración). */
+    private static function pageSize(array $label, float $defW, float $defH): array
+    {
+        return [(float) ($label['width_mm'] ?? $defW), (float) ($label['height_mm'] ?? $defH)];
+    }
+
+    /** Dibuja UNA etiqueta en la página actual (fondo, QR a la izquierda, textos a la derecha). */
+    private function drawLabel(TCPDF $pdf, array $label, float $w, float $h): void
+    {
+        $header = (string) ($label['header'] ?? PluginConfig::get('label_header', 'TI • ACTIVOS'));
+        $bg = self::hexToRgb((string) ($label['bg'] ?? PluginConfig::get('label_bg', '#f7e300')));
+        $org = $label['org'] ?? null;
 
         // Fondo (amarillo por defecto).
         $pdf->SetFillColor($bg[0], $bg[1], $bg[2]);
@@ -82,8 +117,6 @@ final class LabelRenderer
             $pdf->SetXY($tx, 16.5);
             $pdf->Cell($tw, 3.0, (string) $org, 0, 2, 'L');
         }
-
-        return $pdf->Output('label.pdf', 'S');
     }
 
     /**

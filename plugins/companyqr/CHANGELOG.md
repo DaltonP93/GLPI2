@@ -3,6 +3,21 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.4.0] — Impresión masiva de etiquetas (ADR-0024)
+### Added
+- **Acción masiva nativa "Imprimir etiquetas QR"** en los listados de activos (`$CFG_GLPI['asset_types']`), sólo con
+  el derecho `print`. Opción "Generar los códigos QR que falten" sólo con `generate`.
+- `BulkLabelService`: decide por activo (`decide()` puro: sin acceso / sin código / inactivo / tope) y arma el PDF
+  revalidando cada código al imprimir. Nunca rota, revoca ni reactiva.
+- `LabelBatch`: lote en la sesión con clave aleatoria de 128 bits, atado al usuario, vence a los 15 min, sin
+  duplicados (resiste la recarga del proceso masivo de GLPI).
+- Ruta `GET /plugins/companyqr/labels/{batch}` (AUTHENTICATED + `print`): PDF con una etiqueta por página.
+- Auditoría `label_printed` (canal `batch`) por etiqueta y una línea de log por lote en `companyqr.log`.
+- Configuración `label_batch_max` (default 200, acotada a 1–500); install() la siembra sólo si falta.
+- Selftest `[BULK-*]` y tests unitarios del lote y de la decisión. Cadenas nuevas en ES/EN.
+### Changed
+- `LabelRenderer::pdf()` delega en el nuevo `pdfMany()` (una página por etiqueta); la etiqueta individual no cambia.
+
 ## [0.3.0] — API pública para SI4-3 (ADR-0022)
 ### Added
 - **`GlpiPlugin\Companyqr\Api\CompanyQrApi`**: API mínima y agnóstica del dominio para otros plugins.

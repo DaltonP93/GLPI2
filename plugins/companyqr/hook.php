@@ -10,7 +10,8 @@
  *
  * install() es idempotente y SEGURO EN UPGRADE (tablas IF-not-exists, derecho sólo si falta,
  * configuración sólo para claves ausentes). 0.3.0 no cambia el esquema: sólo agrega la API
- * pública `CompanyQrApi` (ADR-0022).
+ * pública `CompanyQrApi` (ADR-0022). 0.4.0 tampoco: agrega la impresión masiva (ADR-0024) y la clave de
+ * configuración `label_batch_max`, que se siembra sólo si falta.
  *
  * @license GPL-3.0-or-later
  */
@@ -121,6 +122,29 @@ function plugin_companyqr_uninstall() {
     Config::deleteConfigurationValues(PluginConfig::CONTEXT, array_keys(PluginConfig::DEFAULTS));
 
     return true;
+}
+
+// ---------------------------------------------------------------------------
+//  Acción masiva "Imprimir etiquetas QR" (ADR-0024)
+// ---------------------------------------------------------------------------
+
+/**
+ * Acciones masivas del plugin para un itemtype (hook nativo `MassiveActions`). Sólo en tipos de activo y sólo si la
+ * sesión puede imprimir etiquetas. El proceso vive en `Code::processMassiveActionsForOneItemtype()`.
+ *
+ * @param string $itemtype
+ * @return array<string,string>
+ */
+function plugin_companyqr_MassiveActions($itemtype) {
+    global $CFG_GLPI;
+    if (!in_array($itemtype, $CFG_GLPI['asset_types'] ?? [], true)
+        || !Session::haveRight(Code::$rightname, Code::RIGHT_PRINT)) {
+        return [];
+    }
+    return [
+        Code::class . MassiveAction::CLASS_ACTION_SEPARATOR . Code::MA_PRINT_LABELS
+            => "<i class='ti ti-qrcode'></i>" . htmlspecialchars(__('Print QR labels', 'companyqr'), ENT_QUOTES),
+    ];
 }
 
 // ---------------------------------------------------------------------------
