@@ -55,7 +55,7 @@ tests · documentación · changelog · verificación de core intacto.
 | Ruta | Rol |
 |------|-----|
 | `setup.php` | Metadatos, requisitos e `init` (registro de hooks) |
-| `hook.php` | `install()` / `uninstall()` con migraciones reversibles |
+| `hook.php` | `install()` / `uninstall()` con migraciones reversibles. `install()` es seguro en upgrade: no duplica el derecho ni la Acción automática, siembra sólo la configuración ausente y otorga todos los bits a Super-Admin sólo en la instalación inicial (0.5.1). |
 | `src/` | Clases del plugin (PSR-4: `GlpiPlugin\...`) |
 | `locales/` | Traducciones ES/EN (i18n) |
 | `templates/` | Vistas Twig |

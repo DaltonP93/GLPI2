@@ -194,21 +194,22 @@ function plugin_companyworkflow_install() {
         ) ENGINE=InnoDB DEFAULT CHARSET={$charset} COLLATE={$collation} ROW_FORMAT=DYNAMIC;");
     }
 
-    // --- ACL: derecho propio del plugin en todos los perfiles (0 por defecto). Sólo si FALTA: GLPI
-    // vuelve a llamar install() al ACTUALIZAR el plugin; re-agregarlo violaría el UNIQUE
-    // (profiles_id, name) de glpi_profilerights y abortaría el upgrade. ---
+    // --- ACL: derecho propio del plugin en todos los perfiles (0 por defecto). install() es SEGURO EN UPGRADE (GLPI
+    // lo vuelve a llamar al ACTUALIZAR el plugin): el derecho se agrega sólo si FALTA (re-agregarlo violaría el
+    // UNIQUE (profiles_id, name) de glpi_profilerights y abortaría el upgrade) y SÓLO en ese primer alta se otorgan
+    // todos los bits al perfil Super-Admin (id 4 por defecto en GLPI). En un upgrade los derechos que ajustó un
+    // administrador (incluido Super-Admin) NO se tocan. ---
     if (class_exists('ProfileRight')
         && countElementsInTable(ProfileRight::getTable(), ['name' => WorkflowDef::$rightname]) === 0) {
         ProfileRight::addProfileRights([WorkflowDef::$rightname]);
+        $full = READ | WorkflowDef::RIGHT_ACT | WorkflowDef::RIGHT_ADMIN
+            | WorkflowDef::RIGHT_DELEGATE | WorkflowDef::RIGHT_CONFIG;
+        $DB->update(
+            'glpi_profilerights',
+            ['rights' => $full],
+            ['profiles_id' => 4, 'name' => WorkflowDef::$rightname]
+        );
     }
-    // Otorgar todos los bits al perfil Super-Admin (id 4 por defecto en GLPI).
-    $full = READ | WorkflowDef::RIGHT_ACT | WorkflowDef::RIGHT_ADMIN
-        | WorkflowDef::RIGHT_DELEGATE | WorkflowDef::RIGHT_CONFIG;
-    $DB->update(
-        'glpi_profilerights',
-        ['rights' => $full],
-        ['profiles_id' => 4, 'name' => WorkflowDef::$rightname]
-    );
 
     // --- Configuración por defecto (sin secretos). Sólo se siembran las claves AUSENTES: un
     // reinstall/upgrade NO pisa lo que ajustó un administrador (SLA/escalamiento, límites operativos

@@ -115,21 +115,21 @@ function plugin_companysignature_install() {
         $DB->doQuery($sql);
     }
 
-    // Derecho propio del plugin en todos los perfiles (valor 0 por defecto). Sólo si FALTA: GLPI vuelve a
-    // llamar install() al ACTUALIZAR el plugin (p. ej. 0.4.0 → 0.5.0); re-agregarlo violaría el UNIQUE
-    // (profiles_id, name) de glpi_profilerights y abortaría el upgrade.
+    // Derecho propio del plugin en todos los perfiles (valor 0 por defecto). install() es SEGURO EN UPGRADE (GLPI lo
+    // vuelve a llamar al ACTUALIZAR el plugin, p. ej. 0.5.0 → 0.5.1): el derecho se agrega sólo si FALTA (re-agregarlo
+    // violaría el UNIQUE (profiles_id, name) de glpi_profilerights y abortaría el upgrade) y SÓLO en ese primer alta se
+    // otorgan todos los bits al perfil Super-Admin (id 4 por defecto en GLPI). En un upgrade los derechos que ajustó un
+    // administrador (incluido Super-Admin) NO se tocan.
     if (class_exists('ProfileRight')
         && countElementsInTable(ProfileRight::getTable(), ['name' => 'plugin_companysignature']) === 0) {
         ProfileRight::addProfileRights(['plugin_companysignature']);
+        $full = READ | ApprovalEvidence::RIGHT_RECORD | ApprovalEvidence::RIGHT_VERIFY | ApprovalEvidence::RIGHT_CONFIG;
+        $DB->update(
+            'glpi_profilerights',
+            ['rights' => $full],
+            ['profiles_id' => 4, 'name' => 'plugin_companysignature']
+        );
     }
-
-    // Otorgar todos los bits al perfil Super-Admin (id 4 por defecto en GLPI).
-    $full = READ | ApprovalEvidence::RIGHT_RECORD | ApprovalEvidence::RIGHT_VERIFY | ApprovalEvidence::RIGHT_CONFIG;
-    $DB->update(
-        'glpi_profilerights',
-        ['rights' => $full],
-        ['profiles_id' => 4, 'name' => 'plugin_companysignature']
-    );
 
     // Configuración por defecto (contexto plugin:companysignature). Sin secretos. Sólo se siembran las
     // claves AUSENTES: un reinstall/upgrade NO pisa lo que un administrador ajustó ni el high-watermark
