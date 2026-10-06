@@ -54,7 +54,8 @@ Ver `../../CLAUDE.md`, `../../docs/adr/ADR-0002-glpi-core-immutable.md` y
   resolución de transición, ventana de delegación.
 - **Integración + E2E (en GLPI):** `php bin/console plugins:companyworkflow:selftest` — persistencia,
   ACL, multi-entidad, quórum, delegación, versión, SLA, el ciclo completo + negativos, `[UPGRADE]`
-  (`install()` repetido sobre una instalación existente sin duplicar ni pisar nada) e `[INBOX]` (API de lectura).
+  (`install()` repetido sobre una instalación existente sin duplicar ni pisar nada, tampoco los derechos que un
+  administrador ajustó en Super-Admin; 0.6.1) e `[INBOX]` (API de lectura).
 
 ## Limitaciones / deuda técnica (v1)
 - `approver_kind = entity_manager` aún no resuelve aprobadores (devuelve conjunto vacío,

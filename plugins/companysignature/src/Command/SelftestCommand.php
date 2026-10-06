@@ -1064,6 +1064,14 @@ final class SelftestCommand extends Command
         $otherOrig = $this->profileRight($otherProfile);
         ProfileRight::updateProfileRights($otherProfile, [$right => ApprovalEvidence::RIGHT_VERIFY]);
 
+        // Super-Admin (id 4): la instalación inicial le otorgó todos los bits; un administrador luego se los RECORTA.
+        // El upgrade NO debe devolvérselos (antes install() los pisaba siempre con todos los bits).
+        $full = READ | ApprovalEvidence::RIGHT_RECORD | ApprovalEvidence::RIGHT_VERIFY | ApprovalEvidence::RIGHT_CONFIG;
+        $superOrig = $this->profileRight(4);
+        $this->check('[UPGRADE] precondición: Super-Admin recibió todos los bits en la instalación inicial', $superOrig === $full);
+        $superCustom = READ | ApprovalEvidence::RIGHT_VERIFY;
+        ProfileRight::updateProfileRights(4, [$right => $superCustom]);
+
         // Acción automática existente con frecuencia ajustada por el administrador.
         $cron = new CronTask();
         $cronId = $cron->getFromDBbyName(ReconcileTask::class, 'reconcile') ? (int) $cron->getID() : 0;
@@ -1090,8 +1098,7 @@ final class SelftestCommand extends Command
             }
             $this->check(sprintf('[UPGRADE] el derecho sigue EXACTAMENTE una vez por perfil (%d perfiles, %d filas)', $profiles, array_sum($perProfile)), count($perProfile) === $profiles && $perProfile !== [] && max($perProfile) === 1);
             $this->check('[UPGRADE] derecho personalizado de un perfil PRESERVADO', $this->profileRight($otherProfile) === ApprovalEvidence::RIGHT_VERIFY);
-            $full = READ | ApprovalEvidence::RIGHT_RECORD | ApprovalEvidence::RIGHT_VERIFY | ApprovalEvidence::RIGHT_CONFIG;
-            $this->check('[UPGRADE] Super-Admin conserva todos los bits', $this->profileRight(4) === $full);
+            $this->check('[UPGRADE] derecho de Super-Admin recortado por el administrador PRESERVADO (no se re-otorgan todos los bits)', $this->profileRight(4) === $superCustom);
 
             $now = Config::getConfigurationValues(PluginConfig::CONTEXT);
             $kept = array_filter($custom, static fn (string $v, string $k): bool => (string) ($now[$k] ?? '') === $v, ARRAY_FILTER_USE_BOTH);
@@ -1113,6 +1120,9 @@ final class SelftestCommand extends Command
             Config::setConfigurationValues(PluginConfig::CONTEXT, $orig);
             if ($otherProfile > 0 && $otherOrig >= 0) {
                 ProfileRight::updateProfileRights($otherProfile, [$right => $otherOrig]);
+            }
+            if ($superOrig >= 0) {
+                ProfileRight::updateProfileRights(4, [$right => $superOrig]);
             }
             if ($cronId > 0) {
                 (new CronTask())->update(['id' => $cronId, 'frequency' => $cronFreqOrig]);

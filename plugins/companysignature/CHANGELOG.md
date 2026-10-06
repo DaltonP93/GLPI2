@@ -3,6 +3,17 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y versionado [SemVer](https://semver.org/lang/es/).
 
+## [0.5.1] — `install()` no pisa los derechos de Super-Admin en un upgrade
+### Fixed
+- GLPI vuelve a llamar `install()` al actualizar el plugin. Antes, cada llamada **sobrescribía** el derecho del
+  plugin en el perfil Super-Admin (id 4) con todos los bits, así que un upgrade deshacía en silencio cualquier
+  recorte que hubiera hecho un administrador.
+- Ahora los bits completos se otorgan a Super-Admin **sólo en el primer alta del derecho** (instalación nueva),
+  igual que `companyqr`. En un upgrade no se toca ningún derecho ya existente.
+- Sin cambios de esquema ni de lógica; tablas y datos propios intactos.
+- Test: selftest `[UPGRADE]` recorta el derecho de Super-Admin (`READ | RIGHT_VERIFY`) antes de `install()` ×2 y verifica que
+  se conserve (antes verificaba que volviera a tener todos los bits).
+
 ## [0.5.0] — Fase 2D · P2D-2 (invalidación exacta por checkpoint)
 ### Changed
 - **Invalidación EXACTA POR CHECKPOINT** (domain-agnostic): al materializar `approval_invalidated`, sólo se
