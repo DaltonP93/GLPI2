@@ -16,8 +16,9 @@
  *
  * install() es SEGURO EN UPGRADE (GLPI lo vuelve a llamar al actualizar 0.2.0 → 0.3.0 → 0.4.0 → 0.5.0): tablas con IF-not-exists,
  * columnas/índices nuevos sólo si faltan,
- * el derecho se agrega sólo si falta (re-agregarlo viola el UNIQUE de glpi_profilerights), los bits nuevos se SUMAN
- * al Super-Admin sin quitar nada y la configuración sólo siembra claves AUSENTES (no pisa lo ajustado).
+ * el derecho se agrega sólo si falta (re-agregarlo viola el UNIQUE de glpi_profilerights) y sólo en ese primer alta recibe
+ * Super-Admin todos los bits (0.6.1: un upgrade NO toca derechos existentes ni suma bits nuevos) y la configuración sólo
+ * siembra claves AUSENTES (no pisa lo ajustado).
  *
  * @license GPL-3.0-or-later
  */
@@ -281,22 +282,18 @@ function plugin_companyintegrations_install() {
     }
 
     // --- ACL (IDEMPOTENTE: re-agregar el derecho violaría el UNIQUE (profiles_id, name) y abortaría el upgrade) ---
+    // SÓLO en el primer alta del derecho se otorgan todos los bits al Super-Admin (id 4). En un upgrade los derechos que
+    // ajustó un administrador (incluido Super-Admin) se preservan EXACTOS: no se suman bits nuevos (p. ej. RIGHT_SI4).
     if (class_exists('ProfileRight')
         && countElementsInTable(ProfileRight::getTable(), ['name' => AssetBridge::$rightname]) === 0) {
         ProfileRight::addProfileRights([AssetBridge::$rightname]);
+        $full = READ | AssetBridge::RIGHT_RECONCILE | AssetBridge::RIGHT_MAP | AssetBridge::RIGHT_CONFIG | AssetBridge::RIGHT_SI4;
+        $DB->update(
+            'glpi_profilerights',
+            ['rights' => $full],
+            ['profiles_id' => 4, 'name' => AssetBridge::$rightname]
+        );
     }
-    // Super-Admin (id 4): se SUMAN los bits del plugin sin quitar ninguno que un administrador haya dado.
-    $full = READ | AssetBridge::RIGHT_RECONCILE | AssetBridge::RIGHT_MAP | AssetBridge::RIGHT_CONFIG | AssetBridge::RIGHT_SI4;
-    $current = 0;
-    foreach ($DB->request(['SELECT' => ['rights'], 'FROM' => 'glpi_profilerights',
-        'WHERE' => ['profiles_id' => 4, 'name' => AssetBridge::$rightname]]) as $row) {
-        $current = (int) $row['rights'];
-    }
-    $DB->update(
-        'glpi_profilerights',
-        ['rights' => $current | $full],
-        ['profiles_id' => 4, 'name' => AssetBridge::$rightname]
-    );
 
     // --- Config por defecto (SIN token; el token vive en secret/env, nunca en Git/BD). Sólo claves AUSENTES. ---
     if (class_exists('Config')) {

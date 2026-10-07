@@ -277,6 +277,10 @@ trait DeliverySelftestScenarios
         }
         $origRight = $this->profileRightValue($profileId);
         $custom = READ | Request::RIGHT_VIEW_OWN | Request::RIGHT_DELIVER;
+        // Super-Admin como en 0.4.0, sin los bits que agregó P2D-4: un upgrade NO se los suma (0.5.1).
+        $superOrig = $this->profileRightValue(4);
+        $p2d3Super = $superOrig & ~(Request::RIGHT_DELIVER | Request::RIGHT_VIEW_METRICS);
+        $DB->update('glpi_profilerights', ['rights' => $p2d3Super], ['profiles_id' => 4, 'name' => Request::$rightname]);
         $DB->update('glpi_profilerights', ['rights' => $custom], ['profiles_id' => $profileId, 'name' => Request::$rightname]);
         $configBefore = (array) \Config::getConfigurationValues(PluginConfig::CONTEXT);
         $fp = $this->p2d3Fingerprint();
@@ -322,14 +326,16 @@ trait DeliverySelftestScenarios
         $n = new \Notification();
         $this->check('[UPGRADE-P2D4] una notificación ajustada por el administrador entre installs NO se pisa', $disabled > 0
             && $n->getFromDB($disabled) && (int) $n->fields['is_active'] === 0);
-        $this->check('[UPGRADE-P2D4] derecho personalizado de un perfil preservado (y Super-Admin con DELIVER + VIEW_METRICS)',
-            $this->profileRightValue($profileId) === $custom
-            && ($this->profileRightValue(4) & (Request::RIGHT_DELIVER | Request::RIGHT_VIEW_METRICS)) === (Request::RIGHT_DELIVER | Request::RIGHT_VIEW_METRICS));
+        $this->check('[UPGRADE-P2D4] derecho personalizado de un perfil preservado (y Super-Admin EXACTO: sin DELIVER ni VIEW_METRICS inyectados)',
+            $this->profileRightValue($profileId) === $custom && $this->profileRightValue(4) === $p2d3Super);
         $this->check('[UPGRADE-P2D4] Acción automática única', countElementsInTable(\CronTask::getTable(), ['itemtype' => \GlpiPlugin\Companypurchasing\Model\ProjectionTask::class]) === 1);
         // Restaurar.
         (new \Notification())->update(['id' => $disabled, 'is_active' => 1]);
         if ($origRight >= 0) {
             $DB->update('glpi_profilerights', ['rights' => $origRight], ['profiles_id' => $profileId, 'name' => Request::$rightname]);
+        }
+        if ($superOrig >= 0) {
+            $DB->update('glpi_profilerights', ['rights' => $superOrig], ['profiles_id' => 4, 'name' => Request::$rightname]);
         }
     }
 
@@ -362,7 +368,7 @@ trait DeliverySelftestScenarios
     private function scenarioP2d4Persist(): void
     {
         $this->out->writeln('== [P2D4-PERSIST] versión, esquema, literales y definición ==');
-        $this->check('[P2D4-PERSIST] versión del plugin 0.5.0', defined('PLUGIN_COMPANYPURCHASING_VERSION') && PLUGIN_COMPANYPURCHASING_VERSION === '0.5.0');
+        $this->check('[P2D4-PERSIST] versión del plugin 0.5.1', defined('PLUGIN_COMPANYPURCHASING_VERSION') && PLUGIN_COMPANYPURCHASING_VERSION === '0.5.1');
         $this->check('[P2D4-PERSIST] tabla delivery_batches (idempotency_key UNIQUE) + columnas de entrega en receipt_units',
             $this->tableExistsLive('glpi_plugin_companypurchasing_delivery_batches') && $this->columnExistsLive('glpi_plugin_companypurchasing_receipt_units', 'delivered_to_users_id'));
         $this->check('[P2D4-PERSIST] literales compartidos = constantes reales (unidad, outbox, ledger)',

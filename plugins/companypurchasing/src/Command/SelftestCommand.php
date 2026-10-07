@@ -41,6 +41,9 @@
  * notificaciones NATIVAS (cola real, una vez por hecho, el fallo no revierte), métricas exactas multi-moneda con
  * aislamiento por entidad y el E2E completo hasta CLOSED.
  *
+ * [UPGRADE] (trait `UpgradeRightsSelftestScenarios`, 0.5.1): install() ×2 sobre la instalación con datos NO re-otorga derechos
+ * que un administrador quitó (Super-Admin y otro perfil EXACTOS), configuración/Acción automática preservadas, datos intactos.
+ *
  * @license GPL-3.0-or-later
  */
 
@@ -73,6 +76,8 @@ final class SelftestCommand extends Command
     use ReceivingSelftestScenarios;
     // P2D-4: entrega física, cierre, bandejas, notificaciones nativas, métricas y E2E completo (mismo selftest).
     use DeliverySelftestScenarios;
+    // 0.5.1: [UPGRADE] los derechos que ajustó un administrador sobreviven a install() (mismo selftest).
+    use UpgradeRightsSelftestScenarios;
 
     private int $failures = 0;
     private OutputInterface $out;

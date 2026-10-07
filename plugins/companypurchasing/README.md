@@ -11,7 +11,8 @@ Plugin propio de la **Plataforma GLPI Modular**.
   `IN_PURCHASE` → `PARTIALLY_RECEIVED` → `RECEIVED` → `DELIVERED` → `CLOSED`, sobre `companyworkflow` (único
   motor) y `companysignature` (evidencia/PDF), con recepción y entrega física por unidad y handoff (outbox) para
   SI-4. El alta de activos GLPI / Snipe-IT / companyqr la hace SI-4 (`companyintegrations`), **no** Compras.
-- **Versión:** `0.5.0` (P2D-4; esquema nuevo con upgrade idempotente desde 0.4.0). Requiere `companyworkflow`
+- **Versión:** `0.5.1` (0.5.0 = P2D-4, esquema nuevo con upgrade idempotente desde 0.4.0; 0.5.1 = un upgrade ya no
+  re-otorga derechos que un administrador quitó, sin cambio de esquema). Requiere `companyworkflow`
   `>= 0.6.0` para bandejas/notificaciones (API de lectura); con una versión anterior esas lecturas fallan
   cerradas.
 - **Decisiones:** P2D-2 `../../docs/adr/ADR-0018-companypurchasing-approvals.md` · P2D-3
@@ -135,7 +136,8 @@ historial general siguen exigiendo `VIEW_OWN` / `VIEW_ENTITY`.
 - **Integración + E2E (en GLPI, obligatorio en CI):** `php bin/console plugins:companypurchasing:selftest` —
   P2D-1, P2D-2, P2D-3 (`[UPGRADE-P2D3]`, `[RECEIVE-*]`, `[OUTBOX]`, `[LEGACY-DEF]`…) y P2D-4 (`[UPGRADE-P2D4]`,
   `[DELIVERY-*]`, `[CLOSE]`, `[LEGACY-DELIVERY]`, `[P2D4-RIGHTS]`, `[INBOX]`, `[METRICS]`, `[NOTIFY]`,
-  `[E2E-FULL]`), con procesos paralelos reales (`plugins:companypurchasing:concurrency-probe`, sólo con
+  `[E2E-FULL]`) y `[UPGRADE]` (0.5.1: `install()` ×2 conserva EXACTOS los derechos que ajustó un administrador,
+  incluido Super-Admin, sin sumar bits nuevos), con procesos paralelos reales (`plugins:companypurchasing:concurrency-probe`, sólo con
   `COMPANYPURCHASING_ALLOW_PROBE=1`).
 - **E2E HTTP real (obligatorio en CI):** `bash tests/e2e/companypurchasing-http.sh` — sesión, métodos (GET sobre una
   acción ⇒ 405 vía `MethodGuardController`), CSRF nativo (sin token / inválido / reutilizado ⇒ 403), PRG, escape de
