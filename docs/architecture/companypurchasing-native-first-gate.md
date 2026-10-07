@@ -1,6 +1,6 @@
 # Gate native-first — `companypurchasing` (Fase 2D)
 
-> **Estado (baseline de Fase 2, `main` `74dc2c7`):** aprobado e **implementado** (P2D-1 a P2D-4: PR #12, #13, #16 y #20). Este documento es el **diseño previo** y se conserva
+> **Estado (baseline de Fase 2, `main` `5ffcd32`):** aprobado e **implementado** (P2D-1 a P2D-4: PR #12, #13, #16 y #20). Este documento es el **diseño previo** y se conserva
 > como registro: ante cualquier diferencia mandan el código y `../releases/phase2-baseline.md`.
 
 > **Estado:** GATE de decisiones — **diseño, SIN implementación.** Fija el alcance de

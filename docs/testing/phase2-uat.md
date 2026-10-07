@@ -1,6 +1,6 @@
 # UAT — baseline de Fase 2 (Compras v1 + plataforma)
 
-> Pruebas de aceptación de usuario de la baseline `main` `74dc2c7` (`../releases/phase2-baseline.md`).
+> Pruebas de aceptación de usuario de la baseline `main` `5ffcd32` (`../releases/phase2-baseline.md`).
 > **Sólo en staging o test**, nunca en producción. Instancia instalada con `../operations/phase2-clean-install.md` o
 > actualizada con `../operations/phase2-upgrade.md`.
 > **SI-4 sigue apagado** (`si4_enabled = 0`): no se habilita para esta UAT (ver F-13).
@@ -90,7 +90,7 @@ Solicitudes de la UAT:
 | S-05 Otra entidad | manipular ids | `uat-sol2` (E2) abre `/request/{id}` de una solicitud de E1 y envía un POST de acción con su CSRF válido | 403/404 y sin efectos |
 | S-06 Error de integración | fallas controladas en staging | (a) Detener el SMTP o capturador de test y aprobar una solicitud. (b) `config:set --context=plugin:companysignature listen_workflow_events 0` y aprobar otra. (c) Solicitud B con SI-4 apagado (F-13) | (a) La aprobación **se confirma**: un fallo de envío no revierte el negocio (`notification.failed`). (b) La aprobación se registra y la evidencia queda **pendiente**. (c) "Inventario pendiente", sin bypass |
 | S-07 Recuperación posterior | volver a la normalidad | (a) Restaurar el SMTP. (b) `listen_workflow_events 1` y esperar la Acción automática `reconcile` (o `plugins:companysignature:reconcile`). (c) `plugins:companypurchasing:reconcile` | (a) La cola nativa de GLPI envía lo pendiente. (b) La evidencia se materializa **exactamente una vez**. (c) Termina sin anomalías nuevas; un `recepcion_pendiente` converge con `reconcileprojection` |
-| S-08 Derechos de Super-Admin en upgrade | sólo en una instancia **actualizada** con `../operations/phase2-upgrade.md` | Antes del upgrade, en **Administración → Perfiles → Super-Admin**, quitar un bit no esencial de `plugin_companyworkflow` (p. ej. RIGHT_DELEGATE) y de `plugin_companysignature` (p. ej. RIGHT_CONFIG). Ejecutar el upgrade. Volver a abrir el perfil | Los dos recortes **se conservan**: el upgrade no re-otorga todos los bits (workflow 0.6.1, signature 0.5.1). Los demás perfiles no cambian. Compras e Integraciones sí re-otorgan bits a Super-Admin (limitación conocida, `../releases/phase2-baseline.md` §6) |
+| S-08 Derechos de Super-Admin en upgrade | sólo en una instancia **actualizada** con `../operations/phase2-upgrade.md` | Antes del upgrade, en **Administración → Perfiles → Super-Admin**, quitar un bit no esencial de cada plugin: `plugin_companyworkflow` (p. ej. RIGHT_DELEGATE), `plugin_companysignature` (RIGHT_CONFIG), `plugin_companypurchasing` (VIEW_METRICS), `plugin_companyintegrations` (RIGHT_SI4) y `plugin_companyqr` (RIGHT_CONFIG). Ajustar también un perfil propio. Ejecutar el upgrade. Volver a abrir los perfiles | Todos los recortes **se conservan exactos**: ningún plugin re-otorga derechos retirados. `RIGHT_SI4` sigue ausente. El perfil propio no cambia |
 
 ## 3. Criterios de salida
 

@@ -1,6 +1,6 @@
 # ADR-0013: `companypurchasing` — solicitudes de compra sobre `companyworkflow`
 
-- **Estado:** Aceptado — **implementado** (Compras v1): P2D-1 PR #12 (`318632c`), P2D-2 PR #13, P2D-3 PR #16 y P2D-4 PR #20 (`6c7d994`); ver ADR-0018, ADR-0019 y ADR-0023. Baseline de Fase 2: `companypurchasing` 0.5.0 (`docs/releases/phase2-baseline.md`).
+- **Estado:** Aceptado — **implementado** (Compras v1): P2D-1 PR #12 (`318632c`), P2D-2 PR #13, P2D-3 PR #16 y P2D-4 PR #20 (`6c7d994`); ver ADR-0018, ADR-0019 y ADR-0023. derechos de Super-Admin preservados en upgrade en el PR #24 (`5ffcd32`). Baseline de Fase 2: `companypurchasing` 0.5.1 (`docs/releases/phase2-baseline.md`).
   *(Estado original: "Aceptado (diseño); implementación pendiente de aprobación humana".)*
 - **Fecha:** 2026-09-14
 - **Decisores:** Producto, Compras, finanzas, seguridad, plataforma

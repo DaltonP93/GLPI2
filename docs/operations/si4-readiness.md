@@ -1,6 +1,6 @@
 # SI-4 — readiness operativo (SIN activar)
 
-> **Estado en la baseline `74dc2c7`:** código completo (SI4-1 + SI4-2 + SI4-3; ADR-0020/0021/0022) y
+> **Estado en la baseline `5ffcd32`:** código completo (SI4-1 + SI4-2 + SI4-3; ADR-0020/0021/0022) y
 > **deshabilitado**.
 > - `si4_enabled = 0`.
 > - Sin Acción automática y sin CronTask.

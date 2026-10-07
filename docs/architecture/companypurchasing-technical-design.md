@@ -1,6 +1,6 @@
 # Diseño técnico — `companypurchasing`
 
-> **Estado (baseline de Fase 2, `main` `74dc2c7`):** **implementado** (Compras v1: PR #12, #13, #16 y #20; `companypurchasing` 0.5.0). Este documento es el **diseño previo** y se conserva
+> **Estado (baseline de Fase 2, `main` `5ffcd32`):** **implementado** (Compras v1: PR #12, #13, #16 y #20; `companypurchasing` 0.5.1 con el PR #24). Este documento es el **diseño previo** y se conserva
 > como registro: ante cualquier diferencia mandan el código y `../releases/phase2-baseline.md`.
 
 Complementa `../adr/ADR-0013-companypurchasing.md`. **Diseño, sin implementación.** Consume
