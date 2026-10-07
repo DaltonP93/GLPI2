@@ -21,6 +21,9 @@
  *   [SI4G-*]    SI4-2 (ADR-0021): activo GLPI + Infocom + asset_bridge (ver Si4GlpiSelftestScenarios).
  *   [SI4Q-*]    SI4-3 (ADR-0022): código companyqr + etiqueta + ack + finalizador, crash points, upgrade 0.4.0→0.5.0
  *               (ver Si4QrSelftestScenarios).
+ *   [UPGRADE]   0.6.1: install() ×2 NO re-otorga derechos que un administrador quitó (Super-Admin sin RIGHT_SI4 sigue sin
+ *               él; otro perfil EXACTO), configuración preservada, sagas/mappings/asset_bridge intactos
+ *               (ver UpgradeRightsSelftestScenarios).
  *
  * @license GPL-3.0-or-later
  */
@@ -56,6 +59,8 @@ final class SelftestCommand extends Command
     use Si4SelftestScenarios;
     use Si4GlpiSelftestScenarios;
     use Si4QrSelftestScenarios;
+    // 0.6.1: [UPGRADE] los derechos que ajustó un administrador sobreviven a install() (mismo selftest).
+    use UpgradeRightsSelftestScenarios;
 
     private int $failures = 0;
     private OutputInterface $out;
@@ -92,6 +97,7 @@ final class SelftestCommand extends Command
         $this->scenarioLabelConfig();
         $this->runSi4Scenarios();
         $this->runSi4gScenarios();
+        $this->scenarioUpgradeRights();
         $this->cleanup();
 
         if ($this->failures > 0) {

@@ -128,6 +128,8 @@ trait ApprovalSelftestScenarios
             $this->runDeliveryScenarios();
             // Al final: republica con quórum 2 (las instancias ya creadas conservan su versión).
             $this->scenarioQuorum();
+            // 0.5.1: install() ×2 sobre la instalación con datos NO re-otorga derechos que un administrador quitó.
+            $this->scenarioUpgradeRights();
         } finally {
             $this->p2d2Cleanup();
         }
