@@ -82,8 +82,15 @@ y docs que usaban `glpi:plugin:*`.
   scripts sueltos (`inc/includes.php` es sólo avisos de deprecación). Por eso la zona
   horaria de instancia, el formato numérico y la habilitación de correo son **pasos
   administrativos** documentados + verificados por prueba (según lo autorizado).
+  *(Precisión posterior, baseline de Fase 2: GLPI 11.0.8 **sí** incluye `config:set [--context=…] <clave> <valor>`.
+  Con él se configuran los plugins propios. Los pasos de localización siguen el procedimiento vigente de
+  `../operations/localization.md`.)*
 
 ## Cómo continuar (siguiente paso, con tu aprobación)
+
+> *(Histórico: este paso ya se hizo — `companyqr` es la Fase 1, PR #3. Estado actual: `../../README.md` y
+> `../releases/phase2-baseline.md`.)*
+
 Primer plugin funcional recomendado: **`companyqr`** (pequeño; valida instalación,
 permisos, hooks, i18n, auditoría, migraciones y compatibilidad de upgrade). Antes de
 programarlo se ejecuta el análisis native-first y se registra el ADR del módulo.

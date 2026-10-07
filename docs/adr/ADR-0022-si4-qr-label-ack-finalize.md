@@ -1,6 +1,7 @@
 # ADR-0022: SI-4 (incremento SI4-3) — código companyqr, etiqueta, ack del outbox y cierre de la saga
 
-- **Estado:** Propuesto (SI4-3 implementado; pendiente de revisión humana)
+- **Estado:** Aceptado — SI4-3 implementado y mergeado con aprobación humana: PR #19 (`9382ef2`). El worker SI-4 sigue **deshabilitado** (`si4_enabled = 0`): ver `docs/operations/si4-readiness.md`.
+  *(Estado original: "Propuesto (SI4-3 implementado; pendiente de revisión humana)".)*
 - **Fecha:** 2026-10-01
 - **Decisores:** Producto, TI/activos, seguridad, plataforma
 - **Módulo/área:** `plugins/companyintegrations` (0.4.0 → 0.5.0) y `plugins/companyqr` (0.2.0 → 0.3.0, API pública)

@@ -13,6 +13,12 @@ Relación entre módulos del documento maestro, su estrategia y dónde viven.
 | `companysignature` | Construir + Integrar | Historial/validación | Evidencia (hash/timestamp/PDF) + integración firma certificada |
 | `companyintegrations` | Integrar/Construir | Webhooks nativos | Conectores + mapeo/idempotencia |
 
+> Estado en la baseline de Fase 2 (`../releases/phase2-baseline.md`):
+> - **implementados:** `companyqr`, `companyworkflow`, `companysignature` (sólo aprobación interna / evidencia),
+>   `companyintegrations` (SI-1 + SI-4, worker deshabilitado) y `companypurchasing` v1;
+> - **esqueletos sin lógica:** `companyportal` y `companydashboard`;
+> - **no implementada:** la integración de firma certificada.
+
 ## Servicios desacoplados (`services/*`)
 | Servicio | Estrategia | Rol |
 |----------|-----------|-----|
@@ -21,10 +27,22 @@ Relación entre módulos del documento maestro, su estrategia y dónde viven.
 | `integration-hub` | Servicio | Normaliza webhooks, idempotencia, `correlation_id`, reintentos |
 
 ## Dependencias entre módulos
-- `companypurchasing` → usa `companyworkflow` (estados) y `companyqr` (alta de activo).
-- `companysignature` → invocado por `companypurchasing` (PDF/evidencia de aprobación).
-- `companyintegrations` ↔ `integration-hub` → eventos/webhooks hacia sistemas externos.
-- `ai-assistant` → lee conocimiento/tickets vía API REST v2 con ACL.
+
+Estado real del código en la baseline de Fase 2: ver `../releases/phase2-baseline.md` §4. Ningún `setup.php`
+declara dependencias; todas son de runtime y fallan cerradas.
+
+- `companypurchasing` → requiere `companyworkflow` ≥ 0.6.0 (estados y aprobaciones) y `companysignature` (versiones,
+  evidencia y PDF).
+  - Lee **opcionalmente** `companyintegrations` (`InventoryLinkApi`, sólo lectura).
+  - **No** usa `companyqr` directamente.
+- `companysignature` → requiere `companyworkflow`: escucha sus eventos y lee su ledger. Compras lo invoca para el PDF
+  y la evidencia de aprobación.
+- `companyintegrations` (worker SI-4) → requiere `companypurchasing` (`PurchasingIntegrationApi`) y `companyqr` ≥ 0.3.0
+  (`CompanyQrApi`: código y etiqueta del activo). SI-1 sólo habla con Snipe-IT por HTTP.
+- `companyqr` → independiente: hooks sobre activos nativos.
+- *(Planificado, sin implementar)* `companyintegrations` ↔ `integration-hub`: eventos y webhooks hacia sistemas
+  externos. `integration-hub` es un esqueleto.
+- *(Planificado, sin implementar)* `ai-assistant` → lee conocimiento y tickets vía API REST v2 con ACL.
 
 ## Roadmap (resumen)
 `Fase 0 Fundaciones` → `Fase 1 ITSM/Activos` → `Fase 2 Compras` →

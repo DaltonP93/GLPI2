@@ -1,5 +1,8 @@
 # Arquitectura de integración Snipe-IT ↔ GLPI ↔ GLPI2
 
+> **Estado (baseline de Fase 2, `main` `5ffcd32`):** SI-1 **implementado** (PR #6) y SI-4 **implementado** (PR #17, #18 y #19) con el worker **deshabilitado** (`si4_enabled = 0`). Este documento es el **diseño previo** y se conserva
+> como registro: ante cualquier diferencia mandan el código y `../releases/phase2-baseline.md`.
+
 **Diseño, sin implementación.** Integración **sólo por API** (Snipe-IT AGPL-3.0; sin copiar
 código, sin DB-a-DB, sin tocar cores). Complementa ADR-0015 y los docs native-first / ownership /
 `asset_bridge`.

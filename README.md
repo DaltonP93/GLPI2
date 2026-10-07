@@ -12,7 +12,7 @@ pruebas** para una plataforma empresarial construida **sobre GLPI**.
 
 ```
 docs/            Arquitectura, ADRs, especificación funcional, API, workflows, seguridad, operaciones
-plugins/         Plugins propios de GLPI (companyqr implementado; el resto, esqueletos)
+plugins/         Plugins propios de GLPI (5 implementados; companyportal y companydashboard: esqueletos)
 services/        Servicios desacoplados (IA, WhatsApp, Integration Hub)
 infra/           Docker/Compose, nginx, backup, monitoreo, scripts
 tests/           e2e, smoke y suite de actualización (upgrade)
@@ -42,15 +42,44 @@ Los plugins de GLPI se distribuyen bajo **GPL-3.0-or-later** (compatible con GLP
 Ver el encabezado de licencia declarado en cada `plugins/*/setup.php`.
 
 ---
-Estado del proyecto: **Fase 2 en curso** — motor de workflow e integración de activos
-implementados; firma electrónica interna es lo siguiente.
+## Estado del proyecto — baseline de Fase 2
+
+La Fase 2 está **completa en código** sobre `main` `5ffcd32`. Es una baseline **candidata**:
+- sin tag ni GitHub Release;
+- pendiente de la UAT en staging.
+
+El detalle, las versiones reales y el orden de instalación están en
+[`docs/releases/phase2-baseline.md`](docs/releases/phase2-baseline.md).
 
 ```
-Fase 0  — Fundaciones .................... ✅
-Fase 1  — companyqr ..................... ✅
-Fase 2  — Arquitectura .................. ✅
-Fase 2A — companyworkflow ............... ✅
-Fase 2B — SI-1 / Snipe integration ...... ✅
-Fase 2C — companysignature .............. ⏭️ siguiente
-Fase 2D — companypurchasing ............. pendiente
+Fase 0  — Fundaciones ........................ ✅
+Fase 1  — companyqr .......................... ✅
+Fase 2  — Arquitectura ....................... ✅
+Fase 2A — companyworkflow .................... ✅
+Fase 2B — SI-1 / Snipe read integration ...... ✅
+Fase 2C — companysignature ................... ✅  (firma interna / evidencia; NO firma certificada)
+Fase 2D — companypurchasing v1 ............... ✅
+SI4-1   — Snipe create/reconcile ............. ✅
+SI4-2   — GLPI asset + Infocom + bridge ...... ✅
+SI4-3   — QR + label + ACK/finalize .......... ✅  (código listo; worker DESHABILITADO: si4_enabled = 0)
 ```
+
+| Plugin | Versión (`setup.php`) | Estado |
+|--------|-----------------------|--------|
+| `companyqr` | 0.3.0 | implementado |
+| `companyworkflow` | 0.6.1 | implementado |
+| `companysignature` | 0.5.1 | implementado (firma interna / evidencia) |
+| `companyintegrations` | 0.6.1 | implementado (SI-1 + SI4-1/2/3; worker SI-4 deshabilitado) |
+| `companypurchasing` | 0.5.1 | implementado (v1) |
+| `companyportal` | 0.1.0 | **esqueleto / no implementado** |
+| `companydashboard` | 0.1.0 | **esqueleto / no implementado** |
+
+**No implementado todavía (sin fase comprometida):** `companyportal`, `companydashboard`,
+servicios `ai-assistant` / `whatsapp-adapter` / `integration-hub` (esqueletos), firma digital
+certificada. Ninguno de estos figura como completado.
+
+Operación de la baseline:
+[instalación limpia](docs/operations/phase2-clean-install.md) ·
+[upgrade](docs/operations/phase2-upgrade.md) ·
+[estado de SI-4](docs/operations/si4-readiness.md) ·
+[UAT](docs/testing/phase2-uat.md).

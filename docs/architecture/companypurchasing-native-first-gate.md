@@ -1,5 +1,8 @@
 # Gate native-first — `companypurchasing` (Fase 2D)
 
+> **Estado (baseline de Fase 2, `main` `5ffcd32`):** aprobado e **implementado** (P2D-1 a P2D-4: PR #12, #13, #16 y #20). Este documento es el **diseño previo** y se conserva
+> como registro: ante cualquier diferencia mandan el código y `../releases/phase2-baseline.md`.
+
 > **Estado:** GATE de decisiones — **diseño, SIN implementación.** Fija el alcance de
 > `companypurchasing` v1 antes de escribir una sola línea de lógica. Se detiene aquí para
 > **aprobación humana final**.
@@ -303,7 +306,7 @@ PurchasingIntegrationApi
 
 ### Flujo (resumen)
 ```
-companypurchasing v1                                   companyintegrations SI-4 (FUTURO, fuera de este gate)
+companypurchasing v1                                   companyintegrations SI-4 (fuera de este gate; hoy SI4-1/2/3, worker deshabilitado)
 ────────────────────                                   ─────────────────────────────────────────────────
 receive (atómico §5): por cada receipt_unit (uuid):    claim/list por PurchasingIntegrationApi:
   inserta 1 fila ..._inventory_outbox                    getHandoff(uuid) → Snipe create → asset_bridge
@@ -424,11 +427,13 @@ monetaria** (sin float; PYG `scale=0`; serialización como string exacto); mapeo
 
 ## Cumplimiento (Definition of Done del gate)
 - **No implementación:** este gate no añade lógica; `plugins/companypurchasing` sigue siendo esqueleto.
+  *(Histórico: el gate se aprobó y Compras v1 está implementado — ver el estado al inicio.)*
 - **Regla 0:** sólo APIs/hooks nativos + los tres plugins propios ya mergeados; **core intacto**.
 - **Reconciliado con código real** (§0): `evidence_ref = {document_versions_id, document_version,
   content_sha256}`; PDF on-demand vía `composePdf` (sin Cron); límite SI-1 read-only ratificado.
 - **Sin hardcode** de personas/umbrales/SLA/departamentos.
 - **Pendiente de aprobación humana FINAL** para pasar a implementación (Fase 2D → 2E).
+  *(Histórico: aprobado; implementado en P2D-1 a P2D-4.)*
 
 ## Próximo paso (tras aprobación)
 Recién con este gate aprobado se abriría la implementación de `companypurchasing` v1 (modelo + servicios +

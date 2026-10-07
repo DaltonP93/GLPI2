@@ -39,13 +39,21 @@ Idioma **Español**, zona horaria `America/Asuncion`, moneda **PYG**, fecha
 
 ## 6. Correo y cron
 - Correo: SMTP por entorno (DEV usa MailHog).
-- Cron: servicio `cron` ejecuta `front/cron.php` periódicamente.
+- Cron: `front/cron.php` cada minuto, **como el usuario del servidor web** (`www-data`). GLPI 11.0.8 rechaza
+  ejecutarlo como root. Ver la limitación del servicio `cron` del stack Docker en
+  `../releases/phase2-baseline.md` §6.
 
 ## 7. Plugins propios
 ```bash
 docker compose exec -u www-data glpi php bin/console plugin:install  --username=glpi <plugin>
 docker compose exec -u www-data glpi php bin/console plugin:activate <plugin>
 ```
+
+- **Orden** (dependencias de runtime): `companyworkflow` → `companysignature` → `companyqr` →
+  `companypurchasing` → `companyintegrations`.
+- **Procedimiento completo de la baseline de Fase 2:**
+  - instalación nueva: `phase2-clean-install.md`;
+  - instalación existente: `phase2-upgrade.md`.
 
 ## 8. Verificación
 - `tests/smoke/run-smoke.sh`

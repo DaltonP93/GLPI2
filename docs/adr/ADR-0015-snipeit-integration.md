@@ -1,6 +1,7 @@
 # ADR-0015: Integración con Snipe-IT (gestión física de activos)
 
-- **Estado:** Aceptado (diseño); implementación pendiente de aprobación humana.
+- **Estado:** Aceptado — **implementado** (SI-1, read-only): Fase 2B, PR #6 (`1be127e`). SI-4 continúa en ADR-0020/0021/0022. Derechos preservados en upgrade en el PR #24 (`5ffcd32`). Baseline de Fase 2: `companyintegrations` 0.6.1 (`docs/releases/phase2-baseline.md`).
+  *(Estado original: "Aceptado (diseño); implementación pendiente de aprobación humana".)*
 - **Fecha:** 2026-09-14
 - **Decisores:** Producto, TI/activos, seguridad, legal (licencia), plataforma
 - **Área:** integración GLPI ↔ Snipe-IT vía `plugins/companyintegrations` + `services/integration-hub`

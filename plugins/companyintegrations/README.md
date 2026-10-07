@@ -10,6 +10,11 @@ Plugin propio de la **Plataforma GLPI Modular**.
   GLPI + Infocom + `asset_bridge`, ADR-0021) y SI4-3 (código companyqr + etiqueta + ack + cierre, ADR-0022). Worker
   **deshabilitado por defecto** y sin Acción automática. Desde 0.6.0 expone además `Api\InventoryLinkApi` (READ-ONLY)
   para que Compras muestre la fase SI-4 y el activo vinculado de cada unidad (ver CHANGELOG).
+- **Sin UI propia:**
+  - la configuración se cambia con `php bin/console config:set --context=plugin:companyintegrations <clave> <valor>`;
+  - los mapeos todavía no tienen interfaz operativa.
+
+  Requisitos para habilitar SI-4: `../../docs/operations/si4-readiness.md`.
 
 ## Regla 0 y licencia
 No modifica el core de GLPI **ni el de Snipe-IT**. **Snipe-IT es AGPL-3.0 → integración SÓLO por
@@ -40,8 +45,10 @@ Compras · no ejecuta la saga SI-4 · no toca la DB de Snipe · no copia código
 reconciliación, conflictos y timestamps en **tablas propias**.
 
 ## Alcance SI4-1 (ADR-0020) — compra recibida → activo en Snipe-IT
-Primer incremento de SI-4. **Todavía NO** crea/modifica activos core de GLPI, ni crea Infocom, ni invoca companyqr,
-ni genera etiquetas, ni implementa la entrega (P2D-4).
+Primer incremento de SI-4: llega hasta el activo en Snipe-IT (`SNIPE_CREATED`).
+- Por sí solo no crea ni modifica activos core de GLPI, no crea Infocom, no invoca companyqr ni genera etiquetas.
+- Eso lo agregan SI4-2 y SI4-3 (secciones siguientes).
+- La entrega es de Compras (P2D-4).
 
 **Ownership:** `companypurchasing` es dueño del hecho de negocio recibido (`receipt_unit_uuid`, `unit_cost`, outbox).
 SI-4 es dueño de la saga de integración, de la escritura por API en Snipe y del mapping/bridge.

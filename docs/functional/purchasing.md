@@ -24,6 +24,21 @@ monto final.
 APROBADA · RECHAZADA · DEVUELTA · EN_COMPRA · RECIBIDA · ENTREGADA · CERRADA · CANCELADA`.
 El circuito completo (máquina de estados + matriz de transiciones) vive en `companyworkflow`.
 
+> **Implementación v1 (baseline de Fase 2):** estados reales del motor (ADR-0018, ADR-0019 y ADR-0023).
+>
+> | Funcional | Motor (`companyworkflow`) | Notas |
+> |---|---|---|
+> | BORRADOR | `DRAFT` | |
+> | ENVIADA | — | No es un estado del motor. Es la proyección local `domain_state = PENDING` ("Enviada"), transitoria hasta que el motor crea la instancia. Una instancia que no se crea la reporta el reconcile (`sin_instancia`) |
+> | PENDIENTE_JEFE_AREA | `PENDING_AREA_HEAD` | |
+> | EN_COMPRAS | `PURCHASING` | |
+> | PENDIENTE_GERENCIA_FINANCIERA | `PENDING_FINANCE` | |
+> | APROBADA / RECHAZADA / DEVUELTA | `APPROVED` / `REJECTED` / `RETURNED` | |
+> | EN_COMPRA | `IN_PURCHASE` | |
+> | — | `PARTIALLY_RECEIVED` | agregado en P2D-3 |
+> | RECIBIDA / ENTREGADA / CERRADA | `RECEIVED` / `DELIVERED` / `CLOSED` | La entrega parcial vive en las unidades, no en el motor |
+> | CANCELADA | `CANCELLED` | La transición `cancel` existe en la definición; la UI v1 no la expone |
+
 ## Reglas
 - **Aprobadores por rol/grupo/entidad**, nunca personas hardcodeadas; montos/umbrales por config.
 - Cada transición registra usuario, rol, fecha/hora, comentario, estado anterior/nuevo, canal y

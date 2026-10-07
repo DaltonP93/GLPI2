@@ -29,18 +29,18 @@ las cosas son como son.
 | [0008](ADR-0008-ai-architecture.md) | Arquitectura del asistente de IA (RAG) | Aceptado |
 | [0009](ADR-0009-whatsapp-omnichannel.md) | WhatsApp y omnicanalidad | Aceptado |
 | [0010](ADR-0010-observability-audit-metrics.md) | Observabilidad, auditoría y métricas | Aceptado |
-| [0011](ADR-0011-companyqr.md) | `companyqr` — QR por activo, ficha segura y reporte (Fase 1) | Aceptado (implementado) |
-| [0012](ADR-0012-companyworkflow.md) | `companyworkflow` — motor de workflow configurable y reusable (Fase 2) | Aceptado (diseño) |
-| [0013](ADR-0013-companypurchasing.md) | `companypurchasing` — solicitudes de compra sobre el motor (Fase 2) | Aceptado (diseño) |
-| [0014](ADR-0014-companysignature.md) | `companysignature` — aprobación electrónica interna y evidencia (Fase 2) | Aceptado (diseño) |
-| [0015](ADR-0015-snipeit-integration.md) | Integración con Snipe-IT (gestión física de activos, API-only) | Aceptado (diseño) |
+| [0011](ADR-0011-companyqr.md) | `companyqr` — QR por activo, ficha segura y reporte (Fase 1) | Aceptado (implementado, PR #3) |
+| [0012](ADR-0012-companyworkflow.md) | `companyworkflow` — motor de workflow configurable y reusable (Fase 2) | Aceptado (implementado, PR #5) |
+| [0013](ADR-0013-companypurchasing.md) | `companypurchasing` — solicitudes de compra sobre el motor (Fase 2) | Aceptado (implementado, PR #12/#13/#16/#20) |
+| [0014](ADR-0014-companysignature.md) | `companysignature` — aprobación electrónica interna y evidencia (Fase 2) | Aceptado (implementado, PR #10) |
+| [0015](ADR-0015-snipeit-integration.md) | Integración con Snipe-IT (gestión física de activos, API-only) | Aceptado (implementado SI-1, PR #6) |
 | [0016](ADR-0016-timezone-init-verification.md) | Inicialización y verificación de timezones (separar configuración de verificación) | Aceptado |
 | [0017](ADR-0017-glpi-security-key-hardening.md) | Pre-provisión de `glpicrypt.key` (workaround del bug `kernel.secret` de GLPI 11) | Aceptado |
-| [0018](ADR-0018-companypurchasing-approvals.md) | `companypurchasing` P2D-2 — circuito de aprobación sobre workflow + firma | Propuesto |
-| [0019](ADR-0019-companypurchasing-receiving.md) | `companypurchasing` P2D-3 — recepción física, costo por unidad y handoff a SI-4 | Propuesto |
-| [0020](ADR-0020-si4-snipe-remote-identity-saga.md) | SI-4 (SI4-1) — identidad remota determinista en Snipe-IT y saga durable por unidad | Propuesto |
-| [0021](ADR-0021-si4-glpi-asset-infocom-bridge.md) | SI-4 (SI4-2) — resolver-o-crear el activo GLPI, Infocom y AssetBridge en la misma saga | Propuesto |
-| [0022](ADR-0022-si4-qr-label-ack-finalize.md) | SI-4 (SI4-3) — código companyqr, etiqueta, ack del outbox y cierre de la saga | Propuesto |
-| [0023](ADR-0023-companypurchasing-delivery-ui.md) | `companypurchasing` P2D-4 — entrega, cierre, UI, bandejas, notificaciones nativas y métricas | Propuesto |
+| [0018](ADR-0018-companypurchasing-approvals.md) | `companypurchasing` P2D-2 — circuito de aprobación sobre workflow + firma | Aceptado (implementado, PR #13) |
+| [0019](ADR-0019-companypurchasing-receiving.md) | `companypurchasing` P2D-3 — recepción física, costo por unidad y handoff a SI-4 | Aceptado (implementado, PR #16) |
+| [0020](ADR-0020-si4-snipe-remote-identity-saga.md) | SI-4 (SI4-1) — identidad remota determinista en Snipe-IT y saga durable por unidad | Aceptado (implementado, PR #17; worker deshabilitado) |
+| [0021](ADR-0021-si4-glpi-asset-infocom-bridge.md) | SI-4 (SI4-2) — resolver-o-crear el activo GLPI, Infocom y AssetBridge en la misma saga | Aceptado (implementado, PR #18; worker deshabilitado) |
+| [0022](ADR-0022-si4-qr-label-ack-finalize.md) | SI-4 (SI4-3) — código companyqr, etiqueta, ack del outbox y cierre de la saga | Aceptado (implementado, PR #19; worker deshabilitado) |
+| [0023](ADR-0023-companypurchasing-delivery-ui.md) | `companypurchasing` P2D-4 — entrega, cierre, UI, bandejas, notificaciones nativas y métricas | Aceptado (implementado, PR #20) |
 
 > Plantilla para nuevos ADR: [`adr-template.md`](adr-template.md).

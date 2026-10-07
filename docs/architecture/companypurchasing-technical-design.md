@@ -1,5 +1,8 @@
 # Diseño técnico — `companypurchasing`
 
+> **Estado (baseline de Fase 2, `main` `5ffcd32`):** **implementado** (Compras v1: PR #12, #13, #16 y #20; `companypurchasing` 0.5.1 con el PR #24). Este documento es el **diseño previo** y se conserva
+> como registro: ante cualquier diferencia mandan el código y `../releases/phase2-baseline.md`.
+
 Complementa `../adr/ADR-0013-companypurchasing.md`. **Diseño, sin implementación.** Consume
 `companyworkflow` (no duplica motor) y reutiliza nativo (Supplier/Budget/Infocom/Document/
 Entity/Group/Notif/Log/TCPDF/API/Webhooks). **Sin tocar el core.**
@@ -118,6 +121,8 @@ Derivables de `..._requests`/`..._items`/`..._events`/instancia de workflow, por
   **ahorro estimado** (estimado − final).
 - Todas segmentables por entidad y rango de fechas; expuestas por API/tablero (Fase futura
   `companydashboard`), no por acceso directo a tablas core.
+  *(Baseline de Fase 2: las métricas de Compras se implementaron en P2D-4, en la página propia `/metrics` con
+  `RIGHT_VIEW_METRICS` — ADR-0023. `companydashboard` sigue siendo un esqueleto.)*
 
 ## Plan de tests (tras aprobación)
 - **Unit:** numeración (unicidad/reintento); cálculo de `amount_estimated` (suma de líneas);

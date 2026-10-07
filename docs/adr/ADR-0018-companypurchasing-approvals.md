@@ -1,6 +1,7 @@
 # ADR-0018: `companypurchasing` P2D-2 — circuito de aprobación sobre `companyworkflow` + `companysignature`
 
-- **Estado:** Propuesto (implementado en P2D-2; pendiente de revisión humana)
+- **Estado:** Aceptado — implementado en P2D-2 y mergeado con aprobación humana: PR #13 (`5180d87`).
+  *(Estado original: "Propuesto (implementado en P2D-2; pendiente de revisión humana)".)*
 - **Fecha:** 2026-09-24
 - **Decisores:** Producto, Compras, finanzas, seguridad, plataforma
 - **Módulo/área:** `plugins/companypurchasing` (+ ajuste genérico en `plugins/companysignature`)

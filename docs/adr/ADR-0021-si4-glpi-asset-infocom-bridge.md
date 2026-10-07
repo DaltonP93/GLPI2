@@ -1,6 +1,7 @@
 # ADR-0021: SI-4 (incremento SI4-2) — resolver-o-crear el activo GLPI, Infocom y AssetBridge en la misma saga
 
-- **Estado:** Propuesto (SI4-2 implementado; pendiente de revisión humana)
+- **Estado:** Aceptado — SI4-2 implementado y mergeado con aprobación humana: PR #18 (`ff61c17`). El worker SI-4 sigue **deshabilitado** (`si4_enabled = 0`): ver `docs/operations/si4-readiness.md`.
+  *(Estado original: "Propuesto (SI4-2 implementado; pendiente de revisión humana)".)*
 - **Fecha:** 2026-09-30
 - **Decisores:** Producto, TI/activos, finanzas, seguridad, plataforma
 - **Módulo/área:** `plugins/companyintegrations` (0.3.0 → 0.4.0)
